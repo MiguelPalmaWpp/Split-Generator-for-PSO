@@ -1,0 +1,197 @@
+# ── Statistical helpers ───────────────────────────────────────
+
+min_consec_weeks <- function(x) {
+  r <- rle(x > 0)
+  if (any(r$values)) min(r$lengths[r$values]) else 0
+}
+
+max_no_outlier <- function(x) {
+  nz <- x[x > 0]
+  if (!length(nz)) return(0)
+  q3 <- quantile(nz, .75, na.rm = TRUE)
+  max(nz[nz <= q3 + 1.5 * IQR(nz, na.rm = TRUE)], na.rm = TRUE)
+}
+
+# ── splits_summary ────────────────────────────────────────────
+# Expects data already filtered to ONE cross-section by process_channel.
+# For all_transformed: passed as-is (1 row/period).
+# For all_RAGs: passed pre-filtered to first geo+product (1 row/period).
+# Stats are then straightforward — no aggregation needed here.
+
+splits_summary <- function(df, metric = "activity") {
+  
+  df <- as.data.frame(df)
+  if (nrow(df) == 0) return(tibble())
+  
+  period_col <- if ("Period" %in% names(df)) df[["Period"]] else NULL
+  num_cols   <- names(df)[sapply(df, is.numeric)]
+  if (!length(num_cols)) return(tibble())
+  
+  d     <- df[, num_cols, drop = FALSE]
+  grand <- max(sum(d, na.rm = TRUE), 1)
+  
+  nm <- switch(tolower(metric),
+               activity = c("total_activity", "pct_total_activity", "num_weeks_activity"),
+               cost     = c("total_cost",     "pct_total_cost",     "num_weeks_cost"),
+               spend    = c("total_spend",    "pct_total_spend",    "num_weeks_spend"),
+               c("total",          "pct_total",          "num_weeks")
+  )
+  
+  result <- data.frame(
+    
+    VariableSplit = num_cols,
+    
+    # Sum over all periods for this one cross-section
+    v1 = sapply(num_cols, \(col) sum(d[[col]], na.rm = TRUE)),
+    
+    # Share of total within this cross-section
+    v2 = sapply(num_cols, \(col)
+                round(sum(d[[col]], na.rm = TRUE) / grand * 100, 4)),
+    
+    # Distinct periods with activity > 0
+    v3 = sapply(num_cols, \(col) {
+      x      <- d[[col]]
+      active <- !is.na(x) & x > 0
+      if (!is.null(period_col)) length(unique(period_col[active]))
+      else sum(active)
+    }),
+    
+    # Consecutive active periods — correct because data is 1 row/period
+    min_consecutive_weeks = sapply(num_cols, \(col)
+                                   min_consec_weeks(d[[col]])),
+    
+    sd = sapply(num_cols, \(col) {
+      nz <- d[[col]][!is.na(d[[col]]) & d[[col]] > 0]
+      if (length(nz) < 2) NA_real_ else sd(nz)
+    }),
+    
+    min = sapply(num_cols, \(col) {
+      nz <- d[[col]][!is.na(d[[col]]) & d[[col]] > 0]
+      if (!length(nz)) NA_real_ else min(nz)
+    }),
+    
+    quartile_1 = sapply(num_cols, \(col) {
+      nz <- d[[col]][!is.na(d[[col]]) & d[[col]] > 0]
+      if (!length(nz)) NA_real_ else as.numeric(quantile(nz, .25))
+    }),
+    
+    median = sapply(num_cols, \(col) {
+      nz <- d[[col]][!is.na(d[[col]]) & d[[col]] > 0]
+      if (!length(nz)) NA_real_ else as.numeric(median(nz))
+    }),
+    
+    quartile_3 = sapply(num_cols, \(col) {
+      nz <- d[[col]][!is.na(d[[col]]) & d[[col]] > 0]
+      if (!length(nz)) NA_real_ else as.numeric(quantile(nz, .75))
+    }),
+    
+    max_no_outlier = sapply(num_cols, \(col) max_no_outlier(d[[col]])),
+    max            = sapply(num_cols, \(col) max(d[[col]], na.rm = TRUE)),
+    
+    stringsAsFactors = FALSE
+  )
+  
+  result$max_index <- result$max / result$v1
+  
+  col_order <- c("VariableSplit", "v1", "v2", "v3", "max_index",
+                 "min_consecutive_weeks", "sd", "min",
+                 "quartile_1", "median", "quartile_3", "max_no_outlier", "max")
+  result <- result[, col_order]
+  names(result)[names(result) == "v1"] <- nm[1]
+  names(result)[names(result) == "v2"] <- nm[2]
+  names(result)[names(result) == "v3"] <- nm[3]
+  
+  as_tibble(result[order(-result[[nm[2]]]), ])
+}
+
+# ── Robust Period parser ───────────────────────────────────────
+
+parse_period_robust <- function(x) {
+  if (inherits(x, c("Date", "IDate")))      return(as.Date(x))
+  if (inherits(x, c("POSIXct", "POSIXlt"))) return(as.Date(x))
+  if (is.numeric(x))                         return(as.Date(x, origin = "1970-01-01"))
+  
+  x <- trimws(as.character(x))
+  
+  fmts <- c(
+    "%Y-%m-%d", "%Y/%m/%d",
+    "%m/%d/%y", "%m/%d/%Y",
+    "%d/%m/%y", "%d/%m/%Y",
+    "%m-%d-%y", "%m-%d-%Y",
+    "%d-%m-%y", "%d-%m-%Y",
+    "%d.%m.%y", "%d.%m.%Y",
+    "%Y%m%d"
+  )
+  
+  for (fmt in fmts) {
+    result <- suppressWarnings(as.Date(x, format = fmt))
+    if (!anyNA(result) && all(as.integer(format(result, "%Y")) > 1900))
+      return(result)
+  }
+  
+  best <- NULL; best_valid <- 0L
+  for (fmt in fmts) {
+    result <- suppressWarnings(as.Date(x, format = fmt))
+    valid  <- sum(!is.na(result) & as.integer(format(result, "%Y")) > 1900,
+                  na.rm = TRUE)
+    if (valid > best_valid) { best_valid <- valid; best <- result }
+  }
+  
+  if (!is.null(best)) {
+    n_fail <- sum(is.na(best))
+    if (n_fail > 0)
+      warning(sprintf(
+        "parse_period_robust: %d date(s) could not be parsed. First raw: '%s'",
+        n_fail, x[1]
+      ))
+    return(best)
+  }
+  
+  warning("parse_period_robust: no format matched. First raw: '", x[1], "'")
+  as.Date(rep(NA_character_, length(x)))
+}
+
+# ── File reader ───────────────────────────────────────────────
+
+read_all_transformed <- function(path, ext) {
+  
+  raw <- if (tolower(ext) == "parquet") {
+    arrow::read_parquet(path)
+  } else if (tolower(ext) %in% c("xlsx", "xls")) {
+    read_excel(path)
+  } else {
+    data.table::fread(
+      file         = path,
+      sep          = "auto",
+      encoding     = "UTF-8",
+      data.table   = FALSE,
+      colClasses   = "character",
+      showProgress = FALSE
+    )
+  }
+  
+  miss <- setdiff(REQUIRED_COLS, names(raw))
+  if (length(miss)) stop("Missing columns: ", paste(miss, collapse = ", "))
+  
+  raw <- raw[, REQUIRED_COLS]
+  
+  message("  [read_all_transformed] Raw Period sample: '",
+          raw$Period[!is.na(raw$Period)][1], "'")
+  
+  raw %>%
+    mutate(
+      Period        = parse_period_robust(Period),
+      VariableValue = as.numeric(
+        gsub(",", "", gsub(" ", "", as.character(VariableValue)))
+      )
+    ) %>%
+    arrange(Geography, Product, VariableName, Period)
+}
+
+# ── String utility ────────────────────────────────────────────
+
+parse_text_lines <- function(x) {
+  strsplit(x %||% "", "\n")[[1]] %>%
+    trimws() %>%
+    (\(v) v[nchar(v) > 0])()
+}

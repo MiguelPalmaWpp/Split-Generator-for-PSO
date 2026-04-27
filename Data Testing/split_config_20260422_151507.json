@@ -1,0 +1,16 @@
+{
+  "National Social": {
+    "channel_name": "National Social",
+    "data_source": "all_rags",
+    "model_variables": ["National Paid Social  --p -20230424", "National Paid Social  --p 20230501-"],
+    "break_dates": "2023-04-24",
+    "varname_include": "National Paid Social",
+    "varname_exclude": "Local",
+    "campaign_exclude": [],
+    "outlet_exclude": [],
+    "creative_exclude": [],
+    "split_columns": ["VariableName", "Outlet", "Campaign", "Creative"],
+    "activity_keyword": "Impressions",
+    "spend_keyword": "Spend"
+  }
+}

@@ -1,0 +1,13 @@
+name: SplitGenerator
+title: SplitGenerator
+username: miguelangelprw
+account: miguelangelprw
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 17121576
+bundleId: 11860797
+url: https://miguelangelprw.shinyapps.io/SplitGenerator/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE
+ignoredFiles: Data Testing

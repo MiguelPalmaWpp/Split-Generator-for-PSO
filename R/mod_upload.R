@@ -1,4 +1,6 @@
-# ── Upload Module ─────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════
+# R/mod_upload.R
+# ══════════════════════════════════════════════════════════════════
 
 mod_upload_ui <- function(id) {
   ns <- NS(id)
@@ -58,7 +60,7 @@ mod_upload_ui <- function(id) {
         full_screen = TRUE,
         card_header("Preview"),
         navset_card_underline(
-          id = ns("preview_tabs"),      #  ID for programmatic switching
+          id = ns("preview_tabs"),
           
           nav_panel(
             title = tagList(icon("table"), " all_transformed"),
@@ -89,7 +91,6 @@ mod_upload_ui <- function(id) {
 }
 
 # ── Server ────────────────────────────────────────────────────
-
 mod_upload_server <- function(id) {
   moduleServer(id, function(input, output, session) {
     
@@ -103,30 +104,42 @@ mod_upload_server <- function(id) {
       channels_rois   = NULL
     )
     
+    # ── Helper: validate required columns ─────────────────────
+    validate_required_cols <- function(df, file_label) {
+      missing_cols <- setdiff(REQUIRED_COLS, names(df))
+      if (length(missing_cols) > 0) {
+        showNotification(
+          paste0(file_label, " is missing required columns: ",
+                 paste(missing_cols, collapse = ", ")),
+          type     = "error",
+          duration = 15
+        )
+        return(FALSE)
+      }
+      TRUE
+    }
+    
     # ── all_transformed (national — single geography) ─────────
     observeEvent(input$file_at, {
       req(input$file_at)
       ext <- tools::file_ext(input$file_at$name)
       withProgress(message = "Loading all_transformed...", {
         tryCatch({
-          rv$all_transformed <- read_all_transformed(
-            input$file_at$datapath, ext
-          )
+          df <- read_all_transformed(input$file_at$datapath, ext)
+          if (!validate_required_cols(df, "all_transformed")) return()
+          rv$all_transformed <- df
           gc()
-          showNotification("✅ all_transformed loaded.",
-                           type = "message")
+          showNotification("all_transformed loaded.", type = "message")
         }, error = \(e) showNotification(
-          e$message, type = "error", duration = 10)
-        )
+          e$message, type = "error", duration = 10))
       })
     })
     
     # Auto-switch tab after all_transformed loads
     observeEvent(rv$all_transformed, {
       req(rv$all_transformed)
-      nav_select(id      = "preview_tabs",
-                 selected = "tab_at",
-                 session  = session)
+      nav_select(id = "preview_tabs", selected = "tab_at",
+                 session = session)
     }, ignoreNULL = TRUE)
     
     # ── all_RAGs (geographic — multiple geographies) ──────────
@@ -135,23 +148,21 @@ mod_upload_server <- function(id) {
       ext <- tools::file_ext(input$file_all_rags$name)
       withProgress(message = "Loading all_RAGs...", {
         tryCatch({
-          rv$all_rags <- read_all_transformed(
-            input$file_all_rags$datapath, ext
-          )
+          df <- read_all_transformed(input$file_all_rags$datapath, ext)
+          if (!validate_required_cols(df, "all_RAGs")) return()
+          rv$all_rags <- df
           gc()
-          showNotification("✅ all_RAGs loaded.", type = "message")
+          showNotification("all_RAGs loaded.", type = "message")
         }, error = \(e) showNotification(
-          e$message, type = "error", duration = 10)
-        )
+          e$message, type = "error", duration = 10))
       })
     })
     
     # Auto-switch tab after all_RAGs loads
     observeEvent(rv$all_rags, {
       req(rv$all_rags)
-      nav_select(id      = "preview_tabs",
-                 selected = "tab_rags",
-                 session  = session)
+      nav_select(id = "preview_tabs", selected = "tab_rags",
+                 session = session)
     }, ignoreNULL = TRUE)
     
     # ── AnalyticalDataset ─────────────────────────────────────
@@ -160,28 +171,23 @@ mod_upload_server <- function(id) {
       ext <- tools::file_ext(input$file_analytical$name)
       
       tryCatch({
-        
         df <- if (tolower(ext) == "rdata") {
           e <- new.env()
           load(input$file_analytical$datapath, envir = e)
           get(ls(e)[1], envir = e)
-          
         } else if (tolower(ext) %in% c("xlsx", "xls")) {
-          # Excel: read_excel already detects types correctly
           read_excel(input$file_analytical$datapath)
-          
         } else {
-          # CSV: fread reads everything as character
-          # We fix types below
           data.table::fread(
             input$file_analytical$datapath,
-            data.table   = FALSE,
-            colClasses   = "character",
-            showProgress = FALSE
+            data.table    = FALSE,
+            colClasses    = "character",
+            showProgress  = FALSE
           )
         }
         
         df <- df[, !duplicated(names(df), fromLast = TRUE)]
+        
         if (tolower(ext) %in% c("csv", "tsv", "txt")) {
           id_cols <- c("Geography", "Product", "BP_Year", "Period")
           df <- df %>%
@@ -189,20 +195,16 @@ mod_upload_server <- function(id) {
               -any_of(id_cols),
               ~ {
                 converted <- suppressWarnings(as.numeric(.))
-                # Convert only if at least 80% of non-NA values parse as numeric
                 non_na    <- !is.na(.)
                 if (sum(non_na) == 0) return(.)
-                pct_numeric <- sum(!is.na(converted) & non_na) / sum(non_na)
-                if (pct_numeric >= 0.8) converted else .
+                pct_num <- sum(!is.na(converted) & non_na) / sum(non_na)
+                if (pct_num >= 0.8) converted else .
               }
             ))
         }
         
-        # ── Parse Period to Date ──────────────────────────────────
-        if ("Period" %in% names(df)) {
-          df <- df %>%
-            mutate(Period = parse_period_robust(Period))
-        }
+        if ("Period" %in% names(df))
+          df <- df %>% mutate(Period = parse_period_robust(Period))
         
         rv$analytical     <- as_tibble(df) %>% ungroup()
         rv$analytical_rag <- rv$analytical %>%
@@ -217,7 +219,6 @@ mod_upload_server <- function(id) {
                  format(nrow(rv$analytical), big.mark = ","), " rows"),
           type = "message"
         )
-        
       }, error = \(e) showNotification(
         paste("AnalyticalDataset error:", e$message),
         type = "error", duration = 15
@@ -240,16 +241,11 @@ mod_upload_server <- function(id) {
           mutate(Analytical_varname =
                    str_replace_all(Analytical_varname, "_NA", ""))
         gc()
-        showNotification("✅ ModelDetails loaded.",
-                         type = "message")
-        
-        nav_select(id      = "preview_tabs",
-                   selected = "tab_details",
-                   session  = session)
-        
+        showNotification("ModelDetails loaded.", type = "message")
+        nav_select(id = "preview_tabs", selected = "tab_details",
+                   session = session)
       }, error = \(e) showNotification(
-        e$message, type = "error", duration = 10)
-      )
+        e$message, type = "error", duration = 10))
     })
     
     # ── ROIs by Channel ───────────────────────────────────────
@@ -266,15 +262,11 @@ mod_upload_server <- function(id) {
             showProgress = FALSE
           )
         gc()
-        showNotification("✅ ROIs loaded.", type = "message")
-        
-        nav_select(id      = "preview_tabs",
-                   selected = "tab_rois",
-                   session  = session)
-        
+        showNotification("ROIs loaded.", type = "message")
+        nav_select(id = "preview_tabs", selected = "tab_rois",
+                   session = session)
       }, error = \(e) showNotification(
-        e$message, type = "error", duration = 10)
-      )
+        e$message, type = "error", duration = 10))
     })
     
     # ── Upload status strip ───────────────────────────────────
@@ -316,19 +308,16 @@ mod_upload_server <- function(id) {
             if (loaded) "#5B9BD5" else "#dee2e6", ";",
             "background:", if (loaded) "#EBF3FB" else "#f8f9fa", ";",
             "border-radius:6px; padding:8px 12px;",
-            "display:flex; align-items:center; gap:8px;"
-          ),
+            "display:flex; align-items:center; gap:8px;"),
           tags$div(icon(f$icon, style = paste0(
             "font-size:18px; color:",
             if (loaded) "#5B9BD5" else "#adb5bd", ";"))),
           tags$div(
             tags$div(
-              tags$strong(f$label,
-                          style = "font-size:11px; color:#333;"),
+              tags$strong(f$label, style = "font-size:11px; color:#333;"),
               if (!is.null(f$note))
                 tags$span(paste0(" (", f$note, ")"),
-                          style = "font-size:10px; color:#adb5bd;")
-            ),
+                          style = "font-size:10px; color:#adb5bd;")),
             if (loaded)
               tags$small(paste0("✓ ", f$rows, " rows"),
                          style = "color:#5B9BD5; font-weight:500;")
@@ -340,7 +329,7 @@ mod_upload_server <- function(id) {
       
       do.call(layout_columns,
               c(list(col_widths = c(3, 3, 2, 2, 2),
-                     style      = "margin-bottom:12px;"),
+                     style = "margin-bottom:12px;"),
                 cards))
     })
     
@@ -350,33 +339,35 @@ mod_upload_server <- function(id) {
       d_rags <- rv$all_rags
       if (is.null(d_nat) && is.null(d_rags)) return(NULL)
       
-      d_ref <- d_nat %||% d_rags  # reference for dates + variable names
+      d_ref <- d_nat %||% d_rags
       
-      # ── Geography: prefer analytical, fall back to all_rags ──────
       n_geo <- if (!is.null(rv$analytical)) {
         n_distinct(rv$analytical$Geography)
       } else if (!is.null(rv$all_rags)) {
         n_distinct(rv$all_rags$Geography)
-      } else "—"
+      } else " — "
       
-      # ── Product: prefer analytical, fall back to all_rags ────────
       n_prod <- if (!is.null(rv$analytical)) {
         n_distinct(rv$analytical$Product)
       } else if (!is.null(rv$all_rags)) {
         n_distinct(rv$all_rags$Product)
-      } else "—"
+      } else " — "
       
       kpis <- list(
-        list(icon = "location-dot",  label = "Geographies",   value = n_geo),
-        list(icon = "box",           label = "Products",       value = n_prod),
-        list(icon = "tv",            label = "Variable Names",
+        list(icon = "location-dot", label = "Geographies",   value = n_geo),
+        list(icon = "box",          label = "Products",      value = n_prod),
+        list(icon = "tv",           label = "Variable Names",
              value = if (!is.null(d_ref))
-               format(n_distinct(d_ref$VariableName), big.mark = ",") else "—"),
+               format(n_distinct(d_ref$VariableName), big.mark = ",")
+             else " — "),
         list(icon = "calendar-days", label = "Date Range",
              value = if (!is.null(d_ref))
-               paste0(format(min(d_ref$Period)), " → ", format(max(d_ref$Period))) else "—"),
+               paste0(format(min(d_ref$Period)), " → ",
+                      format(max(d_ref$Period)))
+             else " — "),
         list(icon = "clock",         label = "Total Weeks",
-             value = if (!is.null(d_ref)) n_distinct(d_ref$Period) else "—")
+             value = if (!is.null(d_ref)) n_distinct(d_ref$Period)
+             else " — ")
       )
       
       kpi_cards <- lapply(kpis, function(k) {
@@ -386,7 +377,8 @@ mod_upload_server <- function(id) {
           icon(k$icon, style = "color:#5B9BD5; font-size:20px;"),
           tags$div(
             tags$strong(k$value,
-                        style = "font-size:17px; color:#2c3e50; display:block; margin-top:6px;"),
+                        style = "font-size:17px; color:#2c3e50;
+                               display:block; margin-top:6px;"),
             tags$small(k$label,
                        style = "color:#6c757d; font-size:11px;")
           )
@@ -408,8 +400,7 @@ mod_upload_server <- function(id) {
         style = "color:#5B9BD5; font-weight:500; margin-bottom:8px;",
         icon("circle-check"),
         sprintf(" %s rows — national (single geography)",
-                format(nrow(rv$all_transformed), big.mark = ","))
-      )
+                format(nrow(rv$all_transformed), big.mark = ",")))
     })
     
     output$rags_summary <- renderUI({
@@ -421,8 +412,7 @@ mod_upload_server <- function(id) {
         style = "color:#5B9BD5; font-weight:500; margin-bottom:8px;",
         icon("circle-check"),
         sprintf(" %s rows — %d geographies",
-                format(nrow(rv$all_rags), big.mark = ","), n_geos)
-      )
+                format(nrow(rv$all_rags), big.mark = ","), n_geos))
     })
     
     # ── Preview tables ────────────────────────────────────────
@@ -443,36 +433,29 @@ mod_upload_server <- function(id) {
             lengthMenu      = c(25, 50, 100, 200, 500),
             searchHighlight = TRUE,
             initComplete    = dt_blue_callback,
-            # Muestra info de filas totales
             language        = list(
-              info = "Mostrando _START_ a _END_ de _TOTAL_ filas"
-            )
+              info = "Showing _START_ to _END_ of _TOTAL_ rows")
           ),
           rownames = FALSE,
-          filter   = "top"   
+          filter   = "top"
         )
-        
-      }, server = TRUE)  
+      }, server = TRUE)
     }
     
-    output$preview_at   <- make_preview_dt(
-      \() rv$all_transformed,
-      "Upload all_transformed to preview"
-    )
-    output$preview_rags <- make_preview_dt(
-      \() rv$all_rags,
-      "Upload all_RAGs to preview"
-    )
+    output$preview_at   <- make_preview_dt(\() rv$all_transformed,
+                                           "Upload all_transformed to preview")
+    output$preview_rags <- make_preview_dt(\() rv$all_rags,
+                                           "Upload all_RAGs to preview")
     
     output$preview_details <- renderDT({
       if (is.null(rv$details))
         return(datatable(
           data.frame(Message = "Upload ModelDetails to preview"),
           options  = list(initComplete = dt_blue_callback),
-          rownames = FALSE
-        ))
+          rownames = FALSE))
       rv$details %>%
-        datatable(options = list(scrollX = TRUE, pageLength = 25,
+        datatable(options = list(scrollX      = TRUE,
+                                 pageLength   = 25,
                                  initComplete = dt_blue_callback),
                   rownames = FALSE)
     })
@@ -482,10 +465,10 @@ mod_upload_server <- function(id) {
         return(datatable(
           data.frame(Message = "Upload ROIs by Channel to preview"),
           options  = list(initComplete = dt_blue_callback),
-          rownames = FALSE
-        ))
+          rownames = FALSE))
       rv$channels_rois %>%
-        datatable(options = list(scrollX = TRUE, pageLength = 25,
+        datatable(options = list(scrollX      = TRUE,
+                                 pageLength   = 25,
                                  initComplete = dt_blue_callback),
                   rownames = FALSE)
     })

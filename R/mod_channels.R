@@ -10,8 +10,6 @@ mod_channels_ui <- function(id) {
     # ── Left: Channel list ───────────────────────────────────────
     card(
       card_header("Channel List"),
-      
-      # Add new channel
       div(
         style = "display:flex; gap:8px; margin-bottom:10px;",
         textInput(ns("new_name"), NULL,
@@ -22,8 +20,6 @@ mod_channels_ui <- function(id) {
                      style = "white-space:nowrap; align-self:flex-end;
                             margin-bottom:1px;")
       ),
-      
-      # Save / Load Config
       div(
         style = paste0("display:flex; gap:6px; margin-bottom:10px;",
                        "padding:8px 0;",
@@ -65,8 +61,6 @@ mod_channels_ui <- function(id) {
           )
         )
       ),
-      
-      # Channel cards (scrollable)
       div(
         style = "max-height:calc(100vh - 290px);
                overflow-y:auto; padding-right:4px;",
@@ -133,49 +127,51 @@ mod_channels_server <- function(id, data) {
           "padding:10px 12px; margin-bottom:8px;",
           "cursor:pointer; transition:all 0.15s; position:relative;"
         ),
-        actionButton(
-          ns(paste0("del_", make.names(nm))),
+        # Delete button (uses setInputValue — no accumulating observer)
+        tags$span(
           icon("xmark"),
-          class = "btn btn-link btn-sm p-0",
           style = paste0(
             "position:absolute;top:6px;right:8px;",
-            "color:#adb5bd;font-size:11px;",
-            "min-height:0;min-width:0;")
+            "color:#adb5bd;font-size:11px;cursor:pointer;",
+            "padding:2px 4px;"),
+          onclick = paste0(
+            "Shiny.setInputValue('", ns("delete_nm"), "','",
+            nm, "',{priority:'event'});")
         ),
-        actionButton(
-          ns(paste0("sel_", make.names(nm))),
-          label = tagList(
-            div(
-              style = "display:flex;align-items:center;
-                     gap:6px;margin-bottom:5px;padding-right:20px;",
-              tags$span(nm,
-                        style = paste0(
-                          "font-weight:600;font-size:13px;",
-                          "color:#2c3e50;overflow:hidden;",
-                          "text-overflow:ellipsis;",
-                          "white-space:nowrap;max-width:140px;")),
-              src_badge
-            ),
-            div(
-              style = "display:flex;gap:10px;flex-wrap:wrap;",
-              tags$span(
-                icon("layer-group",
-                     style = "font-size:10px;color:#8a9bb0;"),
-                tags$span(
-                  if (n_var == 0) "No variables"
-                  else paste0(n_var, " var", if (n_var > 1) "s" else ""),
-                  style = "font-size:11px;color:#6c757d;")
-              ),
-              tags$span(
-                icon("arrow-pointer",
-                     style = "font-size:10px;color:#8a9bb0;"),
-                tags$span(act_kw,
-                          style = "font-size:11px;color:#6c757d;")
-              )
-            )
+        # Select area (uses setInputValue — no accumulating observer)
+        tags$div(
+          style = "cursor:pointer;",
+          onclick = paste0(
+            "Shiny.setInputValue('", ns("select_nm"), "','",
+            nm, "',{priority:'event'});"),
+          div(
+            style = "display:flex;align-items:center;
+                   gap:6px;margin-bottom:5px;padding-right:20px;",
+            tags$span(nm,
+                      style = paste0(
+                        "font-weight:600;font-size:13px;",
+                        "color:#2c3e50;overflow:hidden;",
+                        "text-overflow:ellipsis;",
+                        "white-space:nowrap;max-width:140px;")),
+            src_badge
           ),
-          class = "btn btn-link p-0 text-start w-100",
-          style = "text-decoration:none;border:none;background:transparent;"
+          div(
+            style = "display:flex;gap:10px;flex-wrap:wrap;",
+            tags$span(
+              icon("layer-group",
+                   style = "font-size:10px;color:#8a9bb0;"),
+              tags$span(
+                if (n_var == 0) "No variables"
+                else paste0(n_var, " var", if (n_var > 1) "s" else ""),
+                style = "font-size:11px;color:#6c757d;")
+            ),
+            tags$span(
+              icon("arrow-pointer",
+                   style = "font-size:10px;color:#8a9bb0;"),
+              tags$span(act_kw,
+                        style = "font-size:11px;color:#6c757d;")
+            )
+          )
         )
       )
     }
@@ -214,25 +210,21 @@ mod_channels_server <- function(id, data) {
       updateTextInput(session, "new_name", value = "")
     })
     
-    # ── Dynamic select / delete ───────────────────────────────
-    observe({
-      walk(names(rv$channels), function(nm) {
-        observeEvent(
-          input[[paste0("sel_", make.names(nm))]],
-          { rv$selected <- nm },
-          ignoreInit = TRUE
-        )
-        observeEvent(
-          input[[paste0("del_", make.names(nm))]],
-          {
-            rv$channels[[nm]] <- NULL
-            if (identical(rv$selected, nm))
-              rv$selected <- names(rv$channels)[1]
-          },
-          ignoreInit = TRUE
-        )
-      })
-    })
+    # ── FIX 1: Single observer for select — no accumulation ───
+    observeEvent(input$select_nm, {
+      req(nzchar(input$select_nm %||% ""))
+      if (input$select_nm %in% names(rv$channels))
+        rv$selected <- input$select_nm
+    }, ignoreInit = TRUE)
+    
+    # ── FIX 1: Single observer for delete — no accumulation ───
+    observeEvent(input$delete_nm, {
+      req(nzchar(input$delete_nm %||% ""))
+      nm <- input$delete_nm
+      rv$channels[[nm]] <- NULL
+      if (identical(rv$selected, nm))
+        rv$selected <- names(rv$channels)[1]
+    }, ignoreInit = TRUE)
     
     observeEvent(rv$selected, {
       cfg <- rv$channels[[rv$selected]]
@@ -269,13 +261,16 @@ mod_channels_server <- function(id, data) {
         normalized <- lapply(names(loaded), function(nm) {
           cfg <- loaded[[nm]]
           cfg$model_variables  <- unlist(cfg$model_variables  %||% "")
-          cfg$break_dates      <- unlist(cfg$break_dates      %||% character(0))
+          cfg$break_dates      <- unlist(cfg$break_dates      %||%
+                                           character(0))
           for (f in c("varname_include", "varname_exclude",
+                      "geography_exclude",
                       "campaign_exclude", "outlet_exclude",
                       "creative_exclude", "split_columns"))
             cfg[[f]] <- unlist(cfg[[f]] %||% character(0))
           cfg$channel_name     <- cfg$channel_name     %||% nm
-          cfg$data_source      <- cfg$data_source      %||% "all_transformed"
+          cfg$data_source      <- cfg$data_source      %||%
+            "all_transformed"
           cfg$activity_keyword <- cfg$activity_keyword %||% "Clicks"
           cfg$spend_keyword    <- cfg$spend_keyword    %||% "Spend"
           cfg$saved_merges     <- cfg$saved_merges     %||% list()
@@ -285,10 +280,12 @@ mod_channels_server <- function(id, data) {
         rv$channels <- normalized
         rv$selected <- names(normalized)[1]
         showNotification(
-          paste0("Config loaded: ", length(normalized), " channel(s) restored."),
+          paste0("Config loaded: ", length(normalized),
+                 " channel(s) restored."),
           type = "message", duration = 5)
       }, error = function(e) {
-        showNotification(paste("Error loading config:", conditionMessage(e)),
+        showNotification(paste("Error loading config:",
+                               conditionMessage(e)),
                          type = "error", duration = 10)
       })
     })
@@ -312,7 +309,8 @@ mod_channels_server <- function(id, data) {
       cfg <- rv$channels[[rv$selected]]
       n   <- max(1L, length(cfg$model_variables))
       
-      sel_act   <- if (cfg$activity_keyword %in% c("Clicks", "Impressions"))
+      sel_act   <- if (cfg$activity_keyword %in%
+                       c("Clicks", "Impressions"))
         cfg$activity_keyword else "Other"
       sel_spend <- if (cfg$spend_keyword %in% c("Cost", "Spend"))
         cfg$spend_keyword else "Other"
@@ -326,7 +324,6 @@ mod_channels_server <- function(id, data) {
             "padding:10px 18px; margin-bottom:14px;",
             "display:flex; align-items:center;",
             "gap:20px; flex-wrap:wrap;"),
-          # Data Source
           div(
             style = "display:flex; align-items:center; gap:8px;",
             tags$span(
@@ -338,12 +335,12 @@ mod_channels_server <- function(id, data) {
                 radioButtons(ns("data_source"), NULL,
                              choices  = c("National"   = "all_transformed",
                                           "Geographic" = "all_rags"),
-                             selected = cfg$data_source %||% "all_transformed",
+                             selected = cfg$data_source %||%
+                               "all_transformed",
                              inline   = TRUE))
           ),
           div(style = "width:1px; height:28px; background:#dee2e6;
                      flex-shrink:0;"),
-          # Activity
           div(
             style = "display:flex; align-items:center; gap:8px;",
             tags$span(
@@ -353,13 +350,13 @@ mod_channels_server <- function(id, data) {
                                  white-space:nowrap;")),
             div(style = "width:130px;",
                 selectInput(ns("activity_radio"), NULL,
-                            choices  = c("Clicks", "Impressions", "Other"),
+                            choices  = c("Clicks", "Impressions",
+                                         "Other"),
                             selected = sel_act, width = "100%")),
             uiOutput(ns("activity_other_ui"))
           ),
           div(style = "width:1px; height:28px; background:#dee2e6;
                      flex-shrink:0;"),
-          # Spend
           div(
             style = "display:flex; align-items:center; gap:8px;",
             tags$span(
@@ -375,103 +372,114 @@ mod_channels_server <- function(id, data) {
           )
         ),
         
-        # ══ Row 2: Split Dimensions (arriba) ══════════════════
-        card(
-          card_header(
-            div(
-              style = "display:flex; align-items:center; gap:10px;",
-              tags$span(icon("arrows-up-down"), " Split Dimensions"),
-              tags$small("Drag to set order — left = excluded",
-                         style = "color:#8a9bb0; font-size:11px;")
-            )
-          ),
-          bucket_list(
-            header      = NULL,
-            group_name  = ns("split_bucket"),
-            orientation = "horizontal",
-            add_rank_list(
-              text     = "Available",
-              labels   = setdiff(SPLIT_CHOICES, cfg$split_columns),
-              input_id = ns("splits_available")
-            ),
-            add_rank_list(
-              text     = "Split Order",
-              labels   = cfg$split_columns,
-              input_id = ns("splits_selected")
-            )
-          )
-        ),
-        
-        # ══ Row 3: Model Variables + Filters ══════════════════
+        # ══ Row 2: Split Dimensions (col 5) + Filters (col 7) ═
         layout_columns(
-          col_widths = c(7, 5),
+          col_widths = c(5, 7),
           
           card(
-            style = "min-height:380px;",
             card_header(
               div(
-                style = "display:flex; align-items:center;
-                       justify-content:space-between;",
-                tags$span(icon("layer-group"),
-                          " Model Variables",
-                          tags$strong("& Time Breaks")),
-                div(
-                  style = "display:flex; align-items:center; gap:8px;",
-                  tags$small("Number of variables:",
-                             style = "color:#6c757d; font-size:11px;
-                                    white-space:nowrap;"),
-                  div(style = "width:68px;",
-                      numericInput(ns("ch_n_vars"), NULL,
-                                   value = n, min = 1, max = 5, step = 1))
-                )
+                style = "display:flex; align-items:center; gap:10px;",
+                tags$span(icon("arrows-up-down"), " Split Dimensions"),
+                tags$small("Drag to set order — left = excluded",
+                           style = "color:#8a9bb0; font-size:11px;")
               )
             ),
-            uiOutput(ns("mv_inputs"))
+            bucket_list(
+              header      = NULL,
+              group_name  = ns("split_bucket"),
+              orientation = "horizontal",
+              add_rank_list(
+                text     = "Available",
+                labels   = setdiff(SPLIT_CHOICES, cfg$split_columns),
+                input_id = ns("splits_available")
+              ),
+              add_rank_list(
+                text     = "Split Order",
+                labels   = cfg$split_columns,
+                input_id = ns("splits_selected")
+              )
+            )
           ),
           
           card(
-            style = "min-height:380px;",
             card_header(tags$span(icon("filter"), " Filters")),
             div(
-              style = "display:grid; grid-template-columns:1fr 1fr; gap:8px;",
+              style = "display:grid;
+                     grid-template-columns:1fr 1fr; gap:8px;",
               div(
                 tags$label("VarName — contains", class = "filter-label"),
                 textAreaInput(ns("varname_include"), NULL,
                               value = paste(cfg$varname_include %||%
-                                              character(0), collapse = "\n"),
-                              rows = 4, placeholder = "e.g. Audio\nOLV")
+                                              character(0),
+                                            collapse = "\n"),
+                              rows = 2, placeholder = "e.g. Audio\nOLV")
               ),
               div(
                 tags$label("VarName — exclude", class = "filter-label"),
                 textAreaInput(ns("varname_exclude"), NULL,
                               value = paste(cfg$varname_exclude,
                                             collapse = "\n"),
-                              rows = 4, placeholder = "e.g. Impressions\nLocal")
+                              rows = 2,
+                              placeholder = "e.g. Impressions\nLocal")
+              ),
+              div(
+                tags$label("Geography — exclude",
+                           class = "filter-label"),
+                textAreaInput(ns("geography_exclude"), NULL,
+                              value = paste(cfg$geography_exclude %||%
+                                              character(0),
+                                            collapse = "\n"),
+                              rows = 2, placeholder = "e.g. Germany")
               ),
               div(
                 tags$label("Campaign — exclude", class = "filter-label"),
                 textAreaInput(ns("campaign_exclude"), NULL,
                               value = paste(cfg$campaign_exclude,
                                             collapse = "\n"),
-                              rows = 3, placeholder = "e.g. Pmax")
+                              rows = 2, placeholder = "e.g. Pmax")
               ),
               div(
                 tags$label("Outlet — exclude", class = "filter-label"),
                 textAreaInput(ns("outlet_exclude"), NULL,
                               value = paste(cfg$outlet_exclude %||%
-                                              character(0), collapse = "\n"),
-                              rows = 3, placeholder = "e.g. TV")
+                                              character(0),
+                                            collapse = "\n"),
+                              rows = 2, placeholder = "e.g. TV")
               ),
               div(
-                style = "grid-column: 1 / -1;",
                 tags$label("Creative — exclude", class = "filter-label"),
                 textAreaInput(ns("creative_exclude"), NULL,
                               value = paste(cfg$creative_exclude %||%
-                                              character(0), collapse = "\n"),
-                              rows = 3, placeholder = "e.g. 15s")
+                                              character(0),
+                                            collapse = "\n"),
+                              rows = 2, placeholder = "e.g. 15s")
               )
             )
           )
+        ),
+        
+        # ══ Row 3: Model Variables (full width) ══════════════
+        card(
+          card_header(
+            div(
+              style = "display:flex; align-items:center;
+                     justify-content:space-between;",
+              tags$span(icon("layer-group"),
+                        " Model Variables",
+                        tags$strong("& Time Breaks")),
+              div(
+                style = "display:flex; align-items:center; gap:8px;",
+                tags$small("Number of variables:",
+                           style = "color:#6c757d; font-size:11px;
+                                  white-space:nowrap;"),
+                div(style = "width:68px;",
+                    numericInput(ns("ch_n_vars"), NULL,
+                                 value = n, min = 1, max = 5, step = 1))
+              )
+            )
+          ),
+          uiOutput(ns("mv_inputs"))
         ),
         
         # ══ Save button ════════════════════════════════════════
@@ -527,8 +535,9 @@ mod_channels_server <- function(id, data) {
                 style = "flex-shrink:0;",
                 tags$label(
                   paste0("Break after Var ", i),
-                  style = "font-size:11px; font-weight:600; color:#6c757d;
-                         display:block; margin-bottom:4px;"),
+                  style = "font-size:11px; font-weight:600;
+                         color:#6c757d; display:block;
+                         margin-bottom:4px;"),
                 dateInput(
                   ns(paste0("bd_", i)), NULL,
                   value = if (i <= length(cfg$break_dates))
@@ -592,49 +601,58 @@ mod_channels_server <- function(id, data) {
         trimws(input$spend_other %||% "Spend")
       else input$spend_radio %||% "Spend"
       
-      # ── FIX: preservar saved_merges al guardar ────────────
-      existing_merges <- rv$channels[[rv$selected]]$saved_merges %||% list()
+      existing_merges <-
+        rv$channels[[rv$selected]]$saved_merges %||% list()
       
       rv$channels[[rv$selected]] <- list(
-        channel_name     = rv$selected,
-        data_source      = input$data_source %||% "all_transformed",
-        model_variables  = mvars,
-        break_dates      = brdates,
-        varname_include  = parse_lines(input$varname_include),
-        varname_exclude  = parse_lines(input$varname_exclude),
-        campaign_exclude = parse_lines(input$campaign_exclude),
-        outlet_exclude   = parse_lines(input$outlet_exclude),
-        creative_exclude = parse_lines(input$creative_exclude),
-        split_columns    = input$splits_selected %||%
+        channel_name      = rv$selected,
+        data_source       = input$data_source %||% "all_transformed",
+        model_variables   = mvars,
+        break_dates       = brdates,
+        varname_include   = parse_lines(input$varname_include),
+        varname_exclude   = parse_lines(input$varname_exclude),
+        geography_exclude = parse_lines(input$geography_exclude),
+        campaign_exclude  = parse_lines(input$campaign_exclude),
+        outlet_exclude    = parse_lines(input$outlet_exclude),
+        creative_exclude  = parse_lines(input$creative_exclude),
+        split_columns     = input$splits_selected %||%
           c("VariableName", "Campaign"),
-        activity_keyword = if (nchar(activity_kw)) activity_kw else "Clicks",
-        spend_keyword    = if (nchar(spend_kw)) spend_kw else "Spend",
-        saved_merges     = existing_merges   # ← preservar siempre
+        activity_keyword  = if (nchar(activity_kw)) activity_kw
+        else "Clicks",
+        spend_keyword     = if (nchar(spend_kw)) spend_kw
+        else "Spend",
+        saved_merges      = existing_merges
       )
       
       showNotification(paste("Saved:", rv$selected), type = "message")
     })
     
     # ── Return ────────────────────────────────────────────────
-    reactive(rv$channels)
+    list(
+      channels      = reactive(rv$channels),
+      update_merges = function(nm, merges) {
+        rv$channels[[nm]]$saved_merges <- merges
+      }
+    )
   })
 }
 
 # ── Default config ────────────────────────────────────────────
 default_channel_config <- function(nm) {
   list(
-    channel_name     = nm,
-    data_source      = "all_transformed",
-    model_variables  = "",
-    break_dates      = character(0),
-    varname_include  = character(0),
-    varname_exclude  = character(0),
-    campaign_exclude = character(0),
-    outlet_exclude   = character(0),
-    creative_exclude = character(0),
-    split_columns    = c("VariableName", "Campaign"),
-    activity_keyword = "Clicks",
-    spend_keyword    = "Spend",
-    saved_merges     = list()
+    channel_name      = nm,
+    data_source       = "all_transformed",
+    model_variables   = "",
+    break_dates       = character(0),
+    varname_include   = character(0),
+    varname_exclude   = character(0),
+    geography_exclude = character(0),
+    campaign_exclude  = character(0),
+    outlet_exclude    = character(0),
+    creative_exclude  = character(0),
+    split_columns     = c("VariableName", "Campaign"),
+    activity_keyword  = "Clicks",
+    spend_keyword     = "Spend",
+    saved_merges      = list()
   )
 }

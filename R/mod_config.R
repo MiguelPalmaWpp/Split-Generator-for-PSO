@@ -1,4 +1,6 @@
-# ── Config Module ─────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════
+# R/mod_config.R
+# ══════════════════════════════════════════════════════════════════
 
 mod_config_ui <- function(id) {
   ns <- NS(id)
@@ -7,16 +9,17 @@ mod_config_ui <- function(id) {
     
     # ── Left: Parameters ──────────────────────────────────────
     card(
-      card_header(" Global Parameters"),
-      textInput(ns("update_label"),      "Update Label",      value = "Last52w"),
-      dateInput(ns("start_report_date"), "Start Report Date", value = "2024-09-02"),
-      dateInput(ns("end_report_date"),   "End Report Date",   value = "2025-08-25"),
+      card_header("Global Parameters"),
+      textInput(ns("update_label"), "Update Label", value = "Last52w"),
+      dateInput(ns("start_report_date"), "Start Report Date",
+                value = "2024-09-02"),
+      dateInput(ns("end_report_date"), "End Report Date",
+                value = "2025-08-25"),
       hr(),
       uiOutput(ns("date_info")),
       hr(),
       
-      # ── Cross-sectional structure ────────────────────────
-      tags$strong(" Cross-Sectional Structure",
+      tags$strong("Cross-Sectional Structure",
                   style = "font-size:13px; color:#333;"),
       tags$p(class = "text-muted small mb-2",
              "Dimensions that define each observation in your model"),
@@ -36,11 +39,11 @@ mod_config_ui <- function(id) {
       uiOutput(ns("kpi_cards")),
       layout_columns(
         col_widths = c(8, 4),
-        card(card_header("Period Timeline"),        uiOutput(ns("timeline"))),
+        card(card_header("Period Timeline"),       uiOutput(ns("timeline"))),
         card(card_header("Column Suffix Preview"), uiOutput(ns("suffix_preview")))
       ),
       card(
-        card_header(" Date Spine — with type classification"),
+        card_header("Date Spine — with type classification"),
         DTOutput(ns("date_table"))
       )
     )
@@ -48,11 +51,10 @@ mod_config_ui <- function(id) {
 }
 
 # ── Server ────────────────────────────────────────────────────
-
 mod_config_server <- function(id, data) {
   moduleServer(id, function(input, output, session) {
     
-    ns <- session$ns    #  required for renderUI id namespacing
+    ns <- session$ns
     
     # ── Available columns from analytical ────────────────────
     avail_cols <- reactive({
@@ -69,22 +71,19 @@ mod_config_server <- function(id, data) {
       
       if (n == 1) {
         selectizeInput(
-          ns("cross_col_1"),
-          "Cross-section column",
+          ns("cross_col_1"), "Cross-section column",
           choices  = cols,
           selected = if ("Geography" %in% cols) "Geography" else cols[1]
         )
       } else {
         tagList(
           selectizeInput(
-            ns("cross_col_1"),
-            "Cross-section 1",
+            ns("cross_col_1"), "Cross-section 1",
             choices  = cols,
             selected = if ("Geography" %in% cols) "Geography" else cols[1]
           ),
           selectizeInput(
-            ns("cross_col_2"),
-            "Cross-section 2",
+            ns("cross_col_2"), "Cross-section 2",
             choices  = cols,
             selected = if ("Product" %in% cols) "Product" else cols[2]
           )
@@ -124,7 +123,7 @@ mod_config_server <- function(id, data) {
       req(dates_df())
       d <- dates_df()
       tags$p(class = "text-info small", icon("calendar"),
-             sprintf(" %d periods  |  %s → %s",
+             sprintf(" %d periods | %s → %s",
                      nrow(d),
                      format(min(d$Period)),
                      format(max(d$Period))))
@@ -141,6 +140,7 @@ mod_config_server <- function(id, data) {
       
       alerts <- list()
       
+      # ── Date validations ─────────────────────────────────
       if (start <= min_d)
         alerts <- c(alerts, list(
           div(class = "alert alert-warning p-2 mb-1",
@@ -184,6 +184,30 @@ mod_config_server <- function(id, data) {
                      " week(s). Minimum recommended: 4."))
         ))
       
+      # ── FIX 12: Cross-section column validation ───────────
+      a <- data()$analytical
+      if (!is.null(a)) {
+        n          <- as.integer(input$n_cross %||% 1)
+        cols_check <- if (n == 1)
+          input$cross_col_1 %||% "Geography"
+        else
+          c(input$cross_col_1 %||% "Geography",
+            input$cross_col_2 %||% "Product")
+        
+        missing_cc <- setdiff(cols_check, names(a))
+        if (length(missing_cc) > 0) {
+          alerts <- c(alerts, list(
+            div(class = "alert alert-danger p-2 mb-1",
+                style = "font-size:12px;",
+                icon("circle-xmark"),
+                paste0(" Cross-section column(s) not found",
+                       " in AnalyticalDataset: ",
+                       paste(missing_cc, collapse = ", ")))
+          ))
+        }
+      }
+      
+      # ── Result ────────────────────────────────────────────
       if (!length(alerts))
         div(class = "alert alert-success p-2",
             style = "font-size:12px;",
@@ -205,11 +229,11 @@ mod_config_server <- function(id, data) {
              color = "#5B9BD5", bg = "#EBF3FB"),
         list(icon  = "circle",
              label = "Non-Focus Weeks",
-             value = paste0(ps$nonfocus, "  (", ps$pct_nf, "%)"),
+             value = paste0(ps$nonfocus, " (", ps$pct_nf, "%)"),
              color = "#6c757d", bg = "#f8f9fa"),
         list(icon  = "circle-dot",
              label = "Focus Weeks",
-             value = paste0(ps$focus, "  (", ps$pct_focus, "%)"),
+             value = paste0(ps$focus, " (", ps$pct_focus, "%)"),
              color = "#5B9BD5", bg = "#EBF3FB"),
         list(icon  = "calendar-day",
              label = "Model Start",
@@ -219,16 +243,17 @@ mod_config_server <- function(id, data) {
       
       do.call(layout_columns,
               c(list(col_widths = c(3, 3, 3, 3),
-                     style      = "margin-bottom:12px;"),
+                     style = "margin-bottom:12px;"),
                 lapply(kpis, function(k) {
                   div(
                     style = paste0(
                       "background:", k$bg, ";",
                       "border-left:3px solid ", k$color, ";",
-                      "border-radius:8px; padding:14px 10px; text-align:center;"
-                    ),
+                      "border-radius:8px; padding:14px 10px;",
+                      "text-align:center;"),
                     icon(k$icon,
-                         style = paste0("color:", k$color, "; font-size:18px;")),
+                         style = paste0("color:", k$color,
+                                        "; font-size:18px;")),
                     tags$div(
                       tags$strong(k$value,
                                   style = "font-size:15px; color:#2c3e50;
@@ -247,72 +272,68 @@ mod_config_server <- function(id, data) {
       start <- as.Date(input$start_report_date)
       
       tagList(
-        # Bar
         div(
           style = paste0(
             "width:100%; display:flex; border-radius:6px;",
-            "overflow:hidden; height:38px; margin-bottom:10px;"
-          ),
+            "overflow:hidden; height:38px; margin-bottom:10px;"),
+          
           if (ps$pct_nf > 0)
-            div(
-              style = paste0(
-                "width:", ps$pct_nf, "%; background:#adb5bd;",
-                "display:flex; align-items:center; justify-content:center;",
-                "color:white; font-size:11px; font-weight:600;"
-              ),
-              if (ps$pct_nf > 10) paste0("Non-Focus (", ps$nonfocus, "w)")
-            ),
+            div(style = paste0(
+              "width:", ps$pct_nf, "%; background:#adb5bd;",
+              "display:flex; align-items:center;",
+              "justify-content:center;",
+              "color:white; font-size:11px; font-weight:600;"),
+              if (ps$pct_nf > 10)
+                paste0("Non-Focus (", ps$nonfocus, "w)")),
+          
           if (ps$pct_focus > 0)
-            div(
-              style = paste0(
-                "width:", ps$pct_focus, "%; background:#5B9BD5;",
-                "display:flex; align-items:center; justify-content:center;",
-                "color:white; font-size:11px; font-weight:600;"
-              ),
-              if (ps$pct_focus > 8) paste0("Focus (", ps$focus, "w)")
-            ),
+            div(style = paste0(
+              "width:", ps$pct_focus, "%; background:#5B9BD5;",
+              "display:flex; align-items:center;",
+              "justify-content:center;",
+              "color:white; font-size:11px; font-weight:600;"),
+              if (ps$pct_focus > 8)
+                paste0("Focus (", ps$focus, "w)")),
+          
           if (ps$pct_outside > 0)
-            div(
-              style = paste0(
-                "width:", ps$pct_outside, "%; background:#dee2e6;",
-                "display:flex; align-items:center; justify-content:center;",
-                "color:#6c757d; font-size:11px;"
-              ),
-              if (ps$pct_outside > 8) paste0("Outside (", ps$outside, "w)")
-            )
+            div(style = paste0(
+              "width:", ps$pct_outside, "%; background:#dee2e6;",
+              "display:flex; align-items:center;",
+              "justify-content:center;",
+              "color:#6c757d; font-size:11px;"),
+              if (ps$pct_outside > 8)
+                paste0("Outside (", ps$outside, "w)"))
         ),
         
-        # Date markers
         div(
           style = paste0(
             "display:flex; justify-content:space-between;",
-            "font-size:11px; color:#6c757d; margin-top:4px;"
-          ),
+            "font-size:11px; color:#6c757d; margin-top:4px;"),
           tags$span(format(ps$model_start)),
           tags$span(icon("flag", style = "color:#5B9BD5; margin-right:3px;"),
                     format(start)),
           tags$span(format(ps$model_end))
         ),
         
-        # Legend
         div(
           style = "display:flex; gap:16px; margin-top:12px; font-size:12px;",
           div(
             div(style = paste0("width:12px; height:12px; background:#adb5bd;",
-                               "border-radius:2px; display:inline-block; margin-right:4px;")),
-            tags$span("Non-Focus", style = "color:#6c757d;")
-          ),
+                               "border-radius:2px; display:inline-block;",
+                               "margin-right:4px;")),
+            tags$span("Non-Focus", style = "color:#6c757d;")),
           div(
             div(style = paste0("width:12px; height:12px; background:#5B9BD5;",
-                               "border-radius:2px; display:inline-block; margin-right:4px;")),
-            tags$span("Focus", style = "color:#5B9BD5;")
-          ),
+                               "border-radius:2px; display:inline-block;",
+                               "margin-right:4px;")),
+            tags$span("Focus", style = "color:#5B9BD5;")),
           if (ps$outside > 0)
             div(
-              div(style = paste0("width:12px; height:12px; background:#dee2e6;",
-                                 "border-radius:2px; display:inline-block; margin-right:4px;")),
-              tags$span("Outside Scope", style = "color:#adb5bd;")
-            )
+              div(style = paste0("width:12px; height:12px;",
+                                 "background:#dee2e6;",
+                                 "border-radius:2px; display:inline-block;",
+                                 "margin-right:4px;")),
+              tags$span("Outside Scope", style = "color:#adb5bd;"))
         )
       )
     })
@@ -328,45 +349,44 @@ mod_config_server <- function(id, data) {
           style = "background:#f8f9fa; border-radius:6px;
                  padding:12px; font-size:12px;",
           
-          div(
-            style = "margin-bottom:10px;",
-            tags$span("⚪ Non-Focus",
-                      style = "color:#6c757d; font-weight:600; font-size:11px;
-                             display:block; margin-bottom:4px;"),
-            tags$code(
-              style = "background:#e9ecef; padding:3px 6px; border-radius:4px;",
-              paste0("_Before_", lbl)
-            )
+          div(style = "margin-bottom:10px;",
+              tags$span("Non-Focus",
+                        style = "color:#6c757d; font-weight:600;
+                               font-size:11px; display:block;
+                               margin-bottom:4px;"),
+              tags$code(
+                style = "background:#e9ecef; padding:3px 6px;
+                       border-radius:4px;",
+                paste0("_Before_", lbl))
           ),
           
-          div(
-            style = "margin-bottom:10px;",
-            tags$span(" Focus",
-                      style = "color:#5B9BD5; font-weight:600; font-size:11px;
-                             display:block; margin-bottom:4px;"),
-            tags$code(
-              style = "background:#EBF3FB; padding:3px 6px;
-                     border-radius:4px; color:#5B9BD5;",
-              paste0("_", lbl)
-            )
+          div(style = "margin-bottom:10px;",
+              tags$span("Focus",
+                        style = "color:#5B9BD5; font-weight:600;
+                               font-size:11px; display:block;
+                               margin-bottom:4px;"),
+              tags$code(
+                style = "background:#EBF3FB; padding:3px 6px;
+                       border-radius:4px; color:#5B9BD5;",
+                paste0("_", lbl))
           ),
           
           hr(style = "margin:8px 0;"),
           
           div(
             tags$span("Multi-break:",
-                      style = "color:#6c757d; font-weight:600; font-size:11px;
-                             display:block; margin-bottom:4px;"),
+                      style = "color:#6c757d; font-weight:600;
+                             font-size:11px; display:block;
+                             margin-bottom:4px;"),
             tags$code(
-              style = "background:#e9ecef; padding:3px 6px; border-radius:4px;
-                     display:block; margin-bottom:4px;",
-              paste0("_Before_", lbl, "|FirstTimeBreak")
-            ),
+              style = "background:#e9ecef; padding:3px 6px;
+                     border-radius:4px; display:block;
+                     margin-bottom:4px;",
+              paste0("_Before_", lbl, "|FirstTimeBreak")),
             tags$code(
-              style = "background:#e9ecef; padding:3px 6px; border-radius:4px;
-                     display:block;",
-              paste0("_Before_", lbl, "|SecondTimeBreak")
-            )
+              style = "background:#e9ecef; padding:3px 6px;
+                     border-radius:4px; display:block;",
+              paste0("_Before_", lbl, "|SecondTimeBreak"))
           )
         )
       )
@@ -389,11 +409,11 @@ mod_config_server <- function(id, data) {
           Suffix = case_when(
             between(Period, start, end) ~ paste0("_", lbl),
             Period < start             ~ paste0("_Before_", lbl),
-            TRUE                       ~ "—"
+            TRUE                       ~ " — "
           )
         ) %>%
         datatable(
-          options  = list(
+          options = list(
             scrollY      = "320px",
             paging       = FALSE,
             scrollX      = TRUE,
@@ -405,16 +425,16 @@ mod_config_server <- function(id, data) {
         formatStyle(
           "Type",
           backgroundColor = styleEqual(
-            c(" Focus", "Non-Focus", " Outside Scope"),
-            c("#EBF3FB",   "#f8f9fa",     "#fff3cd")
+            c("Focus", "Non-Focus", "Outside Scope"),
+            c("#EBF3FB", "#f8f9fa", "#fff3cd")
           ),
           color = styleEqual(
-            c(" Focus", "Non-Focus", "Outside Scope"),
-            c("#5B9BD5",   "#6c757d",     "#856404")
+            c("Focus", "Non-Focus", "Outside Scope"),
+            c("#5B9BD5", "#6c757d", "#856404")
           ),
           fontWeight = styleEqual(
-            c(" Focus", "Non-Focus", " Outside Scope"),
-            c("600",       "400",         "400")
+            c("Focus", "Non-Focus", "Outside Scope"),
+            c("600", "400", "400")
           )
         ) %>%
         formatStyle(
@@ -422,8 +442,8 @@ mod_config_server <- function(id, data) {
           fontFamily = "monospace",
           fontSize   = "11px",
           color      = styleEqual(
-            c(paste0("_", lbl), paste0("_Before_", lbl), "—"),
-            c("#5B9BD5",         "#6c757d",                "#adb5bd")
+            c(paste0("_", lbl), paste0("_Before_", lbl), " — "),
+            c("#5B9BD5", "#6c757d", "#adb5bd")
           )
         )
     })

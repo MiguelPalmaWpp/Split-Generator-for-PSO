@@ -154,6 +154,10 @@ process_channel <- function(all_transformeds, all_rags, analytical, dates_df,
       if (nchar(p %||% "") > 0)
         d <- d[!grepl(p, d$VariableName, ignore.case = TRUE), ]
     
+    for (p in cfg$geography_exclude %||% character(0))
+      if (nchar(p %||% "") > 0)
+        d <- d[!grepl(p, d$Geography, ignore.case = TRUE), ]
+    
     for (p in cfg$campaign_exclude)
       if (nchar(p %||% "") > 0)
         d <- d[!grepl(p, d$Campaign, ignore.case = TRUE), ]
@@ -165,6 +169,7 @@ process_channel <- function(all_transformeds, all_rags, analytical, dates_df,
     for (p in cfg$creative_exclude %||% character(0))
       if (nchar(p %||% "") > 0)
         d <- d[!grepl(p, d$Creative, ignore.case = TRUE), ]
+    
     
     if (nrow(d) == 0) next
     

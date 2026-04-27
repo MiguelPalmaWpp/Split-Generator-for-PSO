@@ -9,6 +9,10 @@ library(readxl)
 library(janitor)
 library(sortable)
 library(data.table) 
+library(jsonlite)     
+library(arrow)   
+
+`%||%` <- function(a, b) if (is.null(a) || length(a) == 0) b else a
 
 # ── Source R/ files ──────────────────────────────────────────
 # Shiny also auto-sources R/ on startup, but we do it
@@ -23,14 +27,10 @@ source("R/mod_process.R")
 source("R/mod_validate.R")
 source("R/mod_export.R")
 
-
-
-`%||%` <- function(a, b) if (is.null(a) || length(a) == 0) b else a
-
 REQUIRED_COLS <- c("Geography", "Product", "VariableName", "Period",
                    "Campaign", "Outlet", "Creative", "VariableValue")
 
-SPLIT_CHOICES <- setdiff(REQUIRED_COLS, "VariableValue")
+SPLIT_CHOICES <- setdiff(REQUIRED_COLS, c("VariableValue", "Period"))
 
 # ── DT Blue pagination callback ───────────────────────────────
 # Attach directly to each table instance — beats all external CSS

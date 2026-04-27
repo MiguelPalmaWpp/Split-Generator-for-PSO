@@ -1,1071 +1,137 @@
----
-title: "Split Generator for PSO — Technical Documentation"
-subtitle: "By Advanced Analytics Colombia | WPP Media"
-date: "April 2026"
-output:
-html_document:
-  toc: true
-  toc_float: true
-  toc_depth: 4
-  theme: flatly
-  highlight: tango
----
+# Split Generator for PSO
+
+> Shiny application for generating media activity splits  
+> used in PSO Marketing Mix Models  
+> **By Advanced Analytics Colombia — WPP Media**
 
 ---
 
-# 1. Overview
+## Overview
 
-**Split Generator for PSO** is a Shiny application that supports the
-**Marketing Mix Modeling (MMM)** workflow at WPP Media.
+The Split Generator processes media data files and generates
+activity split tables ready for use in PSO (Particle Swarm
+Optimization) MMM optimization. It supports:
 
-Its purpose is to convert media data from **long format** into
-**wide split format**, enabling the PSO optimizer to decompose
-channel contributions into granular sub-groups (splits) for
-model calibration.
-
-## 1.1 What it does
-
-```
-all_transformed.csv  (long format, 8 columns)
-      │
-      ▼
-Filter by channel criteria
-      │
-      ▼
-Detect RAG vs Non-RAG
-      │
- ┌────┴────┐
-RAG     Non-RAG
- │           │
-Pivot by   Pivot by
-Period     Cross-section × Period
- │           │
- └────┬────┘
-      ▼
-Tag with time period suffix
-(Before_Last52w  /  Last52w)
-      │
-      ▼
-Merge small splits (optional)
-      │
-      ▼
-Validate splits vs model variable
-      │
-      ▼
-Export:  Analytical Splits Extended
-       Side Model Mapping
-       Activity, Cost & ROIs
-```
-
-## 1.2 Design principles
-
-- **Modular** — each tab is an independent Shiny module
-- **Reactive data flow** — data passes between modules via
-reactive expressions, never global state
-- **Base R for critical paths** — grouping-sensitive operations
-use base R `[`, `merge()`, `sapply()` to avoid dplyr
-grouped-data errors in version 1.1.0+
-- **Dynamic** — channels, cross-sections, time breaks, and split
-dimensions are all user-configurable at runtime
+- **National data** (`all_transformed`) — 1 row per period
+- **Geographic data** (`all_rags`) — N geographies × M products per period
 
 ---
 
-# 2. Project Structure
+## Features
 
-```
-Split Generator/
-│
-├── global.R              # Libraries, constants, source R/ files
-├── ui.R                  # page_navbar — WPP branding + 6 tabs
-├── server.R              # Module wiring (6 lines)
-│
-├── R/
-│   ├── functions.R       # Statistical helpers + file reader
-│   ├── processing.R      # process_channel engine
-│   ├── mod_upload.R      # Tab 1 — Upload
-│   ├── mod_config.R      # Tab 2 — Config
-│   ├── mod_channels.R    # Tab 3 — Channels
-│   ├── mod_process.R     # Tab 4 — Process
-│   ├── mod_validate.R    # Tab 5 — Validate
-│   └── mod_export.R      # Tab 6 — Export
-│
-└── Split Generator.Rproj
-```
+| Tab | Description |
+|-----|-------------|
+| **Upload** | Load data files (CSV, XLSX, Parquet, RData) |
+| **Config** | Set report dates, cross-sections, update label |
+| **Channels** | Configure channels: data source, model variables, filters, split dimensions |
+| **Process** | Run processing, diagnose splits, merge small splits |
+| **Validate** | Validate split column matching |
+| **Export** | Download final RAG + split files for PSO |
 
-## 2.1 `global.R`
+### Process tab features
+- Activity & Spend diagnosis tables per channel
+- Cross-section selector for geographic channels
+- Focus / Non-Focus / All period filter
+- KPI cards (total splits, above/below threshold)
+- Interactive split merging with undo
+- Total Check (segment-aware model variable validation)
+- Export diagnosis tables (CSV / Excel)
 
-Loaded before `ui.R` and `server.R`. Contains:
+---
+
+## Requirements
 
 ```r
-# Upload size limit (adjust for your environment)
-options(shiny.maxRequestSize = 500 * 1024^2)   # 500 MB
-
-# Required libraries
-library(shiny); library(bslib); library(DT)
-library(tidyverse); library(readxl)
-library(janitor); library(sortable)
-
-# Null coalescing operator
-`%||%` <- function(a, b) if (is.null(a) || length(a) == 0) b else a
-
-# Constants
-REQUIRED_COLS <- c("Geography", "Product", "VariableName", "Period",
-                 "Campaign", "Outlet", "Creative", "VariableValue")
-SPLIT_CHOICES <- setdiff(REQUIRED_COLS, "VariableValue")
-
-# DT pagination blue callback (applied to every datatable)
-dt_blue_callback <- JS("...")
-
-# Source all R/ modules and helpers
-source("R/functions.R");   source("R/processing.R")
-source("R/mod_upload.R");  source("R/mod_config.R")
-source("R/mod_channels.R"); source("R/mod_process.R")
-source("R/mod_validate.R"); source("R/mod_export.R")
-```
-
-## 2.2 `server.R`
-
-```r
-server <- function(input, output, session) {
-data     <- mod_upload_server("upload")
-config   <- mod_config_server("config",   data)
-channels <- mod_channels_server("channels", data)
-results  <- mod_process_server("process",  data, config, channels)
-mod_validate_server("validate", results)
-mod_export_server("export",     data, results, config)
-}
-```
-
----
-
-# 3. Installation & Setup
-
-## 3.1 Requirements
-
-```r
+# Install required packages
 install.packages(c(
-"shiny",
-"bslib",
-"DT",
-"tidyverse",
-"readxl",
-"janitor",
-"sortable"
+"shiny", "bslib", "DT", "tidyverse",
+"readxl", "janitor", "sortable",
+"data.table", "jsonlite"
 ))
-```
 
-## 3.2 Running the app
-
-```r
-# From the project directory
-shiny::runApp()
-
-# Or open ui.R / server.R in RStudio and click "Run App"
-```
-
-## 3.3 File size limit
-
-For large MMM files, `global.R` sets:
-
-```r
-options(shiny.maxRequestSize = 500 * 1024^2)  # 500 MB
+# For Parquet support (optional)
+install.packages("arrow")
 ```
 
 ---
 
-# 4. Application Flow
+## Running the app
 
-```
-Step 1 — UPLOAD
-Upload 4 files:
-• all_transformed      (.csv / .xlsx)
-• AnalyticalDataset    (.RData / .csv / .xlsx)
-• ModelDetails         (.csv)
-• ROIs by Channel      (.csv / .xlsx)
-
-Step 2 — CONFIG
-Set global parameters:
-• Update Label (e.g. "Last52w")
-• Start Report Date / End Report Date
-• Cross-Sectional Structure (1 or 2 cross-sections + column names)
-
-Step 3 — CHANNELS
-Define each media channel:
-• Model variable(s) + time break date(s)
-• Filters (VariableName, Campaign, Outlet, Creative)
-• Split dimensions — drag to set order
-• Metric keywords (Clicks/Impressions, Spend/Cost)
-
-Step 4 — PROCESS
-• Process each channel independently
-• View Activity / Spend diagnosis tables
-• Filter Focus vs Non-Focus splits
-• Merge small splits (< 5%)
-• Validate Total Check per cross-section
-
-Step 5 — VALIDATE
-• Check split column names match between:
-  Analytical RAG  ↔  Side Model Mapping
-
-Step 6 — EXPORT
-• Download 3 output files with date+time timestamp
+```r
+# Clone the repo, then:
+shiny::runApp("path/to/SplitGenerator")
 ```
 
 ---
 
-# 5. Module Reference
+## Input data format
 
-## 5.1 Upload Tab
-
-**File:** `R/mod_upload.R`
-
-Handles all 4 required file uploads.
-
-### UI components
-
-- **Upload status strip** — 4 cards showing load status + row count
-- **KPI cards** — Geographies, Products, Variable Names, Date Range, Weeks
-- **Tabbed preview** — all_transformed / ModelDetails / ROIs by Channel
-
-### Required input files
-
-| File | Accepted formats | Key requirement |
-|------|-----------------|-----------------|
-| `all_transformed` | `.csv`, `.xlsx`, `.xls` | Exactly 8 columns (see §8.1) |
-| `AnalyticalDataset` | `.RData`, `.csv`, `.xlsx` | Must contain Geography + Period |
-| `ModelDetails` | `.csv` | Columns: VariableName, Campaign, Outlet, Creative, Type |
-| `ROIs by Channel` | `.csv`, `.xlsx` | Must contain `Channel` column |
-
-### Notes
-
-- `all_transformed` is validated by `read_all_transformed()` which
-enforces the 8 required columns and converts `Period` to Date
-- `AnalyticalDataset` loaded via `load()`, `read_csv()`, or `read_excel()`
-depending on file extension
-- Duplicate column names in RData are resolved (last occurrence kept)
-- `ungroup()` is applied immediately after loading to prevent
-residual dplyr group attributes causing downstream errors
-
-### Returned reactive
-
-```r
-reactive(list(
-all_transformed = rv$all_transformed,   # tibble, 8 cols
-analytical      = rv$analytical,         # tibble, full dataset
-analytical_rag  = rv$analytical_rag,     # distinct(Geography, Period)
-dates_df        = rv$dates_df,           # distinct(Period)
-details         = rv$details,            # ModelDetails with Analytical_varname
-channels_rois   = rv$channels_rois       # ROI reference table
-))
-```
-
----
-
-## 5.2 Config Tab
-
-**File:** `R/mod_config.R`
-
-Sets global parameters applied to ALL channel processing.
-
-### Parameters
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `update_label` | Suffix for focus period columns | `"Last52w"` |
-| `start_report_date` | First date of focus/reporting period | `2024-09-02` |
-| `end_report_date` | Last date of focus/reporting period | `2025-08-25` |
-| `n_cross` | Number of cross-sections (1 or 2) | `1` |
-| `cross_col_1` | First cross-section column | `"Geography"` |
-| `cross_col_2` | Second cross-section column (if n_cross = 2) | `"Product"` |
-
-### Visual outputs
-
-| Output | Description |
-|--------|-------------|
-| KPI cards | Total weeks, Focus weeks, Non-Focus weeks, Model start |
-| Period timeline | Visual bar: Non-Focus / Focus / Outside scope |
-| Suffix preview | Shows exact column suffixes that will be generated |
-| Date spine table | All periods tagged as Focus / Non-Focus / Outside Scope |
-| Validation alerts | Warns if dates are outside the analytical date spine |
-
-### Column suffix convention
-
-```
-Non-Focus (single variable):
-SplitName_Before_Last52w
-
-Focus:
-SplitName_Last52w
-
-Non-Focus with time break (2 variables):
-SplitName_Before_Last52w|FirstTimeBreak   ← segment 1
-SplitName_Before_Last52w|SecondTimeBreak  ← segment 2
-```
-
-### Returned reactive
-
-```r
-reactive(list(
-update_label      = input$update_label,
-start_report_date = input$start_report_date,
-end_report_date   = input$end_report_date,
-cross_cols        = c("Geography")               # or c("Geography","Product")
-))
-```
-
----
-
-## 5.3 Channels Tab
-
-**File:** `R/mod_channels.R`
-
-Defines how each media channel should be split.
-Channels are stored as a named list of configuration objects
-in `reactiveValues`.
-
-### Channel configuration fields
-
-| Field | Type | Description | Example |
-|-------|------|-------------|---------|
-| `channel_name` | character | Display name | `"Paid Search"` |
-| `model_variables` | character vector | Exact column(s) in AnalyticalDataset | `"Nat. Paid Search Clicks --p 20230731-"` |
-| `break_dates` | character vector | Time break date(s) | `"2023-07-24"` |
-| `varname_include` | character | VariableName must contain | `"Search"` |
-| `varname_exclude` | character vector | VariableName must NOT contain | `c("Local","Impressions")` |
-| `campaign_exclude` | character vector | Campaign must NOT contain | `c("Pmax")` |
-| `outlet_exclude` | character vector | Outlet must NOT contain | `c("TV")` |
-| `creative_exclude` | character vector | Creative must NOT contain | `c("15s")` |
-| `split_columns` | character vector | Columns to unite as SplitName (ordered) | `c("VariableName","Outlet","Campaign")` |
-| `activity_keyword` | character | Keyword for activity columns | `"Clicks"` or `"Impressions"` |
-| `spend_keyword` | character | Keyword for spend columns | `"Spend"` or `"Cost"` |
-
-### Split dimensions
-
-Uses `sortable::bucket_list()` with two buckets:
-
-```
-⬜ Available              ✅ Split Order
-┌──────────────┐          ┌──────────────┐
-│ Geography    │  ←drag→  │ VariableName │ ← order matters
-│ Product      │          │ Outlet       │
-│ Period       │          │ Campaign     │
-└──────────────┘          └──────────────┘
-```
-
-The order in **Split Order** determines the column name:
-
-```r
-# split_columns = c("VariableName", "Outlet", "Campaign")
-# → SplitName = "National TV Impressions_CNN_Total"
-```
-
-### Time breaks
-
-A channel with N model variables requires exactly N-1 break dates:
-
-```
-N = 2 model variables → 1 break date required
-
-Model Variable 1:  var_name --p -20230424   (data UP TO 2023-04-24)
-Break Date 1:      2023-04-24               (last day of segment 1)
-Model Variable 2:  var_name --p 20230501-   (data FROM 2023-05-01)
-```
-
-### Metric keywords
-
-| Keyword type | Radio options | Custom option |
-|-------------|--------------|---------------|
-| Activity | Clicks / Impressions / Other | Text input (appears if "Other") |
-| Spend | Cost / Spend / Other | Text input (appears if "Other") |
-
-### Default configuration
-
-```r
-default_channel_config <- function(nm) {
-list(
-  channel_name      = nm,
-  model_variables   = "",
-  break_dates       = character(0),
-  varname_include   = "",
-  varname_exclude   = character(0),
-  campaign_exclude  = character(0),
-  outlet_exclude    = character(0),
-  creative_exclude  = character(0),
-  split_columns     = c("VariableName", "Campaign"),
-  activity_keyword  = "Clicks",
-  spend_keyword     = "Spend"
-)
-}
-```
-
-### Returned reactive
-
-```r
-reactive(rv$channels)
-# Named list:
-# list(
-#   "Paid Search"    = list(channel_name, model_variables, ...),
-#   "National Social" = list(...),
-#   ...
-# )
-```
-
----
-
-## 5.4 Process Tab
-
-**File:** `R/mod_process.R`
-
-Executes `process_channel()` for each configured channel
-and displays the diagnosis results.
-
-### Processing outputs per channel
-
-| Object | Type | Description |
-|--------|------|-------------|
-| `rag` | data.frame | cross_cols × Period × split columns |
-| `act_diagnoses` | tibble | Statistical summary per activity split |
-| `cost_diagnoses` | tibble | Statistical summary per spend split |
-| `activity_spend` | tibble | Combined activity + spend per split |
-| `side_mapping` | tibble | Weights table for PSO optimizer |
-| `cross_cols` | character | Cross-section columns used (stored for export) |
-
-### Period filter
-
-```
-🔵 Focus (default)  →  shows _Last52w splits only
-⚪ Non-Focus         →  shows _Before_Last52w splits only
-📋 All               →  shows all splits
-```
-
-Count badges (Focus: N / Non-Focus: N / Total: N) update
-after each processing run.
-
-### Merge splits workflow
-
-```
-1. Filter to Focus view (default)
-2. Click checkboxes on small splits (red pct < 5%)
-3. Merge toolbar appears showing:
- • N splits selected
- • Combined activity total + percentage
- • Combined list of split names
-4. Type a new name → click 🔗 Merge
-```
-
-**What happens during merge:**
-
-```r
-# 1. RAG update: sum selected columns → new column, drop originals
-new_rag[[new_name]] <- rowSums(new_rag[, rag_cols])
-
-# 2. Recompute act_diagnoses for the merged split
-merged_act_summary <- splits_summary(merged_col_df, "activity")
-
-# 3. Recalculate pct for ALL splits (fixes 100% bug)
-grand_act <- sum(new_act_diag$total_activity)
-new_act_diag$pct_total_activity <- round(
-new_act_diag$total_activity / grand_act * 100, 4
-)
-
-# 4. Mirror into cost_diagnoses
-#    (swap activity_keyword → spend_keyword in split names)
-
-# 5. Update activity_spend and side_mapping
-
-# 6. Log operation in Merge History
-```
-
-**Reset All Merges** restores the channel to its original
-`original_results[[nm]]` snapshot.
-
-### Total Check
-
-Validates that splits sum correctly to the model variable
-**per cross-section per period**:
-
-```r
-cross_id <- c(cross_cols, "Period")
-
-# Model side
-model_side <- analytical %>%
-select(all_of(c(cross_id, mv))) %>%
-rename(ModelTotal = !!sym(mv))
-
-# Splits side
-splits_side <- rag %>%
-select(all_of(cross_id), where(is.numeric)) %>%
-mutate(SplitsTotal = rowSums(select(., where(is.numeric))))
-
-# Compare
-check <- left_join(model_side, splits_side, by = cross_id) %>%
-mutate(
-  Diff   = ModelTotal - SplitsTotal,
-  Status = if_else(abs(Diff) < 0.01, "✅ OK", "❌ Mismatch")
-)
-```
-
----
-
-## 5.5 Validate Tab
-
-**File:** `R/mod_validate.R`
-
-Cross-checks that every split column in the analytical RAG
-has a corresponding entry in the Side Model Mapping.
-
-### Status values
-
-| Status | Meaning | Action |
-|--------|---------|--------|
-| ✅ Match | Split exists in both | No action needed |
-| ⚠️ Only in Analytical | Split in RAG but missing from mapping | Check side_mapping |
-| ⚠️ Only in Mapping | Split in mapping but not in RAG | Check processing config |
-
-### How cross-section columns are excluded
-
-```r
-# Uses res$cross_cols to dynamically remove cross-section cols
-an_col_names <- map(res_list, \(r) {
-cross_cols_r <- r$cross_cols %||% "Geography"
-r$rag %>%
-  select(-any_of(c(cross_cols_r, "Period"))) %>%
-  names()
-})
-# → only split column names remain
-```
-
----
-
-## 5.6 Export Tab
-
-**File:** `R/mod_export.R`
-
-Generates 3 output files. All filenames include
-**date + time** to prevent overwriting:
-
-```
-AnalyticalDataset_Splits_Extended_2026-04-10_14-35-22.csv
-Side_Model_Mapping_2026-04-10_14-35-23.csv
-Activity_Cost_ROIs_2026-04-10_14-35-24.csv
-```
-
-### Output 1: Analytical Splits Extended
-
-```r
-# Build process:
-cross_id  <- c(cross_cols, "Period")
-base_grid <- distinct(analytical[, cross_id])
-
-# Join each channel's RAG with dynamic key
-for (r in res_list) {
-r_key     <- c(r$cross_cols, "Period")
-join_cols <- intersect(names(an_splits), r_key)
-an_splits <- left_join(an_splits, r$rag, by = join_cols)
-}
-
-# Final join to analytical by cross_id (no duplicate cols)
-d$analytical %>%
-select(all_of(cross_id), extra_id_cols,
-       model_vars, Weight_cols) %>%
-left_join(an_splits, by = cross_id)
-```
-
-**Structure:**
-
-```
-Geography | [Product] | [BP_Year] | Period |
-model_var_1 | model_var_2 | ... |
-Weight_1 | ... |
-SplitName_A_Last52w | SplitName_B_Last52w | ...
-```
-
-### Output 2: Side Model Mapping
-
-| Column | Description |
-|--------|-------------|
-| `VariableSplit` | Split column name |
-| `MainModelVariableName` | Analytical dataset column (with `___` if needed) |
-| `Weight` | Initial weight (default: 1) |
-| `MinWeight` | Minimum weight (default: 0.5) |
-| `MaxWeight` | Maximum weight (default: 2) |
-| `rank` | Rank order (default: NA) |
-
-Sorted: Non-Focus first (`_Before`), then Focus.
-
-### Output 3: Activity, Cost & ROIs
-
-| Column | Description |
-|--------|-------------|
-| `VariableSplit` | Split column name |
-| `total_activity` | Total activity across all periods |
-| `total_spend` | Total spend across all periods |
-| `Channel` | Channel name |
-| `MainModelVariableName` | Analytical dataset column |
-| `...` | ROI columns joined from ROIs by Channel file |
-
----
-
-# 6. Core Functions
-
-## 6.1 `splits_summary()`
-
-**File:** `R/functions.R`
-
-Computes a statistical summary for each numeric column.
-Uses **`sapply()`** (not `dplyr::summarise(across())`) to
-avoid dplyr 1.1.0+ grouped-data errors.
-
-```r
-splits_summary(df, metric = "activity")
-```
-
-### Parameters
-
-| Parameter | Type | Values |
-|-----------|------|--------|
-| `df` | data.frame | Period + numeric split columns |
-| `metric` | character | `"activity"`, `"spend"`, `"cost"` |
-
-### Output columns
-
-| Column | Description | Formula |
-|--------|-------------|---------|
-| `VariableSplit` | Split column name | — |
-| `total_activity` | Sum across all periods | `sum(col)` |
-| `pct_total_activity` | % share of grand total | `sum(col) / sum(ALL) × 100` |
-| `num_weeks_activity` | Periods with value > 0 | `sum(col > 0)` |
-| `min_consecutive_weeks` | Min consecutive active periods | `min_consec_weeks(col)` |
-| `sd` | Standard deviation | `sd(col)` |
-| `max_index` | Max / total ratio | `max / total` |
-| `min` | Min non-zero value | `min(col[col > 0])` |
-| `quartile_1` | 25th pct (non-zero) | `quantile(col[col > 0], .25)` |
-| `median` | Median (non-zero) | `median(col[col > 0])` |
-| `quartile_3` | 75th pct (non-zero) | `quantile(col[col > 0], .75)` |
-| `max_no_outlier` | Upper boxplot whisker | `q3 + 1.5 × IQR` |
-| `max` | Maximum value | `max(col)` |
-
-### `pct_total_activity` formula
-
-```r
-grand <- max(sum(d, na.rm = TRUE), 1)       # sum of ALL numeric columns
-pct   <- sum(d[[col]]) / grand * 100        # share of grand total
-```
-
-> **Important:** After a merge, `pct_total_activity` is
-> recalculated for ALL splits based on the new grand total
-> (not just for the merged split).
-
----
-
-## 6.2 `process_channel()`
-
-**File:** `R/processing.R`
-
-Main processing engine. Called once per channel.
-
-```r
-process_channel(
-all_transformeds,     # data.frame — filtered media data
-analytical,           # data.frame — full analytical dataset
-dates_df,             # data.frame — date spine (Period only)
-cfg,                  # list — channel configuration
-cross_cols,           # character — e.g. c("Geography") or c("Geography","Product")
-start_report_date,    # Date
-end_report_date,      # Date
-update_label          # character — e.g. "Last52w"
-)
-```
-
-### Internal steps
-
-```
-1. as.data.frame() on all inputs — strip dplyr grouping
-
-2. Build analytical_rag:
- cross_id    <- c(cross_cols, "Period")
- rag_base    <- unique(analytical[, cross_id])
-
-3. For each time segment i (1 or 2):
-
- a. Filter to segment date window (base R)
- b. Apply channel filters (base R grepl):
-    - varname_include / varname_exclude
-    - campaign_exclude
-    - outlet_exclude
-    - creative_exclude
-
- c. Build SplitName:
-    d$SplitName <- apply(d[, split_columns], 1, paste, collapse="_")
-
- d. Detect RAG:
-    is_rag <- detect_rag(d)
-
- e. Pivot wide:
-    if (is_rag):
-      pivot_wider(id_cols=Period, values_fn=first, values_fill=0)
-      join_key <- "Period"
-    else:
-      pivot_wider(id_cols=c(cross_cols,Period), values_fn=sum, values_fill=0)
-      join_key <- c(cross_cols, "Period")
-
- f. Fill with date/cross-section grid:
-    if (is_rag): merge(dates_df, wide, by="Period", all.x=TRUE)
-    else:        merge(rag_base, wide, by=cross_id, all.x=TRUE)
-
- g. Non-Focus slice: Period < start_report_date
-    → rename split cols with nf_sfx
-    → separate activity / spend cols
-    → splits_summary() for each
-
- h. Focus slice: start_report_date ≤ Period ≤ end_report_date
-    → rename split cols with update_label
-    → separate activity / spend cols
-    → splits_summary() for each
-
-4. Assemble RAG:
- for each join in rag_joins:
-   rag <- merge(rag, join$df, by=join$key, all.x=TRUE)
-
-5. build_activity_spend(act_all, cost_all, cfg)
-6. build_side_mapping(act_all)
-```
-
-### Returns
-
-```r
-list(
-rag            = data.frame,   # cross_cols × Period × split cols
-cross_cols     = character,    # stored for export
-activity_spend = tibble,
-side_mapping   = tibble,
-act_diagnoses  = tibble,       # includes period, seg, model_var cols
-cost_diagnoses = tibble
-)
-```
-
----
-
-## 6.3 `detect_rag()`
-
-**File:** `R/processing.R`
-
-Detects whether a variable is RAG (same value across all
-geographic/product cross-sections for every period).
-
-```r
-detect_rag <- function(d) {
-keys      <- paste(as.character(d$Period), d$SplitName)
-n_uniques <- tapply(d$VariableValue, keys,
-                    function(x) length(unique(x[!is.na(x)])))
-max(n_uniques) <= 1
-}
-```
-
-Returns `TRUE` (RAG) or `FALSE` (Non-RAG).
-
-### Effect on processing
-
-| Variable | `pivot_wider id_cols` | `values_fn` | Join key |
-|----------|-----------------------|-------------|----------|
-| **RAG** | `Period` | `first` | `"Period"` |
-| **Non-RAG 1 cross** | `c("Geography", "Period")` | `sum` | `c("Geography","Period")` |
-| **Non-RAG 2 cross** | `c("Geography","Product","Period")` | `sum` | `c("Geography","Product","Period")` |
-
----
-
-## 6.4 `keep_nonzero_cols()`
-
-**File:** `R/processing.R`
-
-Removes numeric columns where `sum == 0`. Keeps all
-non-numeric columns (Period, Geography, Product) unconditionally.
-
-```r
-keep_nonzero_cols <- function(df) {
-df     <- as.data.frame(df)
-is_num <- sapply(df, is.numeric)
-keep   <- sapply(names(df), function(col) {
-  if (!is_num[[col]]) return(TRUE)        # always keep non-numeric
-  sum(df[[col]], na.rm = TRUE) != 0       # keep numeric if sum > 0
-})
-df[, keep, drop = FALSE]
-}
-```
-
-> **Note:** `sum()` is only called on numeric columns to avoid
-> the error *"sum not defined for 'Date' objects"*.
-
----
-
-## 6.5 `read_all_transformed()`
-
-**File:** `R/functions.R`
-
-```r
-read_all_transformed(path, ext)
-```
-
-Reads CSV or Excel, validates the 8 required columns,
-converts `Period` to Date, and sorts the data.
-
-```r
-REQUIRED_COLS <- c("Geography", "Product", "VariableName", "Period",
-                 "Campaign", "Outlet", "Creative", "VariableValue")
-```
-
----
-
-# 7. Key Concepts
-
-## 7.1 Splits
-
-A **split** is a disaggregation of a media variable by one or
-more categorical dimensions (Campaign, Outlet, Creative, etc.).
-
-```
-Original variable:
-National TV AD18Plus Impressions  (total)
-
-Splits (split_columns = ["VariableName", "Outlet", "Creative"]):
-National TV AD18Plus Impressions_HGTV_30_Last52w      → 15.2%
-National TV AD18Plus Impressions_CNN_30_Last52w        → 15.1%
-National TV AD18Plus Impressions_HGTV_15_Last52w       → 13.8%
-...
-
-Rule: sum(all splits for period P) == model_variable[P] ✓
-```
-
----
-
-## 7.2 RAG Variables
-
-**RAG = Replication Across Geographies**
-
-A variable whose value is **identical across all geographic
-markets** for a given period.
-
-```
-RAG example (National TV):
-Period     Geography      Value
-2024-01-01 Alexandria LA  5,000,000   ← same
-2024-01-01 Baton Rouge    5,000,000   ← same  → RAG ✅
-2024-01-01 Houston        5,000,000   ← same
-
-Non-RAG example (Local Radio):
-Period     Geography      Value
-2024-01-01 Alexandria LA    80,000   ← different
-2024-01-01 Baton Rouge     120,000   ← different  → Non-RAG ❌
-2024-01-01 Houston          95,000   ← different
-```
-
-**Why it matters:** Using `sum` for RAG variables would multiply
-the national value by N geographies. Using `first` returns the
-correct per-geography value.
-
----
-
-## 7.3 Cross-Sections
-
-Cross-sections are the **dimensions that uniquely identify each
-observation** in the model. Set in the **Config tab**.
-
-| `n_cross` | `cross_cols` | Row identifier |
-|-----------|-------------|----------------|
-| 1 | `c("Geography")` | Geography × Period |
-| 2 | `c("Geography","Product")` | Geography × Product × Period |
-
-The Total Check validates splits **per cross-section per period**.
-
----
-
-## 7.4 Time Breaks
-
-Some channels changed media strategy mid-campaign. Each strategy
-period has its own analytical dataset column and its own set of splits.
-
-```
-Example — Paid Search (break at 2023-07-24):
-
-Segment 1: Period ≤ 2023-07-24
-  Model var:  "National Paid Search Clicks not Pmax --p -20230724"
-  Suffix:     _Before_Last52w|FirstTimeBreak
-
-Segment 2: Period ≥ 2023-07-31
-  Model var:  "National Paid Search Clicks not Pmax --p 20230731-"
-  Suffix (non-focus): _Before_Last52w|SecondTimeBreak
-  Suffix (focus):     _Last52w
-```
-
-**Rule:** N model variables → N-1 break dates.
-
----
-
-## 7.5 Focus vs Non-Focus
-
-| Period | Date range | Column suffix |
-|--------|-----------|---------------|
-| **Non-Focus** | Before `start_report_date` | `_Before_Last52w` |
-| **Focus** | `start_report_date` → `end_report_date` | `_Last52w` |
-| **Outside scope** | After `end_report_date` | Not included |
-
-In the Process tab, the Activity table defaults to **Focus** view
-(highest priority for analysis and split management).
-
----
-
-# 8. Data Dictionary
-
-## 8.1 Input Files
-
-### `all_transformed` — 8 required columns
+All data files must have these columns:
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `Geography` | character | Market / geographic unit |
-| `Product` | character | Product category |
-| `VariableName` | character | Full media variable name |
-| `Period` | date | Week start date (YYYY-MM-DD) |
-| `Campaign` | character | Campaign type (Brand, Non Brand, etc.) |
-| `Outlet` | character | Media outlet (CNN, HGTV, Meta, etc.) |
-| `Creative` | character | Creative format (30s, 15s, 1080x1080, etc.) |
-| `VariableValue` | numeric | Impressions, clicks, spend, etc. |
+| `Geography` | character | Market/geography name |
+| `Product` | character | Product/brand name |
+| `VariableName` | character | Media variable name |
+| `Period` | date | Week start date |
+| `Campaign` | character | Campaign name |
+| `Outlet` | character | Media outlet |
+| `Creative` | character | Creative identifier |
+| `VariableValue` | numeric | Activity/spend value |
 
-### `AnalyticalDataset`
+### Supported date formats
+`YYYY-MM-DD`, `MM/DD/YYYY`, `DD/MM/YYYY`, `MM/DD/YY`, and more.
 
-| Column | Required | Description |
-|--------|----------|-------------|
-| `Geography` | ✅ | Geographic unit |
-| `Period` | ✅ | Week start date |
-| `Product` | Optional | Product (used for 2 cross-sections) |
-| `BP_Year` | Optional | Business planning year |
-| Model variable columns | ✅ | One column per channel |
-| Weight columns | Optional | Any column containing "Weight" |
-
-### `ModelDetails.csv`
-
-Required columns: `VariableName`, `Campaign`, `Outlet`,
-`Creative`, `Type`.
-
-- Rows with `Type == "none"` (case-insensitive) are excluded
-- An `Analytical_varname` column is created by uniting
-VariableName + Campaign + Outlet + Creative with `_NA` removed
-
-### `ROIs by Channel.csv`
-
-- Must contain a `Channel` column matching app channel names
-- All other columns are treated as ROI metrics and joined
-to the Activity/Cost output
+### Supported file formats
+- CSV (auto-detected delimiter)
+- Excel (`.xlsx`, `.xls`)
+- Parquet
+- RData
 
 ---
 
-## 8.2 Output Files
-
-### `AnalyticalDataset_Splits_Extended_YYYY-MM-DD_HH-MM-SS.csv`
-
-One row per (cross_section × Period).
+## Project structure
 
 ```
-Geography | [Product] | [BP_Year] | Period |
-model_var_1 | model_var_2 | ... |
-[Weight columns] |
-SplitName_A_Before_Last52w | SplitName_A_Last52w |
-SplitName_B_Before_Last52w | SplitName_B_Last52w | ...
-```
-
-### `Side_Model_Mapping_YYYY-MM-DD_HH-MM-SS.csv`
-
-| Column | Description |
-|--------|-------------|
-| `VariableSplit` | Split column name |
-| `MainModelVariableName` | Analytical dataset column (+ `___` if needed) |
-| `Weight` | Initial weight (default: 1) |
-| `MinWeight` | Min allowed weight (default: 0.5) |
-| `MaxWeight` | Max allowed weight (default: 2) |
-| `rank` | Rank order (default: NA) |
-
-### `Activity_Cost_ROIs_YYYY-MM-DD_HH-MM-SS.csv`
-
-| Column | Description |
-|--------|-------------|
-| `VariableSplit` | Split column name |
-| `total_activity` | Sum of activity values across all periods |
-| `total_spend` | Sum of spend values across all periods |
-| `Channel` | Channel name |
-| `MainModelVariableName` | Analytical dataset column |
-| `...` | ROI columns from ROIs by Channel file |
-
----
-
-# 9. Configuration Reference
-
-## 9.1 Processing thresholds
-
-| Setting | Value | Location |
-|---------|-------|----------|
-| Upload size limit | 500 MB | `global.R` |
-| RAG detection | Exact value match | `detect_rag()` |
-| Total Check match tolerance | ±0.01 | `mod_process.R` |
-| Small split warning (red color) | pct < 5% | `mod_process.R` DT style |
-| Default weight | 1 | `build_side_mapping()` |
-| Default MinWeight | 0.5 | `build_side_mapping()` |
-| Default MaxWeight | 2 | `build_side_mapping()` |
-
-## 9.2 `MainModelVariableName` naming convention
-
-The PSO optimizer requires `___` in the variable name when it
-does not already contain `_Total_Total` or `___`:
-
-```r
-case_when(
-!str_detect(name, "_Total_Total") &
-!str_detect(name, "___") ~ paste0(name, "___"),
-.default = name
-)
+SplitGenerator/
+├── global.R          # Libraries, constants, helpers
+├── ui.R              # Page layout (page_navbar)
+├── server.R          # Module wiring
+└── R/
+  ├── theme.R       # WPP theme, CSS, logo
+  ├── functions.R   # Statistical helpers, file reader
+  ├── processing.R  # process_channel() engine
+  ├── mod_upload.R  # Upload tab
+  ├── mod_config.R  # Config tab
+  ├── mod_channels.R# Channels tab
+  ├── mod_process.R # Process tab
+  ├── mod_validate.R# Validate tab
+  └── mod_export.R  # Export tab
 ```
 
 ---
 
-# 10. Troubleshooting
+## Configuration
 
-## Common errors
+Channels can be saved and loaded as JSON:
 
-| Error message | Likely cause | Fix |
-|---------------|-------------|-----|
-| `"Missing columns: ..."` | `all_transformed` missing required columns | Verify all 8 columns exist with exact names |
-| `"expected N break date(s)"` | Wrong number of break dates | N model variables requires exactly N-1 break dates |
-| `"Column X not found in AnalyticalDataset"` | Model variable name mismatch | Use selectize input to pick from loaded variables |
-| `"sum not defined for Date objects"` | Old `keep_nonzero_cols` version | Ensure `processing.R` checks `is.numeric` before calling `sum()` |
-| `".fn must return vector of length 0, not 1"` | dplyr grouped data | Ensure `splits_summary` uses `sapply()` not `across()` |
-| `"Maximum upload size exceeded"` | File > 500 MB | Increase `options(shiny.maxRequestSize)` in `global.R` |
-| `"no se pudo encontrar la función 'ns'"` | `ns()` used inside `moduleServer` | Replace `ns(...)` with `session$ns(...)` inside server functions |
-| Duplicate Product column in export | Wrong join key in `mod_export.R` | Ensure join uses `cross_id` not hard-coded `c("Geography","Period")` |
-| `pct_total_activity = 100%` after merge | `grand` computed on single column | Ensure pct is recalculated across all splits after every merge |
-
-## Total Check shows all mismatches
-
-Possible causes:
-
-1. Wrong model variable selected (exact column name mismatch)
-2. Wrong cross-section setting (1 vs 2 cross-sections)
-3. RAG variable treated as non-RAG (check `detect_rag()` output)
-4. Incorrect break date (segment date windows don't match model variable)
-
-## Validate tab shows unexpected columns
-
-If `Geography`, `Product`, or `Period` appear in the validation table,
-check that `mod_validate.R` uses `r$cross_cols` to dynamically
-exclude cross-section columns (not hard-coded `c("Geography","Period")`).
+```json
+{
+"National Social": {
+  "data_source": "all_rags",
+  "model_variables": ["Social_var_National"],
+  "break_dates": [],
+  "activity_keyword": "Impressions",
+  "spend_keyword": "Spend",
+  "split_columns": ["VariableName", "Campaign"],
+  "varname_include": ["Social"],
+  "varname_exclude": []
+}
+}
+```
 
 ---
 
-# 11. Version Information
+## License
 
-| Item | Value |
-|------|-------|
-| App version | 1.0.0 |
-| Last updated | April 2026 |
-| Author | Advanced Analytics Colombia |
-| Client | WPP Media |
-| R framework | Shiny + bslib |
-| Key packages | shiny, bslib, DT, tidyverse, readxl, janitor, sortable |
+MIT © WPP Media — Advanced Analytics Colombia

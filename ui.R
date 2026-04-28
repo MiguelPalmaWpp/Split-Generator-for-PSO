@@ -3,9 +3,6 @@ ui <- page_fluid(
   padding = 0,
   lang    = "en",
   
-  # ── DT pagination fix ─────────────────────────────────────
-  dt_pagination_fix,
-  
   # ── Header: branding only, no tabs ────────────────────────
   tags$header(
     class = "wpp-app-header",

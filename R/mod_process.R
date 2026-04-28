@@ -1628,7 +1628,7 @@ mod_process_server <- function(id, data, config, channels,
         formatStyle("pct_total_activity",
                     color = styleInterval(threshold, c("#dc3545", "#333")))
       
-    }, server = FALSE)
+    }, server = TRUE)
     
     # ── Spend table ────────────────────────────────────────────────
     output$diag_cost <- DT::renderDT({

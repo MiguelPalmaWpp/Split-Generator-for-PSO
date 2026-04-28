@@ -1,10 +1,15 @@
 # ── Upload size limit ─────────────────────────────────────────
-options(shiny.maxRequestSize = 500 * 1024^2)   # 500 MB
+options(shiny.maxRequestSize = 200 * 1024^2)  # 200 MB
 # ── Libraries ─────────────────────────────────────────────────
 library(shiny)
 library(bslib)
 library(DT)
-library(tidyverse)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(readr)
+library(purrr)
+library(forcats)
 library(readxl)
 library(janitor)
 library(sortable)

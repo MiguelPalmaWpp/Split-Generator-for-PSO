@@ -13,10 +13,9 @@ max_no_outlier <- function(x) {
 }
 
 # ── splits_summary ────────────────────────────────────────────
-# Expects data already filtered to ONE cross-section by process_channel.
-# For all_transformed: passed as-is (1 row/period).
-# For all_RAGs: passed pre-filtered to first geo+product (1 row/period).
-# Stats are then straightforward — no aggregation needed here.
+# Optimized: single pass per column (was 12 separate sapply loops).
+# nz (non-zero values) computed ONCE per column — was recomputed 7x
+# separately for sd, min, quartile_1, median, quartile_3.
 
 splits_summary <- function(df, metric = "activity") {
   
@@ -37,59 +36,34 @@ splits_summary <- function(df, metric = "activity") {
                c("total",          "pct_total",          "num_weeks")
   )
   
-  result <- data.frame(
+  # Single pass per column — nz computed once, all stats in one function
+  result <- bind_rows(lapply(num_cols, function(col) {
+    x  <- d[[col]]
+    nz <- x[!is.na(x) & x > 0]     # computed ONCE, reused for 7 stats below
     
-    VariableSplit = num_cols,
+    total_val    <- sum(x, na.rm = TRUE)
+    active       <- !is.na(x) & x > 0
+    weeks_active <- if (!is.null(period_col)) {
+      length(unique(period_col[active]))
+    } else {
+      sum(active)
+    }
     
-    # Sum over all periods for this one cross-section
-    v1 = sapply(num_cols, \(col) sum(d[[col]], na.rm = TRUE)),
-    
-    # Share of total within this cross-section
-    v2 = sapply(num_cols, \(col)
-                round(sum(d[[col]], na.rm = TRUE) / grand * 100, 4)),
-    
-    # Distinct periods with activity > 0
-    v3 = sapply(num_cols, \(col) {
-      x      <- d[[col]]
-      active <- !is.na(x) & x > 0
-      if (!is.null(period_col)) length(unique(period_col[active]))
-      else sum(active)
-    }),
-    
-    # Consecutive active periods — correct because data is 1 row/period
-    min_consecutive_weeks = sapply(num_cols, \(col)
-                                   min_consec_weeks(d[[col]])),
-    
-    sd = sapply(num_cols, \(col) {
-      nz <- d[[col]][!is.na(d[[col]]) & d[[col]] > 0]
-      if (length(nz) < 2) NA_real_ else sd(nz)
-    }),
-    
-    min = sapply(num_cols, \(col) {
-      nz <- d[[col]][!is.na(d[[col]]) & d[[col]] > 0]
-      if (!length(nz)) NA_real_ else min(nz)
-    }),
-    
-    quartile_1 = sapply(num_cols, \(col) {
-      nz <- d[[col]][!is.na(d[[col]]) & d[[col]] > 0]
-      if (!length(nz)) NA_real_ else as.numeric(quantile(nz, .25))
-    }),
-    
-    median = sapply(num_cols, \(col) {
-      nz <- d[[col]][!is.na(d[[col]]) & d[[col]] > 0]
-      if (!length(nz)) NA_real_ else as.numeric(median(nz))
-    }),
-    
-    quartile_3 = sapply(num_cols, \(col) {
-      nz <- d[[col]][!is.na(d[[col]]) & d[[col]] > 0]
-      if (!length(nz)) NA_real_ else as.numeric(quantile(nz, .75))
-    }),
-    
-    max_no_outlier = sapply(num_cols, \(col) max_no_outlier(d[[col]])),
-    max            = sapply(num_cols, \(col) max(d[[col]], na.rm = TRUE)),
-    
-    stringsAsFactors = FALSE
-  )
+    tibble(
+      VariableSplit         = col,
+      v1                    = total_val,
+      v2                    = round(total_val / grand * 100, 4),
+      v3                    = weeks_active,
+      min_consecutive_weeks = min_consec_weeks(x),
+      sd                    = if (length(nz) < 2) NA_real_ else sd(nz),
+      min                   = if (!length(nz)) NA_real_ else min(nz),
+      quartile_1            = if (!length(nz)) NA_real_ else as.numeric(quantile(nz, .25)),
+      median                = if (!length(nz)) NA_real_ else as.numeric(median(nz)),
+      quartile_3            = if (!length(nz)) NA_real_ else as.numeric(quantile(nz, .75)),
+      max_no_outlier        = max_no_outlier(x),
+      max                   = max(x, na.rm = TRUE)
+    )
+  }))
   
   result$max_index <- result$max / result$v1
   

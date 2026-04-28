@@ -4,13 +4,13 @@ ordinal_tag <- function(i) {
   c("First", "Second", "Third", "Fourth", "Fifth")[min(i, 5)]
 }
 
+# Optimized: single-pass vapply — was two separate sapply loops
 keep_nonzero_cols <- function(df) {
-  df     <- as.data.frame(df)
-  is_num <- sapply(df, is.numeric)
-  keep   <- sapply(names(df), function(col) {
-    if (!is_num[[col]]) return(TRUE)
-    sum(df[[col]], na.rm = TRUE) != 0
-  })
+  df   <- as.data.frame(df)
+  keep <- vapply(df, function(col) {
+    if (!is.numeric(col)) return(TRUE)
+    sum(col, na.rm = TRUE) != 0
+  }, logical(1))
   df[, keep, drop = FALSE]
 }
 
@@ -18,12 +18,6 @@ keep_nonzero_cols <- function(df) {
 #   all_transformed (is_rag=TRUE):  1 row/period  → return as-is
 #   all_RAGs        (is_rag=FALSE): N geos × M products/period
 #                                   → filter to FIRST cross-section
-#
-# "First" = first alphabetical combination of cross_cols
-# (e.g. "Alexandria LA / Convenience" if Geography × Product)
-#
-# The user can validate by filtering raw data to this same combination.
-# The ref_cross_key (returned separately) tells them which one was used.
 
 get_diag_df <- function(df, is_rag, cross_cols, ref_cross_key) {
   if (is_rag || nrow(df) == 0) return(df)
@@ -80,13 +74,6 @@ build_side_mapping <- function(act_all) {
 }
 
 # ── Main processing function ──────────────────────────────────
-# Source determines strategy — no detect_rag():
-#   cfg$data_source == "all_transformed" → is_rag = TRUE
-#   cfg$data_source == "all_rags"        → is_rag = FALSE
-#
-# RAG output (res$rag): always built with FULL cross-section data
-# Diagnosis stats:      built with FIRST cross-section (for all_RAGs)
-#   → user validates by filtering raw data to res$ref_cross
 
 process_channel <- function(all_transformeds, all_rags, analytical, dates_df,
                             cfg, cross_cols,
@@ -106,9 +93,6 @@ process_channel <- function(all_transformeds, all_rags, analytical, dates_df,
     stop("Data source '", cfg$data_source, "' not uploaded.")
   
   # ── Reference cross-section for diagnosis ─────────────────
-  # all_transformed: single geo, no filtering needed
-  # all_RAGs: determine first cross-section alphabetically
-  # Stored in result so mod_process can display it to the user
   ref_cross_key <- if (!is_rag && length(cross_cols) > 0) {
     cross_data <- source_data[, cross_cols, drop = FALSE]
     cross_key  <- do.call(paste, c(as.list(cross_data), list(sep = " / ")))
@@ -134,46 +118,51 @@ process_channel <- function(all_transformeds, all_rags, analytical, dates_df,
   act_rows  <- list()
   cost_rows <- list()
   
+  # ── Pre-filter: channel filters applied ONCE before the segment loop ──
+  # varname / geography / campaign / outlet / creative are identical
+  # across all time segments — running them n times was redundant.
+  # Only the date window changes per segment; that stays inside the loop.
+  d_prefilt <- source_data
+  
+  vi <- cfg$varname_include[nchar(cfg$varname_include %||% "") > 0]
+  if (length(vi) > 0) {
+    keep <- Reduce("|", lapply(vi, function(p)
+      grepl(p, d_prefilt$VariableName, ignore.case = TRUE)))
+    d_prefilt <- d_prefilt[keep, ]
+  }
+  
+  for (p in cfg$varname_exclude)
+    if (nchar(p %||% "") > 0)
+      d_prefilt <- d_prefilt[!grepl(p, d_prefilt$VariableName, ignore.case = TRUE), ]
+  
+  for (p in cfg$geography_exclude %||% character(0))
+    if (nchar(p %||% "") > 0)
+      d_prefilt <- d_prefilt[!grepl(p, d_prefilt$Geography, ignore.case = TRUE), ]
+  
+  for (p in cfg$campaign_exclude)
+    if (nchar(p %||% "") > 0)
+      d_prefilt <- d_prefilt[!grepl(p, d_prefilt$Campaign, ignore.case = TRUE), ]
+  
+  for (p in cfg$outlet_exclude %||% character(0))
+    if (nchar(p %||% "") > 0)
+      d_prefilt <- d_prefilt[!grepl(p, d_prefilt$Outlet, ignore.case = TRUE), ]
+  
+  for (p in cfg$creative_exclude %||% character(0))
+    if (nchar(p %||% "") > 0)
+      d_prefilt <- d_prefilt[!grepl(p, d_prefilt$Creative, ignore.case = TRUE), ]
+  
+  # ── Segment loop — only date window varies per iteration ──
   for (i in seq_len(n)) {
     
-    # 1. Segment date window
-    d <- source_data
+    # 1. Segment date window (the only filter that changes per segment)
+    d <- d_prefilt
     if (!is.na(s_beg[i])) d <- d[d$Period >= s_beg[i], ]
     d <- d[d$Period <= s_end[i], ]
     d <- as.data.frame(d)
     
-    # 2. Channel-specific filters
-    vi <- cfg$varname_include[nchar(cfg$varname_include %||% "") > 0]
-    if (length(vi) > 0) {
-      keep <- Reduce("|", lapply(vi, function(p)
-        grepl(p, d$VariableName, ignore.case = TRUE)))
-      d <- d[keep, ]
-    }
-    
-    for (p in cfg$varname_exclude)
-      if (nchar(p %||% "") > 0)
-        d <- d[!grepl(p, d$VariableName, ignore.case = TRUE), ]
-    
-    for (p in cfg$geography_exclude %||% character(0))
-      if (nchar(p %||% "") > 0)
-        d <- d[!grepl(p, d$Geography, ignore.case = TRUE), ]
-    
-    for (p in cfg$campaign_exclude)
-      if (nchar(p %||% "") > 0)
-        d <- d[!grepl(p, d$Campaign, ignore.case = TRUE), ]
-    
-    for (p in cfg$outlet_exclude %||% character(0))
-      if (nchar(p %||% "") > 0)
-        d <- d[!grepl(p, d$Outlet, ignore.case = TRUE), ]
-    
-    for (p in cfg$creative_exclude %||% character(0))
-      if (nchar(p %||% "") > 0)
-        d <- d[!grepl(p, d$Creative, ignore.case = TRUE), ]
-    
-    
     if (nrow(d) == 0) next
     
-    # Defensive: ensure VariableValue is numeric
+    # 2. Defensive: ensure VariableValue is numeric
     d$VariableValue <- suppressWarnings(as.numeric(as.character(d$VariableValue)))
     d$VariableValue[is.na(d$VariableValue)] <- 0
     
@@ -230,11 +219,7 @@ process_channel <- function(all_transformeds, all_rags, analytical, dates_df,
                             ignore.case = TRUE, value = TRUE)
       if (length(act_col_names) > 0) {
         nf_act <- nf[, c(id_protect, act_col_names), drop = FALSE]
-        
-        # RAG output: full cross-section data
         rag_joins <- c(rag_joins, list(list(df = nf_act, key = join_key)))
-        
-        # Diagnosis: first cross-section only (no replication for all_RAGs)
         act_rows <- c(act_rows, list(
           splits_summary(
             get_diag_df(nf_act, is_rag, cross_cols, ref_cross_key),
@@ -276,11 +261,7 @@ process_channel <- function(all_transformeds, all_rags, analytical, dates_df,
                          ignore.case = TRUE, value = TRUE)
       if (length(act_col_fc) > 0) {
         fc_act <- fc[, c(id_protect, act_col_fc), drop = FALSE]
-        
-        # RAG output: full cross-section data
         rag_joins <- c(rag_joins, list(list(df = fc_act, key = join_key)))
-        
-        # Diagnosis: first cross-section only
         act_rows <- c(act_rows, list(
           splits_summary(
             get_diag_df(fc_act, is_rag, cross_cols, ref_cross_key),
@@ -321,7 +302,7 @@ process_channel <- function(all_transformeds, all_rags, analytical, dates_df,
     rag            = rag,
     cross_cols     = cross_cols,
     is_rag         = is_rag,
-    ref_cross      = ref_cross_key,   # ← which cross-section was used for diagnosis
+    ref_cross      = ref_cross_key,
     activity_spend = build_activity_spend(act_all, cost_all, cfg),
     side_mapping   = build_side_mapping(act_all),
     act_diagnoses  = act_all,

@@ -17,17 +17,17 @@ mod_upload_ui <- function(id) {
       fileInput(
         ns("file_at"),
         tags$span("all_transformed ",
-                  tags$small(".csv / .parquet — national",
+                  tags$small(".csv / .parquet / .zip / .gz — national",
                              class = "text-muted")),
-        accept = c(".csv", ".parquet")
+        accept = c(".csv", ".parquet", ".zip", ".gz")
       ),
       
       fileInput(
         ns("file_all_rags"),
         tags$span("all_RAGs ",
-                  tags$small(".csv / .parquet — geographic",
+                  tags$small(".csv / .parquet / .zip / .gz — geographic",
                              class = "text-muted")),
-        accept = c(".csv", ".parquet")
+        accept = c(".csv", ".parquet", ".zip", ".gz")
       ),
       
       fileInput(

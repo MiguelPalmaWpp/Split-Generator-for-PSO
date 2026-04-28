@@ -131,13 +131,41 @@ read_all_transformed <- function(path, ext) {
   
   raw <- if (tolower(ext) == "parquet") {
     arrow::read_parquet(path)
+    
   } else if (tolower(ext) %in% c("xlsx", "xls")) {
     read_excel(path)
+    
+  } else if (tolower(ext) == "gz") {
+    # data.table maneja .gz nativo — sin pasos extra
+    data.table::fread(
+      file         = path,
+      data.table   = FALSE,
+      colClasses   = "character",
+      showProgress = FALSE
+    )
+    
+  } else if (tolower(ext) == "zip") {
+    # Extrae el ZIP y lee el primer CSV que encuentre
+    tmp       <- file.path(tempdir(), paste0("unzip_", as.integer(Sys.time())))
+    dir.create(tmp, showWarnings = FALSE)
+    on.exit(unlink(tmp, recursive = TRUE), add = TRUE)
+    
+    unzip(path, exdir = tmp)
+    csv_files <- list.files(tmp, pattern = "\\.csv$",
+                            full.names = TRUE, recursive = TRUE)
+    if (!length(csv_files))
+      stop("No CSV file found inside the ZIP. Make sure the ZIP contains a .csv file.")
+    
+    data.table::fread(
+      file         = csv_files[1],
+      data.table   = FALSE,
+      colClasses   = "character",
+      showProgress = FALSE
+    )
+    
   } else {
     data.table::fread(
       file         = path,
-      sep          = "auto",
-      encoding     = "UTF-8",
       data.table   = FALSE,
       colClasses   = "character",
       showProgress = FALSE

@@ -1,5 +1,4 @@
 server <- function(input, output, session) {
-  
   data            <- mod_upload_server("upload")
   config          <- mod_config_server("config", data)
   channels_module <- mod_channels_server("channels", data)
@@ -13,5 +12,6 @@ server <- function(input, output, session) {
   )
   
   mod_validate_server("validate", results_rv)
-  mod_export_server("export", data, results_rv, config)
+  mod_export_server("export", data, results_rv, config,
+                    channels = channels_module$channels)
 }

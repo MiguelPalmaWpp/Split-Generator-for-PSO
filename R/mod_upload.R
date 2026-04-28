@@ -10,6 +10,8 @@ mod_upload_ui <- function(id) {
     
     # ── Left: File inputs ──────────────────────────────────────
     card(
+      class = "upload-files-card",
+      fill  = FALSE, 
       card_header("Data Files"),
       
       fileInput(
@@ -52,11 +54,14 @@ mod_upload_ui <- function(id) {
     ),
     
     # ── Right: Status + KPIs + Previews ───────────────────────
-    tagList(
+      
+    div(                                   
+      class = "upload-right-col",          
       uiOutput(ns("status_strip")),
-      uiOutput(ns("kpi_cards")),
+      uiOutput(ns("kpi_cards")),  
       
       card(
+        class       = "upload-preview-card",
         full_screen = TRUE,
         card_header("Preview"),
         navset_card_underline(

@@ -540,4 +540,188 @@ padding:2px 6px; border-radius:3px; font-size:12.5px;
 ::-webkit-scrollbar-thumb { background:#c8d6e5; border-radius:3px; }
 ::-webkit-scrollbar-thumb:hover { background:#5B9BD5; }
 
+/*
+═══════════════════════════════════════════════════════
+═══ WPP APP HEADER
+═══════════════════════════════════════════════════════
+*/
+body, html {
+background-color: white !important;
+margin: 0;
+padding: 0;
+}
+
+/* Elimina el padding de Bootstrap del container */
+.container-fluid {
+padding-left:  0 !important;
+padding-right: 0 !important;
+max-width: 100% !important;
+}
+
+.wpp-app-header {
+background: linear-gradient(135deg, #4a87c0 0%, #5B9BD5 55%, #6aaee0 100%) !important;
+display: flex !important;
+align-items: center !important;
+justify-content: space-between !important;
+padding: 0 32px !important;
+min-height: 80px !important;
+box-shadow: 0 3px 14px rgba(0,0,0,0.18);
+position: sticky;
+top: 0;
+z-index: 1030;
+width: 100%;
+box-sizing: border-box;
+}
+
+.wpp-header-brand,
+.wpp-header-right {
+flex-shrink: 0;
+display: flex;
+align-items: center;
+}
+
+/* Fix: navbar-center-block era position:absolute para el navbar,
+ en el nuevo header flex debe ser estático */
+.wpp-app-header .navbar-center-block {
+position: static  !important;
+transform: none   !important;
+left: auto        !important;
+top:  auto        !important;
+flex: 1;
+text-align: center;
+display: block    !important;
+max-width: 60%;
+pointer-events: none;
+}
+
+.wpp-app-header .app-main-title {
+font-size: 20px  !important;
+display: block   !important;
+}
+
+.wpp-app-header .app-subtitle {
+font-size: 13px  !important;
+display: block   !important;
+margin-top: 3px;
+}
+
+/*
+═══════════════════════════════════════════════════════
+═══ MAIN NAV STRIP
+═══════════════════════════════════════════════════════
+*/
+.wpp-main-nav {
+background: white;
+border-bottom: 2px solid #dee2e6;
+box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+width: 100%;
+}
+
+.wpp-main-nav .nav-underline {
+padding: 0 32px !important;
+margin-bottom: 0 !important;
+border-bottom: none !important;
+flex-wrap: nowrap;
+}
+
+.wpp-main-nav .nav-link {
+color: #6c757d       !important;
+font-size: 13.5px    !important;
+font-weight: 500     !important;
+padding: 14px 20px   !important;
+border-bottom: 3px solid transparent !important;
+border-radius: 0     !important;
+white-space: nowrap;
+transition: color 0.15s, border-color 0.15s;
+}
+
+.wpp-main-nav .nav-link:hover {
+color: #5B9BD5                               !important;
+background: rgba(91,155,213,0.05);
+border-bottom-color: rgba(91,155,213,0.3)    !important;
+}
+
+.wpp-main-nav .nav-link.active {
+color: #5B9BD5           !important;
+font-weight: 600         !important;
+border-bottom-color: #5B9BD5 !important;
+background: transparent;
+}
+
+/* Número badge */
+.wpp-main-nav .tab-step {
+background: rgba(91,155,213,0.14) !important;
+color: #5B9BD5                    !important;
+font-size: 10px;
+font-weight: 700;
+padding: 1px 6px;
+border-radius: 10px;
+margin-right: 5px;
+}
+
+.wpp-main-nav .nav-link.active .tab-step {
+background: #5B9BD5 !important;
+color: white        !important;
+}
+
+/* Contenido de cada tab */
+.wpp-main-nav .tab-content {
+background: white;
+}
+
+.wpp-main-nav .tab-content > .tab-pane {
+padding: 20px 24px !important;
+}
+
+/* Responsive */
+@media (max-width: 992px) {
+.wpp-main-nav .tab-step { display: none !important; }
+.wpp-main-nav .nav-link { padding: 12px 12px !important; font-size: 12.5px !important; }
+.wpp-app-header          { padding: 0 16px !important; }
+}
+
+@media (max-width: 768px) {
+.wpp-app-header .navbar-logo-right { display: none !important; }
+.wpp-main-nav .nav-link svg        { display: none !important; }
+}
+
+/*
+═══════════════════════════════════════════════════════
+═══ UPLOAD TAB — layout fix
+═══════════════════════════════════════════════════════
+*/
+
+/* Columna derecha: UN contenedor real con flex column */
+.upload-right-col {
+display:        flex;
+flex-direction: column;
+min-height:     calc(100vh - 145px);
+overflow:       hidden;   /* previene solapamiento */
+}
+
+/* Preview card: ocupa el espacio restante */
+.upload-preview-card {
+flex:       1 !important;
+min-height: 350px;
+}
+
+/*
+═══════════════════════════════════════════════════════
+═══ UPLOAD TAB — fill viewport height
+═══════════════════════════════════════════════════════
+*/
+
+/* Columna derecha: flex column para que el preview card crezca */
+.upload-right-col {
+display:        flex;
+flex-direction: column;
+min-height:     calc(100vh - 145px);  /* viewport - header - tabstrip */
+}
+
+/* Preview card: ocupa todo el espacio restante de la columna */
+.upload-preview-card {
+flex:       1 !important;
+min-height: 300px;
+}
+
 ")

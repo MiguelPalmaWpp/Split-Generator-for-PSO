@@ -72,7 +72,7 @@ mod_channels_ui <- function(id) {
 }
 
 # ── Server ────────────────────────────────────────────────────────
-mod_channels_server <- function(id, data) {
+mod_channels_server <- function(id, data, config) {
   moduleServer(id, function(input, output, session) {
     
     ns <- session$ns
@@ -503,7 +503,8 @@ mod_channels_server <- function(id, data) {
               group_name  = ns("split_bucket"),
               orientation = "horizontal",
               add_rank_list(text     = "Available",
-                            labels   = setdiff(SPLIT_CHOICES, cfg$split_columns),
+                            labels   = setdiff(config()$effective_choices %||% SPLIT_CHOICES,
+                                               cfg$split_columns),
                             input_id = ns("splits_available")),
               add_rank_list(text     = "Split Order",
                             labels   = cfg$split_columns,

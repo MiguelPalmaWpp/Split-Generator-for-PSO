@@ -131,45 +131,32 @@ read_all_transformed <- function(path, ext) {
   
   raw <- if (tolower(ext) == "parquet") {
     arrow::read_parquet(path)
-    
   } else if (tolower(ext) %in% c("xlsx", "xls")) {
     read_excel(path)
-    
   } else if (tolower(ext) == "gz") {
-    # data.table maneja .gz nativo — sin pasos extra
-    data.table::fread(
-      file         = path,
-      data.table   = FALSE,
-      colClasses   = "character",
-      showProgress = FALSE
-    )
-    
+    data.table::fread(file = path, data.table = FALSE,
+                      colClasses = "character", showProgress = FALSE)
   } else if (tolower(ext) == "zip") {
-    # Extrae el ZIP y lee el primer CSV que encuentre
-    tmp       <- file.path(tempdir(), paste0("unzip_", as.integer(Sys.time())))
+    tmp <- file.path(tempdir(), paste0("unzip_", as.integer(Sys.time())))
     dir.create(tmp, showWarnings = FALSE)
     on.exit(unlink(tmp, recursive = TRUE), add = TRUE)
-    
     unzip(path, exdir = tmp)
-    csv_files <- list.files(tmp, pattern = "\\.csv$",
-                            full.names = TRUE, recursive = TRUE)
-    if (!length(csv_files))
-      stop("No CSV file found inside the ZIP. Make sure the ZIP contains a .csv file.")
-    
-    data.table::fread(
-      file         = csv_files[1],
-      data.table   = FALSE,
-      colClasses   = "character",
-      showProgress = FALSE
-    )
-    
+    csv_files <- list.files(tmp, pattern = "\\.csv$", full.names = TRUE, recursive = TRUE)
+    if (!length(csv_files)) stop("No CSV file found inside the ZIP.")
+    data.table::fread(csv_files[1], data.table = FALSE,
+                      colClasses = "character", showProgress = FALSE)
   } else {
-    data.table::fread(
-      file         = path,
-      data.table   = FALSE,
-      colClasses   = "character",
-      showProgress = FALSE
-    )
+    data.table::fread(file = path, sep = "auto", encoding = "UTF-8",
+                      data.table = FALSE, colClasses = "character",
+                      showProgress = FALSE)
+  }
+  
+  # ── Normalize "raw" prefix (all_extracted format) ─────────────
+  # Some files use rawPeriod, rawVariableName, rawGeography, etc.
+  # Remove the prefix so columns match REQUIRED_COLS
+  if ("rawPeriod" %in% names(raw)) {
+    names(raw) <- sub("^raw", "", names(raw))
+    message("  [read_all_transformed] all_extracted format detected — 'raw' prefix removed")
   }
   
   miss <- setdiff(REQUIRED_COLS, names(raw))
@@ -196,4 +183,35 @@ parse_text_lines <- function(x) {
   strsplit(x %||% "", "\n")[[1]] %>%
     trimws() %>%
     (\(v) v[nchar(v) > 0])()
+}
+
+# ── Auto-detect cross-section columns from AnalyticalDataset ──────────────────
+# Rule: columns that appear BEFORE "Period" AND are in CROSS_SECTION_CANDIDATES
+auto_detect_cross_cols <- function(analytical) {
+  cols       <- names(analytical)
+  period_pos <- which(cols == "Period")
+  
+  if (!length(period_pos))
+    stop("Column 'Period' not found in AnalyticalDataset.")
+  
+  before_period <- cols[seq_len(period_pos - 1)]
+  detected      <- intersect(before_period, CROSS_SECTION_CANDIDATES)
+  
+  if (!length(detected))
+    stop("No valid cross-section columns found before 'Period'. ",
+         "Expected one of: ", paste(CROSS_SECTION_CANDIDATES, collapse = ", "))
+  
+  detected
+}
+
+# ── Auto-detect file type (all_rags vs all_transformed) ───────────────────────
+# Rule: more than 1 unique combination of cross-section values → geographic (all_rags)
+#       exactly 1 combination → national (all_transformed)
+auto_detect_source_type <- function(df, cross_cols) {
+  n_combos <- df %>%
+    select(any_of(cross_cols)) %>%
+    distinct() %>%
+    nrow()
+  
+  if (n_combos > 1) "all_rags" else "all_transformed"
 }

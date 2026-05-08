@@ -26,7 +26,6 @@ source("R/processing.R")
 source("R/mod_setup.R")      
 source("R/mod_channels.R")
 source("R/mod_process.R")
-source("R/mod_validate.R")
 source("R/mod_export.R")
 
 

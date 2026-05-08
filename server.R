@@ -1,8 +1,7 @@
-
 server <- function(input, output, session) {
   
   setup_module    <- mod_setup_server("setup")
-  channels_module <- mod_channels_server("channels", setup_module$data , setup_module$config)
+  channels_module <- mod_channels_server("channels", setup_module$data)
   
   results_rv <- mod_process_server(
     "process",
@@ -11,10 +10,14 @@ server <- function(input, output, session) {
     channels      = channels_module$channels,
     update_merges = channels_module$update_merges
   )
+  mod_export_server(
+    "export",
+    results  = results_rv,
+    data     = setup_module$data,
+    config   = setup_module$config,
+    channels = channels_module$channels
+  )
   
-  mod_validate_server("validate", results_rv)
-  mod_export_server("export", setup_module$data, results_rv,
-                    setup_module$config, channels = channels_module$channels)
   observe({
     status     <- setup_module$validation_status()
     is_blocked <- identical(status, "red")

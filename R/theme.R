@@ -328,4 +328,21 @@ overflow:hidden;
 }
 .upload-preview-card { flex:1 !important; min-height:300px; }
 
+/*
+═══════════════════════════════════════════════════════
+DIMENSION SUMMARY — expand table in full screen
+═══════════════════════════════════════════════════════
+*/
+
+/* Normal mode: table has fixed 320px height so breaks section is visible */
+.dim-table-wrapper .dataTables_scrollBody {
+max-height: 320px !important;
+}
+
+/* Full screen mode: table expands to fill the available space */
+.bslib-full-screen .dim-table-wrapper .dataTables_scrollBody {
+max-height: calc(100vh - 380px) !important;
+}
+
+
 ")

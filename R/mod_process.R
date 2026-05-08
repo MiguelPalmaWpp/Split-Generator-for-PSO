@@ -1307,7 +1307,7 @@ mod_process_server <- function(id, data, config, channels,
       full_cross_id <- c(cross_cols, "Period")
       geo_col       <- cross_cols[1]
       
-      # Missing variable check
+      # ── Missing variable check ─────────────────────────────────────
       missing_vars <- setdiff(cfg$model_variables, names(d$analytical))
       if (length(missing_vars) > 0) {
         avail_num <- names(d$analytical)[sapply(d$analytical, is.numeric)]
@@ -1329,14 +1329,16 @@ mod_process_server <- function(id, data, config, channels,
       
       rag_df <- as.data.frame(res$rag)
       
-      # Period scope: analytical range only
+      # ── Period scope: analytical range only ───────────────────────
       an_periods      <- sort(unique(d$analytical$Period))
       an_min_p        <- min(an_periods)
       an_max_p        <- max(an_periods)
       rag_periods_all <- sort(unique(rag_df$Period))
       
       rag_periods <- {
-        in_scope <- rag_periods_all[rag_periods_all >= an_min_p & rag_periods_all <= an_max_p]
+        in_scope <- rag_periods_all[
+          rag_periods_all >= an_min_p & rag_periods_all <= an_max_p
+        ]
         if (length(in_scope) > 0) in_scope else rag_periods_all
       }
       
@@ -1348,7 +1350,7 @@ mod_process_server <- function(id, data, config, channels,
         ) %>% formatStyle("Message", color = "#856404", backgroundColor = "#fff3cd"))
       }
       
-      # Period alignment: 1-to-1 (analytical → nearest RAG)
+      # ── Period alignment: 1-to-1 ──────────────────────────────────
       period_map <- tibble(
         an_period  = an_periods,
         rag_period = rag_periods[vapply(
@@ -1362,13 +1364,12 @@ mod_process_server <- function(id, data, config, channels,
         na.rm = TRUE
       )
       
-      # Build model at full Geography × Product × Period
+      # ── Build model at full cross_id ──────────────────────────────
       model_at_an_full <- build_model_total(
         d$analytical, full_cross_id, cfg$model_variables, cfg$break_dates
       )
       
-      # Geography name normalization
-      # Handles "Alexandria, LA" vs "Alexandria LA" mismatches
+      # ── Geography name normalization ──────────────────────────────
       normalize_geo <- function(x)
         trimws(gsub("\\s+", " ", tolower(gsub("[,.]", " ", as.character(x)))))
       
@@ -1389,7 +1390,75 @@ mod_process_server <- function(id, data, config, channels,
         mutate(!!geo_col := if_else(!is.na(rag_geo), rag_geo, an_geo)) %>%
         select(-an_geo, -rag_geo)
       
-      # Geo filter helper (applied BEFORE rowSums)
+      # ── Detect comparison level ────────────────────────────────────
+      # NATIONAL (all_transformed): Geography in source (e.g. "Germany") does NOT
+      # match Analytical entities (e.g. "Micro", "Macro"). Compare at Period only.
+      # Same split value applies equally to ALL analytical entities.
+      #
+      # GEOGRAPHIC (all_rags): compare at Geography x Product x Period.
+      # If model does not vary by Product, aggregate to Geography x Period.
+      
+      tc_cross_id   <- full_cross_id
+      tc_cross_cols <- cross_cols
+      comparison_note <- NULL
+      
+      if (!isTRUE(res$is_rag)) {
+        # ── National channel: Period-level comparison ─────────────────
+        tc_cross_id   <- "Period"
+        tc_cross_cols <- character(0)
+        comparison_note <- htmltools::tags$div(
+          style = paste0(
+            "background:#EBF3FB; color:#1e40af;",
+            "padding:4px 10px; border-radius:4px;",
+            "font-size:11.5px; margin-bottom:4px; display:inline-block;"
+          ),
+          paste0(
+            "\u2139 National channel (all_transformed). ",
+            "Comparison at Period level \u2014 splits replicated across all analytical entities."
+          )
+        )
+        
+      } else if (length(cross_cols) > 1) {
+        # ── Geographic + multi-product: auto-detect product variation ──
+        variation_test <- model_at_an_full %>%
+          filter(ModelTotal > 0) %>%
+          group_by(across(all_of(c(geo_col, "Period")))) %>%
+          summarise(n_unique = n_distinct(round(ModelTotal, 0)), .groups = "drop")
+        
+        if (nrow(variation_test) > 0 &&
+            all(variation_test$n_unique <= 1, na.rm = TRUE)) {
+          tc_cross_id   <- c(geo_col, "Period")
+          tc_cross_cols <- geo_col
+          comparison_note <- htmltools::tags$div(
+            style = paste0(
+              "background:#fff3cd; color:#856404;",
+              "padding:4px 10px; border-radius:4px;",
+              "font-size:11.5px; margin-bottom:4px; display:inline-block;"
+            ),
+            paste0(
+              "\u26a0 Model variable same for all Products. ",
+              "Comparison aggregated to ", geo_col, " \u00d7 Period level."
+            )
+          )
+        }
+      }
+      
+      # ── Aggregate model to detected comparison level ───────────────
+      model_at_an <- if (identical(tc_cross_id, "Period")) {
+        # National: one value per period (same for all entities — use first)
+        model_at_an_full %>%
+          group_by(Period) %>%
+          summarise(ModelTotal = dplyr::first(ModelTotal), .groups = "drop")
+      } else if (length(tc_cross_cols) < length(cross_cols)) {
+        # Geographic, no product variation: aggregate to Geography x Period
+        model_remapped %>%
+          group_by(across(all_of(tc_cross_id))) %>%
+          summarise(ModelTotal = dplyr::first(ModelTotal), .groups = "drop")
+      } else {
+        model_remapped
+      }
+      
+      # ── Geo filter helper ──────────────────────────────────────────
       seg_overrides <- cfg$segment_overrides %||% list()
       break_dates_d <- as.Date(cfg$break_dates %||% character(0))
       n_segs        <- length(cfg$model_variables)
@@ -1420,35 +1489,52 @@ mod_process_server <- function(id, data, config, channels,
       }
       
       # Apply geo filters BEFORE computing splits
-      rag_in_scope   <- rag_df %>% filter(Period >= an_min_p & Period <= an_max_p)
-      rag_in_scope   <- apply_geo_filters(rag_in_scope, geo_col)
-      model_remapped <- apply_geo_filters(model_remapped, geo_col)
+      rag_in_scope <- rag_df %>% filter(Period >= an_min_p & Period <= an_max_p)
       
-      # Splits side: per-row sum at Geography × Product × Period
+      # Only apply geo filters for geographic channels
+      if (isTRUE(res$is_rag)) {
+        rag_in_scope   <- apply_geo_filters(rag_in_scope, geo_col)
+        model_at_an    <- apply_geo_filters(model_at_an,
+                                            if (geo_col %in% names(model_at_an)) geo_col else NULL %||% geo_col)
+      }
+      
+      # ── Splits side ────────────────────────────────────────────────
       id_in_rag  <- intersect(full_cross_id, names(rag_in_scope))
       split_cols <- setdiff(
-        names(rag_in_scope)[sapply(rag_in_scope, is.numeric)], id_in_rag
+        names(rag_in_scope)[sapply(rag_in_scope, is.numeric)],
+        id_in_rag
       )
+      
       rag_in_scope$row_splits <- if (length(split_cols) > 0)
         rowSums(rag_in_scope[, split_cols, drop = FALSE], na.rm = TRUE)
       else 0
       
+      # Group splits by the detected comparison level
+      group_cols <- intersect(
+        if (identical(tc_cross_id, "Period")) "Period" else tc_cross_id,
+        names(rag_in_scope)
+      )
+      
       splits_side <- rag_in_scope %>%
-        select(any_of(full_cross_id), row_splits) %>%
-        group_by(across(all_of(intersect(full_cross_id, names(.))))) %>%
+        select(any_of(c(group_cols, "row_splits"))) %>%
+        group_by(across(all_of(group_cols))) %>%
         summarise(SplitsTotal = sum(row_splits, na.rm = TRUE), .groups = "drop")
       
-      # Model side remapped to RAG periods
-      model_side <- model_remapped %>%
+      # ── Model side: remapped to RAG periods ───────────────────────
+      join_col <- if (identical(tc_cross_id, "Period")) character(0) else tc_cross_cols
+      
+      model_side <- model_at_an %>%
         rename(an_period = Period) %>%
         left_join(period_map, by = "an_period", relationship = "many-to-one") %>%
         mutate(Period = if_else(!is.na(rag_period), rag_period, an_period)) %>%
-        select(all_of(cross_cols), Period, ModelTotal) %>%
+        select(any_of(c(tc_cross_cols, "Period", "ModelTotal"))) %>%
         filter(ModelTotal > 0)
       
-      # Join at Geography × Product × Period
+      # ── Join ───────────────────────────────────────────────────────
+      join_by_cols <- if (identical(tc_cross_id, "Period")) "Period" else tc_cross_id
+      
       check_df <- model_side %>%
-        left_join(splits_side, by = full_cross_id) %>%
+        left_join(splits_side, by = join_by_cols) %>%
         mutate(
           SplitsTotal = replace_na(SplitsTotal, 0),
           Diff        = ModelTotal - SplitsTotal,
@@ -1456,17 +1542,20 @@ mod_process_server <- function(id, data, config, channels,
         ) %>%
         filter(ModelTotal > 0) %>%
         mutate(across(where(is.numeric), \(x) round(x, 4))) %>%
-        arrange(across(all_of(cross_cols)), Period)
+        arrange(across(any_of(c(tc_cross_cols, "Period"))))
       
       n_total    <- nrow(check_df)
       n_mismatch <- sum(check_df$Status == "Mismatch", na.rm = TRUE)
-      cs_label   <- paste(cross_cols, collapse = " \u00d7 ")
+      cs_label   <- if (identical(tc_cross_id, "Period")) "Period"
+      else paste(tc_cross_cols, collapse = " \u00d7 ")
       
       offset_note <- if (max_offset_days > 0)
         htmltools::tags$div(
-          style = paste0("background:#d1ecf1; color:#0c5460;",
-                         "padding:4px 10px; border-radius:4px;",
-                         "font-size:11.5px; margin-bottom:4px; display:inline-block;"),
+          style = paste0(
+            "background:#d1ecf1; color:#0c5460;",
+            "padding:4px 10px; border-radius:4px;",
+            "font-size:11.5px; margin-bottom:4px; display:inline-block;"
+          ),
           paste0("\u2139 Date offset (", max_offset_days,
                  " day(s)) \u2014 model values auto-aligned to Data File periods.")
         )
@@ -1474,17 +1563,17 @@ mod_process_server <- function(id, data, config, channels,
       
       check_df <- check_df %>% filter(Status == "Mismatch")
       
-      # All OK
+      # ── All OK ─────────────────────────────────────────────────────
       if (nrow(check_df) == 0) {
         return(datatable(
           data.frame(Message = paste0(
             "\u2713 All ", format(n_total, big.mark = ","),
             " rows match \u2014 no mismatches found."
           )),
-          caption = if (!is.null(offset_note))
+          caption = if (!is.null(comparison_note) || !is.null(offset_note))
             htmltools::tags$caption(
               style = "caption-side:top; text-align:left; padding:4px 0;",
-              offset_note)
+              comparison_note, offset_note)
           else NULL,
           options  = list(initComplete = dt_blue_callback, dom = "t"),
           rownames = FALSE
@@ -1493,11 +1582,12 @@ mod_process_server <- function(id, data, config, channels,
                           backgroundColor = "#d4edda"))
       }
       
-      # Mismatch table
+      # ── Mismatch table ─────────────────────────────────────────────
       check_df %>%
         datatable(
           caption = htmltools::tags$caption(
             style = "caption-side:top; text-align:left; padding:4px 0;",
+            comparison_note,
             offset_note,
             htmltools::tags$div(
               style = "font-size:12px; color:#721c24; padding:2px 0;",
@@ -1505,7 +1595,8 @@ mod_process_server <- function(id, data, config, channels,
               paste0(n_mismatch, " mismatch",
                      if (n_mismatch != 1) "es" else "",
                      " out of ", format(n_total, big.mark = ","), " rows",
-                     " \u2014 level: ", cs_label, " \u00d7 Period")
+                     " \u2014 level: ", cs_label,
+                     if (!identical(tc_cross_id, "Period")) " \u00d7 Period" else "")
             )
           ),
           extensions = "Buttons",

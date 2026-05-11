@@ -19,7 +19,7 @@ library(zip)
 `%||%` <- function(a, b) if (is.null(a) || length(a) == 0) b else a
 
 
-# global.R — sección de sources ACTUALIZADA
+# global.R — 
 
 source("R/theme.R")
 source("R/functions.R")

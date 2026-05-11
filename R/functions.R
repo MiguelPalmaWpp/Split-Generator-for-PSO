@@ -116,14 +116,11 @@ read_all_transformed <- function(path, ext) {
   
   raw <- if (tolower(ext) == "parquet") {
     arrow::read_parquet(path)
-    
   } else if (tolower(ext) %in% c("xlsx", "xls")) {
     read_excel(path)
-    
   } else if (tolower(ext) == "gz") {
     data.table::fread(file = path, data.table = FALSE,
                       colClasses = "character", showProgress = FALSE)
-    
   } else if (tolower(ext) == "zip") {
     tmp <- file.path(tempdir(), paste0("unzip_", as.integer(Sys.time())))
     dir.create(tmp, showWarnings = FALSE)
@@ -131,11 +128,9 @@ read_all_transformed <- function(path, ext) {
     unzip(path, exdir = tmp)
     csv_files <- list.files(tmp, pattern = "\\.csv$",
                             full.names = TRUE, recursive = TRUE)
-    if (!length(csv_files))
-      stop("No CSV file found inside the ZIP.")
+    if (!length(csv_files)) stop("No CSV file found inside the ZIP.")
     data.table::fread(csv_files[1], data.table = FALSE,
                       colClasses = "character", showProgress = FALSE)
-    
   } else {
     data.table::fread(file = path, sep = "auto", encoding = "UTF-8",
                       data.table = FALSE, colClasses = "character",
@@ -148,17 +143,18 @@ read_all_transformed <- function(path, ext) {
     message("[read_all_transformed] all_extracted format detected — 'raw' prefix removed")
   }
   
+  # ── OPTIMIZATION : keep only required columns ─────────────────
+  available_required <- intersect(REQUIRED_COLS, names(raw))
   miss <- setdiff(REQUIRED_COLS, names(raw))
   if (length(miss)) stop("Missing columns: ", paste(miss, collapse = ", "))
-  
-  raw <- raw[, REQUIRED_COLS]
+  raw <- raw[, available_required, drop = FALSE]
   
   message("[read_all_transformed] Raw Period sample: '",
           raw$Period[!is.na(raw$Period)][1], "'")
   
   raw %>%
     mutate(
-      Period        = parse_period_robust(Period),
+      Period       = parse_period_robust(Period),
       VariableValue = as.numeric(
         gsub(",", "", gsub(" ", "", as.character(VariableValue)))
       )

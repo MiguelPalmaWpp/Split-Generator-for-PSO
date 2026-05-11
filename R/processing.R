@@ -1,6 +1,6 @@
-# ════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
 # R/processing.R
-# ════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
 
 ordinal_tag <- function(i) {
   c("First", "Second", "Third", "Fourth", "Fifth")[min(i, 5)]
@@ -15,8 +15,7 @@ keep_nonzero_cols <- function(df) {
   df[, keep, drop = FALSE]
 }
 
-apply_dimension_breaks <- function(d, dimension_breaks,
-                                   channel_name = NULL) {
+apply_dimension_breaks <- function(d, dimension_breaks, channel_name = NULL) {
   if (!length(dimension_breaks)) return(d)
   for (brk in dimension_breaks) {
     col <- brk$column; sep <- brk$separator; n <- brk$n_parts
@@ -38,8 +37,6 @@ apply_dimension_breaks <- function(d, dimension_breaks,
   d
 }
 
-# is_rag = TRUE  → all_rags  (geographic: filter to first cross-section)
-# is_rag = FALSE → all_transformed (national: return as-is)
 get_diag_df <- function(df, is_rag, cross_cols, ref_cross_key) {
   if (!is_rag || nrow(df) == 0) return(df)
   cross_data <- df[, cross_cols, drop = FALSE]
@@ -47,23 +44,18 @@ get_diag_df <- function(df, is_rag, cross_cols, ref_cross_key) {
   df[cross_key == ref_cross_key, ]
 }
 
-build_model_total <- function(analytical, cross_id,
-                              model_variables, break_dates) {
+build_model_total <- function(analytical, cross_id, model_variables, break_dates) {
   n_vars        <- length(model_variables)
   break_dates_d <- as.Date(break_dates %||% character(0))
   base <- analytical %>% select(all_of(cross_id)) %>% mutate(ModelTotal = 0)
   for (i in seq_len(n_vars)) {
     mv <- model_variables[i]
     if (!mv %in% names(analytical)) {
-      warning(sprintf(
-        "build_model_total: variable '%s' not found in AnalyticalDataset. Segment %d will have ModelTotal=0.",
-        mv, i))
+      warning(sprintf("build_model_total: '%s' not found (segment %d).", mv, i))
       next
     }
-    seg_start <- if (i == 1)      as.Date("1900-01-01")
-    else             break_dates_d[i - 1] + 1
-    seg_end   <- if (i == n_vars) as.Date("2999-12-31")
-    else             break_dates_d[i]
+    seg_start <- if (i == 1)      as.Date("1900-01-01") else break_dates_d[i - 1] + 1
+    seg_end   <- if (i == n_vars) as.Date("2999-12-31") else break_dates_d[i]
     seg_vals  <- analytical %>%
       filter(Period >= seg_start, Period <= seg_end) %>%
       select(all_of(cross_id), model_val = !!sym(mv))
@@ -91,166 +83,177 @@ build_activity_spend <- function(act_all, cost_all, cfg) {
                                 regex(cfg$activity_keyword, ignore_case = TRUE))) %>%
     left_join(cost_key, by = "key") %>%
     mutate(Channel = cfg$channel_name, MainModelVariableName = model_var) %>%
-    select(VariableSplit, total_activity, total_spend,
-           Channel, MainModelVariableName)
+    select(VariableSplit, total_activity, total_spend, Channel, MainModelVariableName)
 }
 
 build_side_mapping <- function(act_all) {
   if (nrow(act_all) == 0) return(tibble())
   act_all %>%
     select(VariableSplit, model_var) %>%
-    mutate(MainModelVariableName = model_var, Weight = 1,
-           MinWeight = 0.5, MaxWeight = 2, rank = NA_real_) %>%
+    mutate(MainModelVariableName = model_var,
+           Weight = 1, MinWeight = 0.5, MaxWeight = 2, rank = NA_real_) %>%
     select(-model_var)
 }
 
-# ── Main processing function ───────────────────────────────────────
-process_channel <- function(all_transformeds, all_rags,
-                            analytical, dates_df,
-                            cfg, cross_cols,
-                            source_type       = "all_transformed",
-                            start_report_date,
-                            end_report_date,
-                            update_label,
-                            dimension_breaks  = list(),
-                            segment_overrides = list()) {
+# ── Main processing function ────────────────────────────────────────
+# OPTIMIZATION: uses data.table for pivot (dcast) and merges.
+# progress_cb: optional function(detail, value=NULL) for UI progress.
+process_channel <- function(all_transformeds, all_rags, analytical, dates_df,
+                            cfg, cross_cols, source_type = "all_transformed",
+                            start_report_date, end_report_date, update_label,
+                            dimension_breaks = list(), segment_overrides = list(),
+                            progress_cb = NULL) {
+  
+  # Helper to push progress updates
+  pb <- function(detail, value = NULL) {
+    if (!is.null(progress_cb)) progress_cb(detail, value)
+  }
+  
+  pb("Preparing data...", 0.05)
   
   if (!is.null(all_transformeds)) all_transformeds <- as.data.frame(all_transformeds)
   if (!is.null(all_rags))         all_rags         <- as.data.frame(all_rags)
   analytical <- as.data.frame(analytical)
   dates_df   <- as.data.frame(dates_df)
   
-  # is_rag = TRUE  → all_rags  (geographic)
-  # is_rag = FALSE → all_transformed (national)
   is_rag      <- source_type == "all_rags"
   source_data <- if (is_rag) all_rags else all_transformeds
-  if (is.null(source_data))
-    stop("Data source '", source_type, "' not uploaded.")
+  if (is.null(source_data)) stop("Data source '", source_type, "' not uploaded.")
   
   ref_cross_key <- if (is_rag && length(cross_cols) > 0) {
     cross_data <- source_data[, cross_cols, drop = FALSE]
     cross_key  <- do.call(paste, c(as.list(cross_data), list(sep = " / ")))
     sort(unique(cross_key))[1]
-  } else { "national (all_transformed)" }
+  } else "national (all_transformed)"
   
   cross_id   <- c(cross_cols, "Period")
-  
-  # National: join by Period only → rag_base from analytical is fine
-  # Geographic: join by full cross_id → rag_base MUST come from source_data
-  #   to guarantee cross_id values match d_wide (same file, same naming)
   join_key   <- if (!is_rag) "Period" else cross_id
   id_protect <- if (!is_rag) "Period" else cross_id
   
-  rag_base <- if (is_rag) {
-    # KEY FIX: use source_data so Geography/Product/Period values
-    # always match d_wide in the cross_id merge
-    unique(source_data[, cross_id, drop = FALSE])
-  } else {
-    unique(analytical[, cross_id, drop = FALSE])
-  }
+  rag_base <- unique(source_data[, cross_id, drop = FALSE])
   rag_base <- rag_base[order(rag_base$Period), ]
   
-  n     <- length(cfg$model_variables)
-  bks   <- as.Date(cfg$break_dates)
-  s_beg <- c(as.Date(NA_character_), bks)
-  s_end <- c(bks, as.Date(end_report_date))
-  
-  rag_joins  <- list()
-  act_rows   <- list()
-  cost_rows  <- list()
+  n             <- length(cfg$model_variables)
+  bks           <- as.Date(cfg$break_dates)
+  s_beg         <- c(as.Date(NA_character_), bks)
+  s_end         <- c(bks, as.Date(end_report_date))
+  rag_joins     <- list()
+  act_rows      <- list()
+  cost_rows     <- list()
   
   has_geo_overrides <- length(segment_overrides) > 0 &&
     any(sapply(segment_overrides,
                \(o) length(o$geography_exclude %||% character(0)) > 0))
   
-  # Pre-filter: channel-level filters applied ONCE
-  d_prefilt <- source_data
+  # ── Pre-filter (applied once) ─────────────────────────────────────
+  pb("Filtering source data...", 0.10)
+  
+  # OPTIMIZATION: convert to data.table for fast filtering
+  d_prefilt <- data.table::as.data.table(source_data)
   
   vi <- cfg$varname_include[nchar(cfg$varname_include %||% "") > 0]
   if (length(vi) > 0) {
-    keep      <- Reduce("|", lapply(vi, function(p)
-      grepl(p, d_prefilt$VariableName, ignore.case = TRUE)))
-    d_prefilt <- d_prefilt[keep, ]
+    pattern <- paste(vi, collapse = "|")
+    d_prefilt <- d_prefilt[grepl(pattern, VariableName, ignore.case = TRUE)]
   }
+  
   for (p in cfg$varname_exclude)
     if (nchar(p %||% "") > 0)
-      d_prefilt <- d_prefilt[!grepl(p, d_prefilt$VariableName,
-                                    ignore.case = TRUE), ]
+      d_prefilt <- d_prefilt[!grepl(p, VariableName, ignore.case = TRUE)]
   
-  if (!has_geo_overrides) {
+  if (!has_geo_overrides && "Geography" %in% names(d_prefilt))
     for (p in cfg$geography_exclude %||% character(0))
       if (nchar(p %||% "") > 0)
-        d_prefilt <- d_prefilt[!grepl(p, d_prefilt$Geography,
-                                      ignore.case = TRUE), ]
-  }
-  for (p in cfg$campaign_exclude)
-    if (nchar(p %||% "") > 0)
-      d_prefilt <- d_prefilt[!grepl(p, d_prefilt$Campaign,
-                                    ignore.case = TRUE), ]
-  for (p in cfg$outlet_exclude %||% character(0))
-    if (nchar(p %||% "") > 0)
-      d_prefilt <- d_prefilt[!grepl(p, d_prefilt$Outlet,
-                                    ignore.case = TRUE), ]
-  for (p in cfg$creative_exclude %||% character(0))
-    if (nchar(p %||% "") > 0)
-      d_prefilt <- d_prefilt[!grepl(p, d_prefilt$Creative,
-                                    ignore.case = TRUE), ]
+        d_prefilt <- d_prefilt[!grepl(p, Geography, ignore.case = TRUE)]
   
+  if ("Campaign" %in% names(d_prefilt))
+    for (p in cfg$campaign_exclude)
+      if (nchar(p %||% "") > 0)
+        d_prefilt <- d_prefilt[!grepl(p, Campaign, ignore.case = TRUE)]
+  
+  if ("Outlet" %in% names(d_prefilt))
+    for (p in cfg$outlet_exclude %||% character(0))
+      if (nchar(p %||% "") > 0)
+        d_prefilt <- d_prefilt[!grepl(p, Outlet, ignore.case = TRUE)]
+  
+  if ("Creative" %in% names(d_prefilt))
+    for (p in cfg$creative_exclude %||% character(0))
+      if (nchar(p %||% "") > 0)
+        d_prefilt <- d_prefilt[!grepl(p, Creative, ignore.case = TRUE)]
+  
+  # ── Segment loop ──────────────────────────────────────────────────
   for (i in seq_len(n)) {
-    d <- d_prefilt
     
-    if (has_geo_overrides) {
+    pb(paste0("Segment ", i, " / ", n, ": building splits..."),
+       0.15 + (i - 1) * (0.65 / n))
+    
+    d <- data.table::copy(d_prefilt)
+    
+    # Per-segment geography override
+    if (has_geo_overrides && "Geography" %in% names(d)) {
       seg_ovr <- Filter(\(o) isTRUE(o$seg == i), segment_overrides)
       geo_exc <- if (length(seg_ovr) > 0)
         seg_ovr[[1]]$geography_exclude %||% character(0)
       else cfg$geography_exclude %||% character(0)
       for (p in geo_exc)
         if (nchar(p %||% "") > 0)
-          d <- d[!grepl(p, d$Geography, ignore.case = TRUE), ]
+          d <- d[!grepl(p, Geography, ignore.case = TRUE)]
     }
     
-    if (!is.na(s_beg[i])) d <- d[d$Period >= s_beg[i], ]
-    d <- d[d$Period <= s_end[i], ]
-    d <- as.data.frame(d)
+    # Date window
+    if (!is.na(s_beg[i])) d <- d[Period >= s_beg[i]]
+    d <- d[Period <= s_end[i]]
+    
     if (nrow(d) == 0) next
     
-    d$VariableValue <- suppressWarnings(
-      as.numeric(as.character(d$VariableValue)))
-    d$VariableValue[is.na(d$VariableValue)] <- 0
+    # Numeric coerce (in-place with :=)
+    d[, VariableValue := suppressWarnings(as.numeric(as.character(VariableValue)))]
+    d[is.na(VariableValue), VariableValue := 0]
     
-    d <- apply_dimension_breaks(d, dimension_breaks,
-                                channel_name = cfg$channel_name)
+    # Dimension breaks (needs data.frame temporarily)
+    d_df <- apply_dimension_breaks(as.data.frame(d), dimension_breaks,
+                                   channel_name = cfg$channel_name)
+    d <- data.table::as.data.table(d_df)
     
-    d$SplitName <- apply(d[, cfg$split_columns, drop = FALSE],
-                         1, paste, collapse = "_")
+    # Build SplitName
+    d[, SplitName := do.call(paste,
+                             c(lapply(cfg$split_columns, function(col) d[[col]]),
+                               list(sep = "_")))]
     
-    # Pivot wide
-    # National  (!is_rag): id_cols = Period, merge with dates_df
-    # Geographic (is_rag): id_cols = cross_id, merge with rag_base
+    # ── OPTIMIZATION: dcast instead of pivot_wider ────────────────
     if (!is_rag) {
-      d_wide <- as_tibble(d) %>%
-        pivot_wider(id_cols = Period, names_from = SplitName,
-                    values_from = VariableValue,
-                    values_fn = first, values_fill = 0) %>%
-        as.data.frame()
-      d_wide <- merge(dates_df, d_wide, by = "Period", all.x = TRUE)
+      # National: id = Period only
+      d_wide <- data.table::dcast(
+        d, Period ~ SplitName,
+        value.var = "VariableValue",
+        fun.aggregate = sum, fill = 0
+      )
+      d_wide <- merge(data.table::as.data.table(dates_df),
+                      d_wide, by = "Period", all.x = TRUE)
     } else {
-      d_wide <- as_tibble(d) %>%
-        pivot_wider(id_cols = all_of(cross_id), names_from = SplitName,
-                    values_from = VariableValue,
-                    values_fn = sum, values_fill = 0) %>%
-        as.data.frame()
-      # rag_base is from source_data → cross_id values guaranteed to match
-      d_wide <- merge(rag_base, d_wide, by = cross_id, all.x = TRUE)
+      # Geographic: id = Geography × Product × Period
+      lhs    <- paste(cross_id, collapse = " + ")
+      d_wide <- data.table::dcast(
+        d, as.formula(paste(lhs, "~ SplitName")),
+        value.var = "VariableValue",
+        fun.aggregate = sum, fill = 0
+      )
+      d_wide <- merge(data.table::as.data.table(rag_base),
+                      d_wide, by = cross_id, all.x = TRUE)
     }
     
-    d_wide[is.na(d_wide)] <- 0
+    # Fill NAs in numeric columns with 0
+    num_cols_w <- names(d_wide)[sapply(d_wide, is.numeric)]
+    for (col in num_cols_w)
+      data.table::set(d_wide, which(is.na(d_wide[[col]])), col, 0L)
+    
+    d_wide <- as.data.frame(d_wide)
     d_wide <- d_wide[order(d_wide$Period), ]
     
     nf_sfx <- if (n == 1) paste0("Before_", update_label)
     else paste0("Before_", update_label, "|", ordinal_tag(i), "TimeBreak")
     
-    # Non-focus slice
+    # ── Non-focus slice ───────────────────────────────────────────
     nf_raw <- as.data.frame(d_wide[d_wide$Period < as.Date(start_report_date), ])
     nf     <- keep_nonzero_cols(nf_raw)
     
@@ -271,6 +274,7 @@ process_channel <- function(all_transformeds, all_rags,
             mutate(period = "nonfocus", seg = i, model_var = cfg$model_variables[i])
         ))
       }
+      
       cost_col_names <- grep(cfg$spend_keyword, names(nf),
                              ignore.case = TRUE, value = TRUE)
       if (length(cost_col_names) > 0) {
@@ -283,7 +287,7 @@ process_channel <- function(all_transformeds, all_rags,
       }
     }
     
-    # Focus slice
+    # ── Focus slice ───────────────────────────────────────────────
     fc_raw <- as.data.frame(
       d_wide[d_wide$Period >= as.Date(start_report_date) &
                d_wide$Period <= as.Date(end_report_date), ])
@@ -306,6 +310,7 @@ process_channel <- function(all_transformeds, all_rags,
             mutate(period = "focus", seg = i, model_var = cfg$model_variables[i])
         ))
       }
+      
       cost_col_fc <- grep(cfg$spend_keyword, names(fc),
                           ignore.case = TRUE, value = TRUE)
       if (length(cost_col_fc) > 0) {
@@ -317,16 +322,32 @@ process_channel <- function(all_transformeds, all_rags,
         ))
       }
     }
+    
+    # Free segment memory
+    rm(d, d_df, d_wide, nf_raw, nf, fc_raw, fc)
   }
   
-  rag <- rag_base
+  # ── Assemble RAG ──────────────────────────────────────────────────
+  pb("Assembling RAG...", 0.82)
+  
+  # OPTIMIZATION: data.table merge for RAG assembly
+  rag <- data.table::as.data.table(rag_base)
   for (j in rag_joins) {
-    rag <- merge(rag, j$df, by = j$key, all.x = TRUE)
-    rag[is.na(rag)] <- 0
+    jdf  <- data.table::as.data.table(j$df)
+    rag  <- merge(rag, jdf, by = j$key, all.x = TRUE)
+    # Fill NAs in-place
+    num_cols_r <- names(rag)[sapply(rag, is.numeric)]
+    for (col in num_cols_r)
+      data.table::set(rag, which(is.na(rag[[col]])), col, 0)
   }
+  rag <- as.data.frame(rag)
+  
+  pb("Computing diagnostics...", 0.92)
   
   act_all  <- bind_rows(act_rows)
   cost_all <- bind_rows(cost_rows)
+  
+  pb("Done.", 1.0)
   
   list(
     rag            = rag,

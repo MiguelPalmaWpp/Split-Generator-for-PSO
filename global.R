@@ -14,6 +14,7 @@ library(sortable)
 library(data.table)
 library(jsonlite)
 library(arrow)
+library(zip)
 
 `%||%` <- function(a, b) if (is.null(a) || length(a) == 0) b else a
 

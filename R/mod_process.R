@@ -1,6 +1,6 @@
-# ═══════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════
 # R/mod_process.R
-# ═══════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════
 
 mod_process_ui <- function(id) {
   ns <- NS(id)
@@ -15,9 +15,9 @@ mod_process_ui <- function(id) {
                      class = "btn-success btn-sm w-100 mb-2"),
         actionButton(ns("btn_all"), "Process All",
                      class = "btn-warning btn-sm w-100"),
-        hr(),
+        hr(class = "hr-sm"),
         uiOutput(ns("status")),
-        hr(style = "margin:8px 0;"),
+        hr(class = "hr-sm"),
         downloadButton(ns("dl_config_process"),
                        label = tagList(icon("download"), " Download config CSV"),
                        class = "btn-outline-secondary btn-sm w-100")
@@ -29,26 +29,22 @@ mod_process_ui <- function(id) {
       full_screen = TRUE,
       card_header(
         div(
-          style = "display:flex; align-items:center; gap:10px;",
+          class = "card-header-inner",
           actionButton(ns("btn_prev"), icon("chevron-left"),
-                       class = "btn-outline-secondary btn-sm",
-                       style = "padding:3px 8px;"),
-          div(style = "flex:1;", uiOutput(ns("channel_pos"))),
+                       class = "btn-outline-secondary btn-sm btn-nav-icon"),
+          div(class = "flex-fill", uiOutput(ns("channel_pos"))),
           actionButton(ns("btn_next"), icon("chevron-right"),
-                       class = "btn-outline-secondary btn-sm",
-                       style = "padding:3px 8px;")
+                       class = "btn-outline-secondary btn-sm btn-nav-icon")
         )
       ),
       navset_card_underline(
-        nav_panel(
-          "Activity",
-          uiOutput(ns("period_filter_ui")),
-          uiOutput(ns("activity_kpis")),
-          uiOutput(ns("threshold_ui")),
-          uiOutput(ns("merge_plan_toolbar")),
-          uiOutput(ns("merge_toolbar")),
-          DTOutput(ns("diag_act"))
-        ),
+        nav_panel("Activity",
+                  uiOutput(ns("period_filter_ui")),
+                  uiOutput(ns("activity_kpis")),
+                  uiOutput(ns("threshold_ui")),
+                  uiOutput(ns("merge_plan_toolbar")),
+                  uiOutput(ns("merge_toolbar")),
+                  DTOutput(ns("diag_act"))),
         nav_panel("Spend",       DTOutput(ns("diag_cost"))),
         nav_panel("Total Check", DTOutput(ns("diag_check")))
       )
@@ -56,6 +52,7 @@ mod_process_ui <- function(id) {
   )
 }
 
+# ── Server ──────────────────────────────────────────────────────────────────
 mod_process_server <- function(id, data, config, channels,
                                update_merges = NULL) {
   moduleServer(id, function(input, output, session) {
@@ -64,9 +61,8 @@ mod_process_server <- function(id, data, config, channels,
     original_store  <- reactiveValues()
     merge_log_store <- reactiveValues()
     history_store   <- reactiveValues()
+    clean_store     <- reactiveValues()
     results_trigger <- reactiveVal(0L)
-    pending         <- reactiveValues(nm = NULL, base_res = NULL, merges = NULL)
-    cs_selected     <- reactiveVal("ALL")
     
     get_res  <- function(nm) results_store[[nm]]
     set_res  <- function(nm, val) {
@@ -102,8 +98,7 @@ mod_process_server <- function(id, data, config, channels,
         abs(x) >= 1e9 ~ paste0(round(x / 1e9, 1), "B"),
         abs(x) >= 1e6 ~ paste0(round(x / 1e6, 1), "M"),
         abs(x) >= 1e3 ~ paste0(round(x / 1e3, 0), "K"),
-        TRUE ~ formatC(round(x), format = "f", digits = 0, big.mark = ",")
-      )
+        TRUE          ~ formatC(round(x), format = "f", digits = 0, big.mark = ","))
     }
     
     strip_common_prefix <- function(names_vec) {
@@ -123,6 +118,7 @@ mod_process_server <- function(id, data, config, channels,
     }
     
     get_merge_name_parts <- function(selected_names) {
+      selected_names <- selected_names[!is.na(selected_names) & nzchar(selected_names)]
       if (length(selected_names) <= 1) return(list(prefix = "", suffix = ""))
       common_prefix_chars <- function(strings) {
         chars   <- lapply(strings, \(s) strsplit(s, "")[[1]])
@@ -147,13 +143,14 @@ mod_process_server <- function(id, data, config, channels,
         pos <- min(gregexpr("_", raw)[[1]])
         if (pos < 1L || pos > nchar(raw)) "" else substr(raw, pos, nchar(raw))
       }
-      prefix <- common_prefix_chars(selected_names)
-      suffix <- common_suffix_chars(selected_names)
-      if (nchar(prefix) + nchar(suffix) >= min(nchar(selected_names))) suffix <- ""
+      prefix  <- common_prefix_chars(selected_names)
+      suffix  <- common_suffix_chars(selected_names)
+      min_len <- min(nchar(selected_names), na.rm = TRUE)
+      if (is.finite(min_len) && nchar(prefix) + nchar(suffix) >= min_len) suffix <- ""
       list(prefix = prefix, suffix = suffix)
     }
     
-    # ── build_model_total ─────────────────────────────────────────
+    # ── build_model_total ──────────────────────────────────────────────────
     build_model_total <- function(analytical, cross_id, model_variables, break_dates) {
       n_vars        <- length(model_variables)
       break_dates_d <- as.Date(break_dates %||% character(0))
@@ -161,10 +158,9 @@ mod_process_server <- function(id, data, config, channels,
       for (i in seq_len(n_vars)) {
         mv <- model_variables[i]
         if (!mv %in% names(analytical)) {
-          warning(sprintf("build_model_total: '%s' not found (segment %d).", mv, i))
-          next
+          warning(sprintf("build_model_total: '%s' not found (segment %d).", mv, i)); next
         }
-        seg_start <- if (i == 1)      as.Date("1900-01-01") else break_dates_d[i - 1] + 1
+        seg_start <- if (i == 1) as.Date("1900-01-01") else break_dates_d[i - 1] + 1
         seg_end   <- if (i == n_vars) as.Date("2999-12-31") else break_dates_d[i]
         seg_vals  <- analytical %>%
           filter(Period >= seg_start, Period <= seg_end) %>%
@@ -177,112 +173,165 @@ mod_process_server <- function(id, data, config, channels,
       base
     }
     
-    # ── apply_single_merge ────────────────────────────────────────
+    # ── apply_single_merge ─────────────────────────────────────────────────
     apply_single_merge <- function(res, merge_entry, cfg) {
       new_name        <- merge_entry$new_name
       selected_splits <- unlist(merge_entry$merged)
       view_filter     <- merge_entry$view %||% "focus"
-      rag_cols        <- intersect(selected_splits, names(res$rag))
+      act_kw          <- cfg$activity_keyword %||% "Impressions"
+      spend_kw        <- cfg$spend_keyword    %||% "Spend"
+      
+      rag_cols <- intersect(selected_splits, names(res$rag))
       if (!length(rag_cols)) {
-        showNotification(paste0("Saved merge '", new_name,
-                                "': splits not found in RAG — skipped."),
-                         type = "warning", duration = 6)
+        id_cols         <- intersect(c(res$cross_cols, "Period"), names(res$rag))
+        rag_split_names <- setdiff(
+          names(res$rag)[sapply(as.data.frame(res$rag), is.numeric)], id_cols)
+        strip_time <- function(x)
+          str_remove(x, "(_Before .*|_Before_.*|_[Ll]ast\\d+[wW].*|_\\d+[wW].*)$")
+        rag_stripped   <- setNames(rag_split_names, strip_time(rag_split_names))
+        split_stripped <- strip_time(selected_splits)
+        matched_keys   <- intersect(split_stripped, names(rag_stripped))
+        if (length(matched_keys)) {
+          rag_cols <- unname(rag_stripped[matched_keys])
+          rag_cols <- rag_cols[!is.na(rag_cols)]
+        }
+      }
+      if (!length(rag_cols)) {
+        showNotification(
+          paste0("Merge '", new_name,
+                 "': splits not found in RAG. Check split_columns or update_label."),
+          type = "warning", duration = 8)
         return(res)
       }
-      new_rag <- res$rag
+      
+      new_rag             <- res$rag
       new_rag[[new_name]] <- rowSums(new_rag[, rag_cols, drop = FALSE], na.rm = TRUE)
-      new_rag <- new_rag[, setdiff(names(new_rag), rag_cols)]
+      new_rag             <- new_rag[, setdiff(names(new_rag), rag_cols)]
+      
+      spend_rag_cands  <- str_replace_all(rag_cols, regex(act_kw, ignore_case = TRUE), spend_kw)
+      spend_rag_cols   <- intersect(spend_rag_cands, names(new_rag))
+      new_spend_rag_nm <- str_replace_all(new_name, regex(act_kw, ignore_case = TRUE), spend_kw)
+      if (new_spend_rag_nm == new_name) new_spend_rag_nm <- paste0(new_name, "_", spend_kw)
+      if (length(spend_rag_cols) > 0) {
+        new_rag[[new_spend_rag_nm]] <- rowSums(
+          new_rag[, spend_rag_cols, drop = FALSE], na.rm = TRUE)
+        new_rag <- new_rag[, setdiff(names(new_rag), spend_rag_cols)]
+      }
+      
       selected_diag <- res$act_diagnoses %>%
         filter(VariableSplit %in% selected_splits, period == view_filter)
+      if (nrow(selected_diag) == 0 && nrow(res$act_diagnoses) > 0)
+        selected_diag <- res$act_diagnoses %>% filter(VariableSplit %in% selected_splits)
       if (nrow(selected_diag) == 0) {
-        showNotification(paste0("Saved merge '", new_name,
-                                "': no data for '", view_filter, "' — skipped."),
-                         type = "warning", duration = 6)
-        return(res)
+        rag_vals <- as.data.frame(new_rag)[[new_name]]
+        non_zero <- rag_vals[!is.na(rag_vals) & rag_vals > 0]
+        if (length(non_zero) > 0)
+          selected_diag <- tibble(
+            VariableSplit = new_name, total_activity = sum(non_zero),
+            pct_total_activity = NA_real_, num_weeks_activity = length(non_zero),
+            max_index = NA_real_, min_consecutive_weeks = NA_real_,
+            sd = if (length(non_zero) > 1) sd(non_zero) else 0, min = min(non_zero),
+            quartile_1 = as.numeric(quantile(non_zero, 0.25)),
+            median     = as.numeric(quantile(non_zero, 0.50)),
+            quartile_3 = as.numeric(quantile(non_zero, 0.75)),
+            max_no_outlier = as.numeric(quantile(non_zero, 0.95)),
+            max = max(non_zero), period = view_filter, seg = 1L,
+            model_var = cfg$model_variable %||% "")
       }
-      merged_act <- tibble(
-        VariableSplit         = new_name,
-        total_activity        = sum(selected_diag$total_activity,        na.rm = TRUE),
-        pct_total_activity    = NA_real_,
-        num_weeks_activity    = max(selected_diag$num_weeks_activity,    na.rm = TRUE),
-        max_index             = NA_real_,
-        min_consecutive_weeks = max(selected_diag$min_consecutive_weeks, na.rm = TRUE),
-        sd         = NA_real_,
-        min        = min(selected_diag$min,         na.rm = TRUE),
-        quartile_1 = mean(selected_diag$quartile_1, na.rm = TRUE),
-        median     = mean(selected_diag$median,     na.rm = TRUE),
-        quartile_3 = mean(selected_diag$quartile_3, na.rm = TRUE),
-        max_no_outlier = max(selected_diag$max_no_outlier, na.rm = TRUE),
-        max        = max(selected_diag$max, na.rm = TRUE)
-      ) %>% bind_cols(selected_diag %>% slice(1) %>%
-                        select(any_of(c("seg", "period", "model_var"))))
-      new_act_diag <- res$act_diagnoses %>%
-        filter(!VariableSplit %in% selected_splits) %>%
-        bind_rows(merged_act) %>% group_by(period) %>%
+      
+      merged_act <- if (nrow(selected_diag) > 0) {
+        tibble(
+          VariableSplit         = new_name,
+          total_activity        = sum(selected_diag$total_activity,        na.rm = TRUE),
+          pct_total_activity    = NA_real_,
+          num_weeks_activity    = max(selected_diag$num_weeks_activity,     na.rm = TRUE),
+          max_index             = NA_real_,
+          min_consecutive_weeks = max(selected_diag$min_consecutive_weeks,  na.rm = TRUE),
+          sd             = NA_real_,
+          min            = min(selected_diag$min,          na.rm = TRUE),
+          quartile_1     = mean(selected_diag$quartile_1,  na.rm = TRUE),
+          median         = mean(selected_diag$median,      na.rm = TRUE),
+          quartile_3     = mean(selected_diag$quartile_3,  na.rm = TRUE),
+          max_no_outlier = max(selected_diag$max_no_outlier, na.rm = TRUE),
+          max            = max(selected_diag$max,          na.rm = TRUE)
+        ) %>% bind_cols(selected_diag %>% slice(1) %>%
+                          select(any_of(c("seg", "period", "model_var"))))
+      } else NULL
+      
+      new_act_diag <- res$act_diagnoses %>% filter(!VariableSplit %in% selected_splits)
+      if (!is.null(merged_act))
+        new_act_diag <- new_act_diag %>%
+        bind_rows(merged_act) %>%
+        group_by(period) %>%
         mutate(grand_p = sum(total_activity, na.rm = TRUE),
                pct_total_activity = round(total_activity / pmax(grand_p, 1) * 100, 4)) %>%
         ungroup() %>% select(-grand_p)
+      
       merged_as <- res$activity_spend %>%
         filter(VariableSplit %in% selected_splits) %>%
         summarise(VariableSplit = new_name,
                   total_activity = sum(total_activity, na.rm = TRUE),
                   total_spend    = sum(total_spend,    na.rm = TRUE),
-                  Channel = first(Channel),
+                  Channel               = first(Channel),
                   MainModelVariableName = first(MainModelVariableName))
       new_act_spend <- res$activity_spend %>%
         filter(!VariableSplit %in% selected_splits) %>% bind_rows(merged_as)
+      
       merged_sm <- res$side_mapping %>%
         filter(VariableSplit %in% selected_splits) %>%
         slice(1) %>% mutate(VariableSplit = new_name)
       new_side_map <- res$side_mapping %>%
         filter(!VariableSplit %in% selected_splits) %>% bind_rows(merged_sm)
-      spend_splits   <- unlist(merge_entry$spend_merged %||% character(0))
-      new_spend_name <- merge_entry$new_spend_name %||%
-        paste0(new_name, "_", cfg$spend_keyword)
-      matching_cost  <- intersect(spend_splits, res$cost_diagnoses$VariableSplit)
+      
+      stored_spend    <- unlist(merge_entry$spend_merged %||% character(0))
+      derived_spend   <- str_replace_all(rag_cols, regex(act_kw, ignore_case = TRUE), spend_kw)
+      all_spend_cands <- unique(c(stored_spend, derived_spend))
+      all_spend_cands <- all_spend_cands[nzchar(all_spend_cands)]
+      new_spend_name  <- if (nzchar(merge_entry$new_spend_name %||% ""))
+        merge_entry$new_spend_name else new_spend_rag_nm
+      matching_cost   <- intersect(all_spend_cands, res$cost_diagnoses$VariableSplit)
+      
       new_cost_diag <- tryCatch({
         if (!length(matching_cost)) { res$cost_diagnoses } else {
           sel_cost <- res$cost_diagnoses %>% filter(VariableSplit %in% matching_cost)
           mc_row <- tibble(
             VariableSplit         = new_spend_name,
-            total_spend           = sum(sel_cost$total_spend,           na.rm = TRUE),
+            total_spend           = sum(sel_cost$total_spend,          na.rm = TRUE),
             pct_total_spend       = NA_real_,
             num_weeks_spend       = max(sel_cost$num_weeks_spend,       na.rm = TRUE),
             min_consecutive_weeks = max(sel_cost$min_consecutive_weeks, na.rm = TRUE),
-            sd         = NA_real_,
-            min        = min(sel_cost$min,         na.rm = TRUE),
-            quartile_1 = mean(sel_cost$quartile_1, na.rm = TRUE),
-            median     = mean(sel_cost$median,     na.rm = TRUE),
-            quartile_3 = mean(sel_cost$quartile_3, na.rm = TRUE),
+            sd             = NA_real_,
+            min            = min(sel_cost$min,          na.rm = TRUE),
+            quartile_1     = mean(sel_cost$quartile_1,  na.rm = TRUE),
+            median         = mean(sel_cost$median,      na.rm = TRUE),
+            quartile_3     = mean(sel_cost$quartile_3,  na.rm = TRUE),
             max_no_outlier = max(sel_cost$max_no_outlier, na.rm = TRUE),
-            max       = max(sel_cost$max, na.rm = TRUE), max_index = NA_real_,
+            max            = max(sel_cost$max,          na.rm = TRUE),
+            max_index      = NA_real_,
             period    = sel_cost$period[1]    %||% "focus",
             seg       = sel_cost$seg[1]       %||% NA_integer_,
-            model_var = sel_cost$model_var[1] %||% NA_character_
-          )
+            model_var = sel_cost$model_var[1] %||% NA_character_)
           cc <- res$cost_diagnoses %>%
             filter(!VariableSplit %in% matching_cost) %>% bind_rows(mc_row)
-          if ("period" %in% names(cc)) {
+          if ("period" %in% names(cc))
             cc %>% group_by(period) %>%
-              mutate(gp = sum(total_spend, na.rm = TRUE),
-                     pct_total_spend = round(total_spend / pmax(gp, 1) * 100, 4)) %>%
-              ungroup() %>% select(-gp)
-          } else {
+            mutate(gp = sum(total_spend, na.rm = TRUE),
+                   pct_total_spend = round(total_spend / pmax(gp, 1) * 100, 4)) %>%
+            ungroup() %>% select(-gp)
+          else {
             gt <- sum(cc$total_spend, na.rm = TRUE)
             cc %>% mutate(pct_total_spend = round(total_spend / pmax(gt, 1) * 100, 4))
           }
         }
       }, error = \(e) res$cost_diagnoses)
-      list(rag = new_rag, cross_cols = res$cross_cols,
-           is_rag = res$is_rag, ref_cross = res$ref_cross,
+      
+      list(rag = new_rag, cross_cols = res$cross_cols, ref_cross = res$ref_cross,
            activity_spend = new_act_spend, side_mapping = new_side_map,
            act_diagnoses = new_act_diag, cost_diagnoses = new_cost_diag)
     }
     
-    # ── Sync channel selector ──────────────────────────────────────
-    observe({
-      updateSelectInput(session, "channel_select", choices = names(channels()))
-    })
+    # ── Channel selector ───────────────────────────────────────────────────
+    observe({ updateSelectInput(session, "channel_select", choices = names(channels())) })
     
     observeEvent(input$btn_prev, {
       nms <- names(channels()); if (!length(nms)) return()
@@ -302,12 +351,11 @@ mod_process_server <- function(id, data, config, channels,
       if (!length(nms) || !valid_nm(nm)) return(NULL)
       idx <- which(nms == nm); if (!length(idx)) idx <- 0L
       tagList(
-        tags$strong(nm, style = "font-size:13px; color:#2c3e50;"),
-        tags$span(paste0(" (", idx, " / ", length(nms), ")"),
-                  style = "font-size:11px; color:#8a9bb0;")
-      )
+        tags$strong(nm, class = "ch-editor-name"),
+        tags$span(paste0(" (", idx, " / ", length(nms), ")"), class = "ch-editor-counter"))
     })
     
+    # ── Status panel ───────────────────────────────────────────────────────
     output$status <- renderUI({
       results_trigger()
       ch_names <- names(channels())
@@ -318,38 +366,22 @@ mod_process_server <- function(id, data, config, channels,
         n_merges  <- length(get_log(nm))
         is_sel    <- identical(input$channel_select, nm)
         saved_m   <- channels()[[nm]]$saved_merges %||% list()
-        has_saved <- length(saved_m) > 0
+        n_saved   <- sum(vapply(saved_m, \(m) isTRUE(m$active), logical(1)))
         div(
-          style = paste0(
-            "display:flex; align-items:center; gap:8px;",
-            "padding:7px 8px; border-radius:6px; cursor:pointer;",
-            "transition:background 0.15s; margin-bottom:2px;",
-            "background:", if (is_sel) "#EBF3FB" else "transparent", ";"
-          ),
-          onclick = paste0("Shiny.setInputValue('", session$ns("ch_click"), "','",
-                           nm, "',{priority:'event'});"),
+          class = paste("status-item", if (is_sel) "selected" else ""),
+          onclick = paste0("Shiny.setInputValue('", session$ns("ch_click"),
+                           "','", nm, "',{priority:'event'});"),
           if (processed)
-            icon("circle-check", style = "color:#2ecc71; font-size:13px; flex-shrink:0;")
+            icon("circle-check", class = "icon-success-sm")
           else
-            icon("circle", style = "color:#dee2e6; font-size:13px; flex-shrink:0;"),
-          tags$span(nm, style = paste0(
-            "flex:1; font-size:12px; overflow:hidden; text-overflow:ellipsis;",
-            "white-space:nowrap; font-weight:", if (is_sel) "700" else "400", ";",
-            "color:", if (is_sel) "#5B9BD5" else "#2c3e50", ";"
-          )),
-          div(
-            style = "display:flex; gap:4px; flex-shrink:0;",
-            if (processed && n_merges > 0)
-              tags$span(paste0(n_merges, "m"),
-                        style = paste0("background:#EBF3FB; color:#5B9BD5;",
-                                       "font-size:10px; font-weight:600;",
-                                       "padding:1px 5px; border-radius:8px;")),
-            if (has_saved)
-              tags$span(icon("bookmark", style = "font-size:9px;"),
-                        style = paste0("background:#fff3cd; color:#856404;",
-                                       "font-size:10px; padding:1px 5px;",
-                                       "border-radius:8px;"))
-          )
+            icon("circle", class = "icon-empty-status"),
+          tags$span(nm, class = "status-item-name"),
+          div(class = "status-badges",
+              if (processed && n_merges > 0)
+                tags$span(paste0(n_merges, "m"), class = "badge-merge-count"),
+              if (n_saved > 0)
+                tags$span(paste0(n_saved, " saved"), class = "badge-saved",
+                          title = paste0(n_saved, " merge(s) — auto-applied on process")))
         )
       }))
     })
@@ -360,30 +392,23 @@ mod_process_server <- function(id, data, config, channels,
     }, ignoreInit = TRUE)
     
     output$dl_config_process <- downloadHandler(
-      filename = function() {
-        paste0("channel_config_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
-      },
+      filename = function()
+        paste0("channel_config_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
       content = function(file) {
         cfg_data <- isolate(channels())
         if (!length(cfg_data)) { readr::write_csv(data.frame(), file); return() }
-        df <- export_channels_csv(cfg_data)
-        readr::write_csv(df, file, na = "")
+        readr::write_csv(export_channels_csv(cfg_data), file, na = "")
       }
     )
     
-    # ── Run engine ─────────────────────────────────────────────────
+    # ── run_one ────────────────────────────────────────────────────────────
     run_one <- function(nm) {
       d    <- data()
       cfg  <- channels()[[nm]]; req(cfg)
       gcfg <- config()
-      src  <- gcfg$source_type %||% "all_transformed"
       
-      if (src == "all_rags" && is.null(d$all_rags)) {
-        showNotification(paste0(nm, ": all_RAGs not uploaded."),
-                         type = "error", duration = 8); return()
-      }
-      if (src == "all_transformed" && is.null(d$all_transformed)) {
-        showNotification(paste0(nm, ": all_transformed not uploaded."),
+      if (is.null(d$all_rags)) {
+        showNotification(paste0(nm, ": All RAGs data not uploaded."),
                          type = "error", duration = 8); return()
       }
       if (is.null(d$analytical)) {
@@ -397,6 +422,18 @@ mod_process_server <- function(id, data, config, channels,
         showNotification("Reporting period not configured. Check Setup tab.",
                          type = "error", duration = 10); return()
       }
+      
+      model_var <- cfg$model_variable %||% ""
+      if (!nzchar(model_var)) {
+        showNotification(paste0(nm, ": model_variable not configured."),
+                         type = "error", duration = 8); return()
+      }
+      if (!model_var %in% names(d$analytical)) {
+        showNotification(paste0(nm, ": model variable '", model_var,
+                                "' not found in AnalyticalDataset."),
+                         type = "error", duration = 10); return()
+      }
+      
       cross_cols_val <- gcfg$cross_cols %||% "Geography"
       missing_cc     <- setdiff(cross_cols_val, names(d$analytical))
       if (length(missing_cc) > 0) {
@@ -405,34 +442,27 @@ mod_process_server <- function(id, data, config, channels,
                                 "' not found in AnalyticalDataset."),
                          type = "error", duration = 12); return()
       }
-      n_vars <- length(cfg$model_variables)
-      if (length(cfg$break_dates) != n_vars - 1) {
-        showNotification(paste0(nm, ": expected ", n_vars - 1,
-                                " break date(s), got ", length(cfg$break_dates)),
-                         type = "error", duration = 8); return()
-      }
       
-      res_stored <- NULL
-      err_stored <- NULL
+      res_stored <- NULL; err_stored <- NULL
       
       withProgress(message = paste0("Processing: ", nm), value = 0, {
         tryCatch({
           res_stored <- process_channel(
-            all_transformeds  = d$all_transformed,
             all_rags          = d$all_rags,
             analytical        = d$analytical,
             dates_df          = d$dates_df,
             cfg               = cfg,
             cross_cols        = gcfg$cross_cols %||% "Geography",
-            source_type       = src,
             start_report_date = gcfg$start_report_date,
             end_report_date   = gcfg$end_report_date,
             update_label      = gcfg$update_label,
             dimension_breaks  = cfg$dimension_breaks  %||% list(),
             segment_overrides = cfg$segment_overrides %||% list(),
-            progress_cb       = function(detail, value = NULL) {
-              if (!is.null(value)) setProgress(value,   detail = detail)
-              else                 incProgress(0,       detail = detail)
+            min_period        = cfg$min_period,
+            max_period        = cfg$max_period,
+            progress_cb = function(detail, value = NULL) {
+              if (!is.null(value)) setProgress(value, detail = detail)
+              else incProgress(0, detail = detail)
             }
           )
         }, error = function(e) { err_stored <<- conditionMessage(e) })
@@ -441,192 +471,261 @@ mod_process_server <- function(id, data, config, channels,
       if (!is.null(err_stored)) {
         showNotification(paste(nm, "error:", err_stored),
                          type = "error", duration = 12)
-        gc(verbose = FALSE, full = TRUE)
-        return()
+        gc(verbose = FALSE, full = TRUE); return()
       }
       
       if (!is.null(res_stored)) {
         active_saved <- Filter(\(m) isTRUE(m$active), cfg$saved_merges %||% list())
+        n_applied    <- 0L; n_skipped <- 0L
+        
+        clean_store[[nm]] <- res_stored
+        
         if (length(active_saved) > 0) {
-          pending$nm       <- nm
-          pending$base_res <- res_stored
-          pending$merges   <- active_saved
-          showModal(modalDialog(
-            title = tagList(icon("bookmark"), " Saved merges found"),
-            div(
-              tags$p(style = "font-size:14px; margin-bottom:10px;",
-                     tags$strong(length(active_saved)),
-                     " saved merge(s) found for ", tags$strong(nm), ":"),
-              tags$ul(style = "font-size:13px; color:#4a5568;",
-                      lapply(active_saved, function(m) {
-                        tags$li(tags$strong(m$new_name),
-                                tags$span(paste0(" <- ", paste(
-                                  strip_common_prefix(unlist(m$merged)),
-                                  collapse = " + ")),
-                                  style = "color:#8a9bb0; font-size:12px;"))
-                      }))
-            ),
-            footer = tagList(
-              actionButton(session$ns("btn_modal_apply"),
-                           tagList(icon("check"), " Yes, apply merges"),
-                           class = "btn-primary"),
-              actionButton(session$ns("btn_modal_skip"),
-                           "Process without merges",
-                           class = "btn-outline-secondary"),
-              modalButton("Cancel")
-            ),
-            easyClose = FALSE, size = "m"
-          ))
-        } else {
-          set_res(nm, res_stored)
-          set_orig(nm, res_stored)
-          set_log(nm, list())
-          set_hist(nm, list())
-          showNotification(paste(nm, "processed successfully."), type = "message")
+          withProgress(message = paste0("Applying ", length(active_saved),
+                                        " merge(s) from config..."), value = 0.5, {
+                                          for (m in active_saved) {
+                                            rag_before <- names(res_stored$rag)
+                                            res_stored <- tryCatch(apply_single_merge(res_stored, m, cfg),
+                                                                   error = function(e) res_stored)
+                                            if (m$new_name %in% names(res_stored$rag) &&
+                                                !m$new_name %in% rag_before)
+                                              n_applied <- n_applied + 1L
+                                            else
+                                              n_skipped <- n_skipped + 1L
+                                          }
+                                        })
         }
-        rm(res_stored)
-        gc(verbose = FALSE, full = TRUE)
+        
+        set_res(nm, res_stored); set_orig(nm, res_stored)
+        set_log(nm, list()); set_hist(nm, list())
+        
+        msg <- paste0(nm, " processed",
+                      if (n_applied > 0) paste0(" + ", n_applied, " merge(s) from config") else "")
+        if (n_skipped > 0)
+          msg <- paste0(msg, " (", n_skipped, " skipped \u2014 column names may have changed)")
+        showNotification(msg,
+                         type = if (n_skipped > 0 && n_applied == 0) "warning" else "message",
+                         duration = 4)
+        rm(res_stored); gc(verbose = FALSE, full = TRUE)
       }
     }
     
     observeEvent(input$btn_one, {
       nm <- req(input$channel_select); req(valid_nm(nm)); run_one(nm)
     })
-    observeEvent(input$btn_all, { walk(names(channels()), run_one) })
     
-    observeEvent(input$btn_modal_apply, {
-      nm  <- pending$nm; req(!is.null(nm))
-      res <- pending$base_res; cfg <- channels()[[nm]]
-      withProgress(message = paste("Applying", length(pending$merges),
-                                   "saved merges..."), value = 0.5, {
-                                     for (m in pending$merges) res <- apply_single_merge(res, m, cfg)
-                                   })
-      set_res(nm, res); set_orig(nm, pending$base_res)
-      set_log(nm, list()); set_hist(nm, list())
-      n_applied <- length(pending$merges)
-      pending$nm <- NULL; pending$base_res <- NULL; pending$merges <- NULL
-      removeModal()
-      showNotification(paste0(nm, " processed + ", n_applied,
-                              " saved merge(s) applied."), type = "message")
-      gc(verbose = FALSE, full = TRUE)
+    # ── Process All ────────────────────────────────────────────────────────
+    observeEvent(input$btn_all, {
+      nms <- names(channels())
+      if (!length(nms)) {
+        showNotification("No channels configured.", type = "warning"); return()
+      }
+      d    <- data()
+      gcfg <- config()
+      
+      if (is.null(d$all_rags)) {
+        showNotification("All RAGs data not uploaded. Check Setup tab.",
+                         type = "error", duration = 8); return()
+      }
+      if (is.null(d$analytical)) {
+        showNotification("Upload AnalyticalDataset before processing.",
+                         type = "error", duration = 8); return()
+      }
+      if (is.null(gcfg$start_report_date) || is.null(gcfg$end_report_date)) {
+        showNotification("Configure reporting period in Setup first.",
+                         type = "error", duration = 8); return()
+      }
+      
+      n_total  <- length(nms)
+      n_ok     <- 0L; n_skipped <- 0L; n_err <- 0L
+      err_msgs <- character(0); info_msgs <- character(0)
+      
+      withProgress(message = paste0("Processing ", n_total, " channel(s)..."),
+                   value = 0, {
+                     for (i in seq_along(nms)) {
+                       nm  <- nms[i]
+                       cfg <- channels()[[nm]]
+                       setProgress((i - 1) / n_total,
+                                   message = paste0("(", i, "/", n_total, ")  ", nm))
+                       
+                       if (is.null(cfg)) { n_skipped <- n_skipped + 1L; next }
+                       
+                       model_var <- cfg$model_variable %||% ""
+                       skip_reason <- if (!nzchar(model_var)) "model_variable not configured"
+                       else if (!model_var %in% names(d$analytical))
+                         paste0("'", model_var, "' not found in Analytical")
+                       else NULL
+                       
+                       if (!is.null(skip_reason)) {
+                         n_skipped <- n_skipped + 1L
+                         err_msgs  <- c(err_msgs, paste0(nm, ": ", skip_reason)); next
+                       }
+                       
+                       res_stored <- NULL; err_msg <- NULL
+                       tryCatch({
+                         res_stored <- process_channel(
+                           all_rags          = d$all_rags,
+                           analytical        = d$analytical,
+                           dates_df          = d$dates_df,
+                           cfg               = cfg,
+                           cross_cols        = gcfg$cross_cols %||% "Geography",
+                           start_report_date = gcfg$start_report_date,
+                           end_report_date   = gcfg$end_report_date,
+                           update_label      = gcfg$update_label,
+                           dimension_breaks  = cfg$dimension_breaks  %||% list(),
+                           segment_overrides = cfg$segment_overrides %||% list(),
+                           min_period        = cfg$min_period,
+                           max_period        = cfg$max_period,
+                           progress_cb = function(detail, value = NULL) NULL
+                         )
+                       }, error = function(e) { err_msg <<- conditionMessage(e) })
+                       
+                       if (!is.null(err_msg)) {
+                         n_err    <- n_err + 1L
+                         err_msgs <- c(err_msgs, paste0(nm, ": ", err_msg))
+                         gc(verbose = FALSE, full = TRUE); next
+                       }
+                       
+                       if (!is.null(res_stored)) {
+                         active_saved <- Filter(\(m) isTRUE(m$active), cfg$saved_merges %||% list())
+                         
+                         clean_store[[nm]] <- res_stored
+                         
+                         n_applied <- 0L
+                         if (length(active_saved) > 0) {
+                           for (m in active_saved) {
+                             rag_before <- names(res_stored$rag)
+                             res_stored <- tryCatch(apply_single_merge(res_stored, m, cfg),
+                                                    error = function(e) res_stored)
+                             if (m$new_name %in% names(res_stored$rag) &&
+                                 !m$new_name %in% rag_before)
+                               n_applied <- n_applied + 1L
+                           }
+                           if (n_applied > 0)
+                             info_msgs <- c(info_msgs,
+                                            paste0(nm, ": ", n_applied, " merge(s) auto-applied"))
+                         }
+                         set_res(nm, res_stored); set_orig(nm, res_stored)
+                         set_log(nm, list()); set_hist(nm, list())
+                         n_ok <- n_ok + 1L; rm(res_stored)
+                       }
+                       gc(verbose = FALSE, full = TRUE)
+                     }
+                     setProgress(1.0, message = "Done!")
+                   })
+      
+      parts <- c(
+        if (n_ok      > 0) paste0(n_ok,      " processed"),
+        if (n_skipped > 0) paste0(n_skipped, " skipped"),
+        if (n_err     > 0) paste0(n_err,     " failed"))
+      all_msgs <- c(err_msgs, info_msgs)
+      showNotification(
+        tagList(
+          tags$strong(paste(parts, collapse = " \u2014 ")),
+          if (length(all_msgs) > 0) tagList(
+            tags$br(),
+            tags$div(
+              class = if (n_err > 0) "notify-detail-error" else "notify-detail-warn",
+              tagList(lapply(all_msgs, tags$div))))
+        ),
+        type     = if (n_err > 0) "error" else if (n_skipped > 0) "warning" else "message",
+        duration = if (length(all_msgs) > 0) 15 else 5)
     })
     
-    observeEvent(input$btn_modal_skip, {
-      nm <- pending$nm; req(!is.null(nm))
-      set_res(nm, pending$base_res); set_orig(nm, pending$base_res)
-      set_log(nm, list()); set_hist(nm, list())
-      pending$nm <- NULL; pending$base_res <- NULL; pending$merges <- NULL
-      removeModal()
-      showNotification(paste(nm, "processed (saved merges skipped)."), type = "message")
-      gc(verbose = FALSE, full = TRUE)
-    })
-    
-    # ── Period filter UI ───────────────────────────────────────────
+    # ── Period filter UI ───────────────────────────────────────────────────
     output$period_filter_ui <- renderUI({
       results_trigger()
-      nm <- input$channel_select; if (!valid_nm(nm)) return(NULL)
+      nm  <- input$channel_select; if (!valid_nm(nm)) return(NULL)
       res <- results_store[[nm]]
-      if (is.null(res) || is.null(res$act_diagnoses) ||
-          nrow(res$act_diagnoses) == 0) return(NULL)
-      
+      has_data <- (!is.null(res$act_diagnoses) && nrow(res$act_diagnoses) > 0) ||
+        (!is.null(res$rag) && nrow(res$rag) > 0)
+      if (is.null(res) || !has_data) return(NULL)
       diag    <- res$act_diagnoses
       n_focus <- sum(diag$period == "focus",    na.rm = TRUE)
       n_nf    <- sum(diag$period == "nonfocus", na.rm = TRUE)
-      
       div(
-        style = paste0(
-          "background:#f4f6f9; border-radius:8px;",
-          "padding:10px 16px; margin-bottom:10px;",
-          "display:flex; align-items:center; gap:16px;"
-        ),
-        tags$span(icon("filter", style = "color:#5B9BD5;"),
-                  tags$strong(" View:", style = "font-size:13px; color:#333;")),
+        class = "filter-bar",
+        tags$span(icon("filter", class = "icon-blue-sm"),
+                  tags$strong(" View:", class = "filter-bar-label")),
         radioButtons(session$ns("period_filter"), NULL,
                      choices  = c("Focus" = "focus", "Non-Focus" = "nonfocus"),
                      selected = "focus", inline = TRUE),
-        div(
-          style = "display:flex; gap:8px; font-size:12px;",
-          tags$span(
-            style = "background:#EBF3FB; color:#5B9BD5; padding:2px 8px; border-radius:10px; font-weight:600;",
-            paste0("Focus: ", n_focus)),
-          tags$span(
-            style = "background:#f4f6f9; color:#6c757d; padding:2px 8px; border-radius:10px; font-weight:600; border:1px solid #dee2e6;",
-            paste0("Non-Focus: ", n_nf))
-        )
+        div(class = "filter-bar-counts",
+            tags$span(paste0("Focus: ", n_focus),  class = "badge-focus"),
+            tags$span(paste0("Non-Focus: ", n_nf), class = "badge-nonfocus"))
       )
     })
     
-    # ── Current activity data ──────────────────────────────────────
+    # ── current_act_data ───────────────────────────────────────────────────
     current_act_data <- reactive({
       results_trigger()
       nm         <- req(input$channel_select)
       res        <- req(results_store[[nm]])
       filter_val <- input$period_filter %||% "focus"
       
-      if (!isTRUE(res$is_rag)) {
-        df <- res$act_diagnoses
-        if (is.null(df) || nrow(df) == 0)
-          return(tibble(VariableSplit = character()))
-        if (identical(filter_val, "focus"))
-          df <- df[df$period == "focus", ]
-        if (identical(filter_val, "nonfocus"))
-          df <- df[df$period == "nonfocus", ]
-        df %>%
-          filter(total_activity > 0) %>%
-          select(-any_of(c("seg", "period", "model_var"))) %>%
-          mutate(across(where(is.numeric), \(x) round(x, 4)))
-      } else {
-        cfg  <- channels()[[nm]]
-        gcfg <- config()
-        req(!is.null(gcfg$start_report_date), !is.null(gcfg$end_report_date),
-            length(gcfg$start_report_date) == 1, length(gcfg$end_report_date) == 1)
-        
-        rag_df <- as.data.frame(res$rag)
-        num_cols_r <- names(rag_df)[sapply(rag_df, is.numeric)]
-        rag_df <- aggregate(
-          rag_df[, num_cols_r, drop = FALSE],
-          by  = list(Period = rag_df$Period),
-          FUN = function(x) sum(x, na.rm = TRUE)
-        )
-        rag_df$Period <- as.Date(rag_df$Period, origin = "1970-01-01")
-        
-        start_d <- as.Date(gcfg$start_report_date)
-        end_d   <- as.Date(gcfg$end_report_date)
-        req(length(start_d) == 1, length(end_d) == 1, !is.na(start_d), !is.na(end_d))
-        
-        rag_df <- switch(filter_val,
-                         "focus"    = rag_df[rag_df$Period >= start_d & rag_df$Period <= end_d, ],
-                         "nonfocus" = rag_df[rag_df$Period < start_d, ],
-                         rag_df)
-        if (nrow(rag_df) == 0) return(tibble(VariableSplit = character()))
-        
-        act_kw  <- cfg$activity_keyword %||% "Clicks"
-        id_cols <- intersect("Period", names(rag_df))
-        act_cols_keyword <- grep(act_kw, names(rag_df), ignore.case = TRUE, value = TRUE)
-        act_cols_merged  <- if (
-          is.null(res$act_diagnoses) || nrow(res$act_diagnoses) == 0 ||
-          !"VariableSplit" %in% names(res$act_diagnoses)
-        ) character(0) else {
-          intersect(unique(res$act_diagnoses$VariableSplit),
-                    setdiff(names(rag_df), id_cols))
-        }
-        act_cols <- union(act_cols_keyword, act_cols_merged)
-        if (!length(act_cols)) return(tibble(VariableSplit = character()))
-        
-        df <- splits_summary(rag_df[, c(id_cols, act_cols), drop = FALSE], "activity")
-        if (is.null(df) || nrow(df) == 0) return(tibble(VariableSplit = character()))
-        
-        df %>%
-          filter(total_activity > 0) %>%
-          select(-any_of(c("seg", "period", "model_var"))) %>%
-          mutate(across(where(is.numeric), \(x) round(x, 4)))
+      add_pct <- function(df) {
+        if (is.null(df) || nrow(df) == 0 || !"total_activity" %in% names(df))
+          return(df %||% tibble())
+        grand <- sum(df$total_activity, na.rm = TRUE)
+        df %>% mutate(pct_total_activity = round(
+          total_activity / pmax(grand, 1) * 100, 4))
       }
+      
+      cfg        <- channels()[[nm]]
+      gcfg       <- config()
+      spend_kw_f <- cfg$spend_keyword %||% "Spend"
+      
+      req(!is.null(gcfg$start_report_date), !is.null(gcfg$end_report_date),
+          length(gcfg$start_report_date) == 1, length(gcfg$end_report_date) == 1)
+      
+      rag_df <- as.data.frame(res$rag)
+      
+      num_cols_r <- names(rag_df)[sapply(rag_df, is.numeric)]
+      num_cols_r <- num_cols_r[!grepl(spend_kw_f, num_cols_r, ignore.case = TRUE)]
+      
+      if (!length(num_cols_r)) return(tibble(VariableSplit = character()))
+      
+      rag_df <- aggregate(rag_df[, num_cols_r, drop = FALSE],
+                          by  = list(Period = rag_df$Period),
+                          FUN = function(x) sum(x, na.rm = TRUE))
+      rag_df$Period <- as.Date(rag_df$Period, origin = "1970-01-01")
+      
+      start_d <- as.Date(gcfg$start_report_date)
+      end_d   <- as.Date(gcfg$end_report_date)
+      req(!is.na(start_d), !is.na(end_d))
+      
+      rag_df <- switch(filter_val,
+                       "focus"    = rag_df[rag_df$Period >= start_d & rag_df$Period <= end_d, ],
+                       "nonfocus" = rag_df[rag_df$Period <  start_d, ],
+                       rag_df)
+      if (nrow(rag_df) == 0) return(tibble(VariableSplit = character()))
+      
+      act_kw  <- cfg$activity_keyword %||% "Clicks"
+      id_cols <- intersect("Period", names(rag_df))
+      
+      act_cols_keyword <- grep(act_kw, names(rag_df), ignore.case = TRUE, value = TRUE)
+      act_cols_merged  <- if (
+        is.null(res$act_diagnoses) || nrow(res$act_diagnoses) == 0 ||
+        !"VariableSplit" %in% names(res$act_diagnoses)
+      ) character(0) else {
+        intersect(unique(res$act_diagnoses$VariableSplit),
+                  setdiff(names(rag_df), id_cols))
+      }
+      act_cols <- union(act_cols_keyword, act_cols_merged)
+      if (!length(act_cols)) return(tibble(VariableSplit = character()))
+      
+      df <- splits_summary(rag_df[, c(id_cols, act_cols), drop = FALSE], "activity")
+      if (is.null(df) || nrow(df) == 0) return(tibble(VariableSplit = character()))
+      
+      df %>% filter(total_activity > 0) %>%
+        select(-any_of(c("seg", "period", "model_var"))) %>%
+        add_pct() %>% mutate(across(where(is.numeric), \(x) round(x, 4)))
     })
     
     current_spend_data <- reactive({
       results_trigger()
-      nm      <- req(input$channel_select)
-      res     <- req(results_store[[nm]])
+      nm  <- req(input$channel_select)
+      res <- req(results_store[[nm]])
       cost_df <- res$cost_diagnoses
       if (is.null(cost_df) || nrow(cost_df) == 0) return(NULL)
       cost_df %>% filter(total_spend > 0) %>%
@@ -634,94 +733,87 @@ mod_process_server <- function(id, data, config, channels,
         mutate(across(where(is.numeric), \(x) round(x, 4)))
     })
     
+    # ── Activity KPIs ──────────────────────────────────────────────────────
     output$activity_kpis <- renderUI({
       results_trigger()
       nm <- input$channel_select
       if (!valid_nm(nm) || is.null(results_store[[nm]])) return(NULL)
       df <- current_act_data(); if (nrow(df) == 0) return(NULL)
-      threshold     <- input$threshold_pct %||% 5
+      threshold     <- input$threshold_pct %||% 1
       total_splits  <- nrow(df)
       above_thresh  <- sum(df$pct_total_activity >= threshold, na.rm = TRUE)
       below_thresh  <- sum(df$pct_total_activity <  threshold, na.rm = TRUE)
       channel_total <- sum(df$total_activity, na.rm = TRUE)
       kpis <- list(
-        list(label = "Total splits",
-             value = total_splits,             icon = "layer-group", color = "#5B9BD5", bg = "#EBF3FB"),
-        list(label = paste0("Above ", threshold, "%"),
-             value = above_thresh,             icon = "arrow-up",    color = "#2ecc71",  bg = "#e8f5e9"),
-        list(label = paste0("Below ", threshold, "% (review)"),
-             value = below_thresh,             icon = "arrow-down",  color = "#e74c3c",  bg = "#fdecea"),
-        list(label = "Channel total",
-             value = fmt_compact(channel_total), icon = "chart-bar", color = "#5B9BD5",  bg = "#EBF3FB")
+        list(label = "Total splits",    value = total_splits,
+             icon = "layer-group", box_class = "kpi-box kpi-box-blue",  icon_class = "kpi-icon-blue"),
+        list(label = paste0("Above ", threshold, "%"), value = above_thresh,
+             icon = "arrow-up",   box_class = "kpi-box kpi-box-green", icon_class = "kpi-icon-green"),
+        list(label = paste0("Below ", threshold, "% (review)"), value = below_thresh,
+             icon = "arrow-down", box_class = "kpi-box kpi-box-red",   icon_class = "kpi-icon-red"),
+        list(label = "Channel total",   value = fmt_compact(channel_total),
+             icon = "chart-bar",  box_class = "kpi-box kpi-box-blue",  icon_class = "kpi-icon-blue")
       )
       do.call(layout_columns, c(
-        list(col_widths = c(3, 3, 3, 3), style = "margin-bottom:10px;"),
+        list(col_widths = c(3, 3, 3, 3), class = "mb-2"),
         lapply(kpis, function(k) {
-          div(style = paste0("background:", k$bg, "; border-left:3px solid ", k$color, ";",
-                             "border-radius:6px; padding:10px 14px;",
-                             "display:flex; align-items:center; gap:10px;"),
-              icon(k$icon, style = paste0("color:", k$color, "; font-size:20px;")),
-              div(tags$strong(k$value,
-                              style = "font-size:20px; color:#2c3e50; display:block; line-height:1.2;"),
-                  tags$small(k$label, style = "color:#6c757d; font-size:11px;")))
-        })
-      ))
+          div(class = k$box_class,
+              icon(k$icon, class = k$icon_class),
+              div(tags$strong(k$value, class = "kpi-value"),
+                  tags$small(k$label,  class = "kpi-label")))
+        })))
     })
     
+    # ── Threshold UI ───────────────────────────────────────────────────────
     output$threshold_ui <- renderUI({
       results_trigger()
       nm <- input$channel_select
       if (!valid_nm(nm) || is.null(results_store[[nm]])) return(NULL)
-      div(style = paste0("background:#f4f6f9; border-radius:8px;",
-                         "padding:10px 16px; margin-bottom:10px;",
-                         "display:flex; align-items:center; gap:12px; flex-wrap:wrap;"),
-          tags$span(icon("sliders", style = "color:#5B9BD5;"),
-                    tags$strong(" Small split threshold:",
-                                style = "font-size:13px; color:#333; white-space:nowrap;")),
-          div(style = "display:flex; align-items:center; gap:6px;",
-              div(style = "width:70px;",
-                  numericInput(session$ns("threshold_pct"), NULL,
-                               value = input$threshold_pct %||% 5,
-                               min = 0, max = 100, step = 0.5)),
-              tags$span("%", style = "color:#6c757d; font-size:13px; font-weight:600;")),
-          tags$span(style = "font-size:11px; color:#adb5bd;",
-                    icon("circle-info"),
-                    " Splits below threshold shown in red.",
-                    tags$br(),
-                    " Select manually based on grouping logic."))
+      div(
+        class = "filter-bar",
+        style = "gap:12px;",
+        tags$span(icon("sliders", class = "icon-blue-sm"),
+                  tags$strong(" Small split threshold:", class = "filter-bar-label")),
+        div(class = "d-flex align-items-center gap-2",
+            div(class = "input-narrow",
+                numericInput(session$ns("threshold_pct"), NULL,
+                             value = input$threshold_pct %||% 1,
+                             min = 0, max = 100, step = 0.5)),
+            tags$span("%", class = "pct-symbol")),
+        tags$span(class = "hint-text",
+                  icon("circle-info", class = "icon-xs"),
+                  " Splits below threshold shown in red.",
+                  tags$br(),
+                  " Select manually based on grouping logic.")
+      )
     })
     
+    # ── Merge plan toolbar ─────────────────────────────────────────────────
     output$merge_plan_toolbar <- renderUI({
       results_trigger()
       nm <- input$channel_select
       if (!valid_nm(nm) || is.null(results_store[[nm]])) return(NULL)
       div(
-        style = "display:flex; align-items:center; gap:8px; padding:8px 0; margin-bottom:6px;",
+        class = "toolbar-row",
         downloadButton(session$ns("dl_merge_plan"),
                        label = tagList(icon("download"), " Download Merge Plan"),
                        class = "btn-outline-secondary btn-sm"),
-        div(style = "position:relative;",
+        div(class = "position-relative",
             tags$label(
-              style = paste0(
-                "display:flex; align-items:center; gap:6px;",
-                "border:1px solid #5B9BD5; border-radius:5px;",
-                "background:white; color:#5B9BD5; font-size:13px;",
-                "font-weight:500; cursor:pointer;",
-                "padding:5px 12px; margin:0; transition:all 0.15s; white-space:nowrap;"
-              ),
+              class = "btn-upload-plan",
               icon("upload"), " Apply Merge Plan",
-              tags$input(type = "file", accept = ".csv", style = "display:none;",
+              tags$input(type = "file", accept = ".csv", class = "d-none",
                          onchange = paste0(
                            "var r=new FileReader();",
-                           "r.onload=function(e){",
-                           "Shiny.setInputValue('", session$ns("merge_plan_content"), "',",
+                           "r.onload=function(e){Shiny.setInputValue('",
+                           session$ns("merge_plan_content"), "',",
                            "e.target.result,{priority:'event'});};",
                            "r.readAsText(this.files[0]);"))
             )),
-        tags$span(style = "font-size:11px; color:#adb5bd;",
-                  icon("circle-info", style = "font-size:10px;"),
+        tags$span(class = "hint-text",
+                  icon("circle-info", class = "icon-xs"),
                   " Write the same ", tags$strong("MergeName"),
-                  " on splits you want to merge, then upload.")
+                  " on splits to merge, then upload.")
       )
     })
     
@@ -737,16 +829,15 @@ mod_process_server <- function(id, data, config, channels,
                                MergeName = character()),
                     file, row.names = FALSE); return()
         }
-        stat_cols   <- setdiff(names(df), "VariableSplit")
-        df_download <- df %>%
-          mutate(Split = strip_common_prefix(VariableSplit),
-                 MergeName = NA_character_) %>%
-          select(VariableSplit, Split, MergeName, all_of(stat_cols))
-        write.csv(df_download, file, row.names = FALSE, na = "")
+        stat_cols <- setdiff(names(df), "VariableSplit")
+        df %>%
+          mutate(Split = strip_common_prefix(VariableSplit), MergeName = NA_character_) %>%
+          select(VariableSplit, Split, MergeName, all_of(stat_cols)) %>%
+          write.csv(file, row.names = FALSE, na = "")
       }
     )
     
-    # ── Plan merge ─────────────────────────────────────────────────
+    # ── Plan merge ─────────────────────────────────────────────────────────
     observeEvent(input$merge_plan_content, {
       req(input$merge_plan_content)
       nm <- req(input$channel_select); req(valid_nm(nm))
@@ -774,47 +865,51 @@ mod_process_server <- function(id, data, config, channels,
       groups      <- split(plan_active, trimws(as.character(plan_active$MergeName)))
       set_hist(nm, c(get_hist(nm), list(results_store[[nm]])))
       new_log <- list(); new_saved <- list(); n_skipped <- 0L
+      
       withProgress(message = "Applying merge plan...", value = 0, {
         for (i in seq_along(groups)) {
           grp        <- groups[[i]]
           merge_name <- names(groups)[i]
           incProgress(1 / length(groups))
           selected_splits <- grp$VariableSplit
+          act_kw   <- cfg$activity_keyword %||% "Impressions"
+          spend_kw <- cfg$spend_keyword    %||% "Spend"
+          
           if (!length(intersect(selected_splits, names(res$rag)))) {
             n_skipped <- n_skipped + 1L
-            showNotification(paste0("'", merge_name, "': splits not in RAG — skipped."),
+            showNotification(paste0("'", merge_name, "': not in RAG — skipped."),
                              type = "warning", duration = 5); next
           }
-          if (!nrow(filter(res$act_diagnoses,
-                           VariableSplit %in% selected_splits,
+          if (!nrow(filter(res$act_diagnoses, VariableSplit %in% selected_splits,
                            period == view_filter))) {
             n_skipped <- n_skipped + 1L
-            showNotification(paste0("'", merge_name, "': no data for '",
-                                    view_filter, "' — skipped."),
+            showNotification(paste0("'", merge_name, "': no data — skipped."),
                              type = "warning", duration = 5); next
           }
+          
           spend_splits   <- str_replace_all(selected_splits,
-                                            regex(cfg$activity_keyword, ignore_case = TRUE), cfg$spend_keyword)
+                                            regex(act_kw, ignore_case = TRUE), spend_kw)
           new_spend_name <- str_replace_all(merge_name,
-                                            regex(cfg$activity_keyword, ignore_case = TRUE), cfg$spend_keyword)
+                                            regex(act_kw, ignore_case = TRUE), spend_kw)
           if (new_spend_name == merge_name)
-            new_spend_name <- paste0(merge_name, "_", cfg$spend_keyword)
+            new_spend_name <- paste0(merge_name, "_", spend_kw)
           matching_cost <- intersect(spend_splits, res$cost_diagnoses$VariableSplit)
+          
           merge_entry <- list(new_name = merge_name, merged = as.list(selected_splits),
                               view = view_filter, spend_merged = as.list(matching_cost),
                               new_spend_name = new_spend_name)
-          res <- apply_single_merge(res, merge_entry, cfg)
-          new_log   <- c(new_log, list(list(
-            merged = selected_splits, new_name = merge_name,
-            view   = view_filter, spend_merged = matching_cost,
-            new_spend_name = new_spend_name)))
+          res     <- apply_single_merge(res, merge_entry, cfg)
+          new_log <- c(new_log, list(list(
+            merged = selected_splits, new_name = merge_name, view = view_filter,
+            spend_merged = matching_cost, new_spend_name = new_spend_name)))
           new_saved <- c(new_saved, list(list(
             merged = as.list(selected_splits), new_name = merge_name,
-            view   = view_filter, spend_merged = as.list(matching_cost),
+            view = view_filter, spend_merged = as.list(matching_cost),
             new_spend_name = new_spend_name, active = TRUE,
             saved_at = format(Sys.time(), "%Y-%m-%d %H:%M"))))
         }
       })
+      
       set_res(nm, res); set_log(nm, c(get_log(nm), new_log))
       if (!is.null(update_merges) && length(new_saved) > 0) {
         existing <- channels()[[nm]]$saved_merges %||% list()
@@ -830,9 +925,10 @@ mod_process_server <- function(id, data, config, channels,
         type = if (n_ok > 0) "message" else "warning")
     })
     
+    # ── Merge toolbar ──────────────────────────────────────────────────────
     output$merge_toolbar <- renderUI({
       results_trigger()
-      nm <- input$channel_select; if (!valid_nm(nm)) return(NULL)
+      nm  <- input$channel_select; if (!valid_nm(nm)) return(NULL)
       res <- results_store[[nm]]
       if (is.null(res))
         return(tags$p(class = "text-muted small mb-2",
@@ -841,19 +937,18 @@ mod_process_server <- function(id, data, config, channels,
       n_sel    <- length(selected)
       if (n_sel == 0)
         return(tags$p(class = "text-muted small mb-2",
-                      icon("hand-pointer"),
-                      " Select rows in the table to merge splits."))
+                      icon("hand-pointer"), " Select rows in the table to merge splits."))
+      
       df             <- current_act_data()
       selected_names <- df$VariableSplit[selected]
       display_names  <- strip_common_prefix(selected_names)
       parts          <- get_merge_name_parts(selected_names)
       hint <- if (nchar(parts$prefix) > 0 || nchar(parts$suffix) > 0)
-        div(style = "font-size:11px; color:#8a9bb0; margin-top:4px;",
-            icon("circle-info", style = "font-size:10px;"),
+        div(class = "hint-text mt-1",
+            icon("circle-info", class = "icon-xs"),
             " Detected pattern: ",
-            tags$code(
-              style = "background:#EBF3FB; color:#5B9BD5; padding:1px 5px; border-radius:3px; font-size:11px;",
-              paste0(parts$prefix, "...", parts$suffix)))
+            tags$code(class = "code-tag-blue-sm",
+                      paste0(parts$prefix, "...", parts$suffix)))
       else NULL
       combined <- df %>%
         filter(VariableSplit %in% selected_names) %>%
@@ -861,20 +956,19 @@ mod_process_server <- function(id, data, config, channels,
                   pct   = sum(pct_total_activity, na.rm = TRUE),
                   weeks = max(num_weeks_activity, na.rm = TRUE))
       div(
-        style = paste0("background:#EBF3FB; border:1px solid #5B9BD5;",
-                       "border-radius:8px; padding:12px 16px; margin-bottom:12px;"),
+        class = "merge-toolbar-box",
         layout_columns(
           col_widths = c(4, 4, 4),
           tagList(
-            tags$div(icon("object-group", style = "color:#5B9BD5;"),
+            tags$div(icon("object-group", class = "icon-blue-sm"),
                      tags$strong(paste0(" ", n_sel, " splits selected"),
-                                 style = "color:#5B9BD5; font-size:13px;")),
+                                 class = "merge-toolbar-title")),
             tags$div(class = "mt-1",
                      tags$small(paste0("Combined: ", fmt_compact(combined$act),
                                        " (", round(combined$pct, 2), "%)",
                                        " | Max weeks: ", combined$weeks))),
             tags$div(class = "mt-1",
-                     tags$small(style = "color:#6c757d; font-size:11px;",
+                     tags$small(class = "text-muted",
                                 paste(display_names, collapse = " + ")))
           ),
           div(textInput(session$ns("merge_name"), tags$small("New split name"),
@@ -896,12 +990,12 @@ mod_process_server <- function(id, data, config, channels,
       if (is.null(df) || nrow(df) == 0) return()
       selected_names <- df$VariableSplit[selected]
       if (length(selected_names) < 2) return()
-      parts      <- get_merge_name_parts(selected_names)
-      suggestion <- paste0(parts$prefix, "Small_Other", parts$suffix)
-      updateTextInput(session, "merge_name", value = suggestion)
+      parts <- get_merge_name_parts(selected_names)
+      updateTextInput(session, "merge_name",
+                      value = paste0(parts$prefix, "Small_Other", parts$suffix))
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
     
-    # ── Interactive merge ──────────────────────────────────────────
+    # ── Interactive merge ──────────────────────────────────────────────────
     observeEvent(input$btn_merge, {
       nm       <- req(input$channel_select); req(valid_nm(nm))
       selected <- req(input$diag_act_rows_selected)
@@ -909,41 +1003,57 @@ mod_process_server <- function(id, data, config, channels,
       if (!nchar(new_name)) {
         showNotification("Enter a name for the merged split.", type = "warning"); return()
       }
-      res <- results_store[[nm]]; req(res)
-      cfg         <- channels()[[nm]]
-      view_filter <- input$period_filter %||% "focus"
-      df          <- current_act_data()
+      res             <- results_store[[nm]]; req(res)
+      cfg             <- channels()[[nm]]
+      view_filter     <- input$period_filter %||% "focus"
+      df              <- current_act_data()
       selected_splits <- df$VariableSplit[selected]
+      act_kw          <- cfg$activity_keyword %||% "Impressions"
+      spend_kw        <- cfg$spend_keyword    %||% "Spend"
+      
       if (!length(intersect(selected_splits, names(res$rag)))) {
         showNotification("Selected splits not found in RAG.", type = "warning"); return()
       }
-      if (!nrow(filter(res$act_diagnoses,
-                       VariableSplit %in% selected_splits, period == view_filter))) {
-        showNotification(paste0("No diagnosis data for '", view_filter,
-                                "'. Try switching the period filter."),
+      if (!nrow(filter(res$act_diagnoses, VariableSplit %in% selected_splits,
+                       period == view_filter))) {
+        showNotification(paste0("No diagnosis data for '", view_filter, "'."),
                          type = "warning", duration = 10); return()
       }
+      
       spend_splits   <- str_replace_all(selected_splits,
-                                        regex(cfg$activity_keyword, ignore_case = TRUE), cfg$spend_keyword)
+                                        regex(act_kw, ignore_case = TRUE), spend_kw)
       new_spend_name <- str_replace_all(new_name,
-                                        regex(cfg$activity_keyword, ignore_case = TRUE), cfg$spend_keyword)
+                                        regex(act_kw, ignore_case = TRUE), spend_kw)
       if (new_spend_name == new_name)
-        new_spend_name <- paste0(new_name, "_", cfg$spend_keyword)
+        new_spend_name <- paste0(new_name, "_", spend_kw)
       matching_cost <- intersect(spend_splits, res$cost_diagnoses$VariableSplit)
+      
       merge_entry <- list(new_name = new_name, merged = as.list(selected_splits),
                           view = view_filter, spend_merged = as.list(matching_cost),
                           new_spend_name = new_spend_name)
+      
       set_hist(nm, c(get_hist(nm), list(results_store[[nm]])))
       set_res(nm, apply_single_merge(res, merge_entry, cfg))
       set_log(nm, c(get_log(nm), list(list(
-        merged = selected_splits, new_name = new_name,
-        view   = view_filter, spend_merged = matching_cost,
-        new_spend_name = new_spend_name))))
+        merged = selected_splits, new_name = new_name, view = view_filter,
+        spend_merged = matching_cost, new_spend_name = new_spend_name))))
+      
+      if (!is.null(update_merges)) {
+        existing <- channels()[[nm]]$saved_merges %||% list()
+        max_id   <- if (length(existing))
+          max(sapply(existing, \(m) m$id %||% 0L)) else 0L
+        update_merges(nm, c(existing, list(list(
+          id = max_id + 1L, new_name = new_name,
+          merged = as.list(selected_splits), view = view_filter,
+          spend_merged = as.list(matching_cost), new_spend_name = new_spend_name,
+          active = TRUE, saved_at = format(Sys.time(), "%Y-%m-%d %H:%M")))))
+      }
+      
       updateTextInput(session, "merge_name", value = "")
       showNotification(
         paste0("Merged ", length(selected_splits), " [", toupper(view_filter), "] splits",
                if (length(matching_cost) > 0) paste0(" + ", length(matching_cost), " spend"),
-               " -> ", new_name),
+               " \u2192 ", new_name, " \u2014 saved to config"),
         type = "message")
     })
     
@@ -951,6 +1061,7 @@ mod_process_server <- function(id, data, config, channels,
       DT::dataTableProxy(session$ns("diag_act")) %>% DT::selectRows(NULL)
     })
     
+    # ── Undo last merge ────────────────────────────────────────────────────
     observeEvent(input$btn_undo, {
       nm <- req(input$channel_select); req(valid_nm(nm))
       hist <- get_hist(nm)
@@ -961,180 +1072,111 @@ mod_process_server <- function(id, data, config, channels,
       set_hist(nm, hist[-length(hist)])
       log <- get_log(nm)
       if (length(log) > 0) set_log(nm, log[-length(log)])
-      showNotification("Last merge undone.", type = "message")
-    })
-    
-    observeEvent(input$btn_save_merges, {
-      nm <- req(input$channel_select); req(valid_nm(nm))
-      if (is.null(update_merges)) {
-        showNotification("Save merges not available.", type = "warning"); return()
+      if (!is.null(update_merges)) {
+        existing <- channels()[[nm]]$saved_merges %||% list()
+        if (length(existing) > 0) update_merges(nm, existing[-length(existing)])
       }
-      current_log <- get_log(nm)
-      if (!length(current_log)) {
-        showNotification("No session merges to save.", type = "warning"); return()
-      }
-      existing <- channels()[[nm]]$saved_merges %||% list()
-      max_id   <- if (length(existing)) max(sapply(existing, \(m) m$id %||% 0L)) else 0L
-      new_saved <- lapply(seq_along(current_log), function(i) {
-        c(current_log[[i]], list(id = max_id + i, active = TRUE,
-                                 saved_at = format(Sys.time(), "%Y-%m-%d %H:%M")))
-      })
-      update_merges(nm, c(existing, new_saved))
-      showNotification(paste0(length(new_saved), " merge(s) saved to config."),
-                       type = "message")
+      showNotification("Last merge undone \u2014 removed from config.", type = "message")
     })
     
-    observe({
-      results_trigger()
-      nm <- input$channel_select; if (!valid_nm(nm)) return()
-      saved <- channels()[[nm]]$saved_merges %||% list()
-      if (!is.null(session$userData$toggle_obs))
-        lapply(session$userData$toggle_obs,
-               \(obs) tryCatch(obs$destroy(), error = \(e) NULL))
-      obs_list <- lapply(seq_along(saved), function(i) {
-        local({
-          local_i <- i; local_nm <- nm
-          observeEvent(input[[paste0("toggle_saved_", local_i)]], {
-            if (is.null(update_merges)) return()
-            curr <- channels()[[local_nm]]$saved_merges %||% list()
-            if (local_i <= length(curr)) {
-              curr[[local_i]]$active <- !isTRUE(curr[[local_i]]$active)
-              update_merges(local_nm, curr)
-            }
-          }, ignoreInit = TRUE)
-        })
-      })
-      session$userData$toggle_obs <- obs_list
-    })
-    
-    output$merge_history_card <- renderUI({
-      results_trigger()
-      nm <- input$channel_select; if (!valid_nm(nm)) return(NULL)
-      log       <- get_log(nm); hist <- get_hist(nm)
-      saved     <- channels()[[nm]]$saved_merges %||% list()
-      has_session <- length(log) > 0; has_saved <- length(saved) > 0
-      if (!has_session && !has_saved) return(NULL)
-      card(
-        card_header("Merge History"),
-        tagList(
-          if (has_saved) tagList(
-            div(style = "display:flex; align-items:center; gap:8px; margin-bottom:8px;",
-                icon("bookmark", style = "color:#5B9BD5; font-size:12px;"),
-                tags$strong("Saved in config",
-                            style = "font-size:11.5px; color:#5B9BD5;")),
-            tagList(lapply(seq_along(saved), function(i) {
-              m <- saved[[i]]; is_act <- isTRUE(m$active)
-              div(class = "mb-2 p-2",
-                  style = paste0(
-                    "background:", if (is_act) "#EBF3FB" else "#f8f9fa", ";",
-                    "border-radius:6px; border-left:3px solid ",
-                    if (is_act) "#5B9BD5" else "#dee2e6", ";", "font-size:12px;"),
-                  div(class = "d-flex align-items-center gap-2",
-                      actionButton(session$ns(paste0("toggle_saved_", i)),
-                                   label = if (is_act)
-                                     tags$span(style = "background:#5B9BD5; color:white; padding:2px 8px; border-radius:10px; font-size:10px; font-weight:600;", "Active")
-                                   else
-                                     tags$span(style = "background:#dee2e6; color:#6c757d; padding:2px 8px; border-radius:10px; font-size:10px; font-weight:600;", "Inactive"),
-                                   class = "btn btn-link p-0",
-                                   style = "border:none; background:transparent;"),
-                      tags$strong(m$new_name,
-                                  style = paste0("color:", if (is_act) "#2c3e50" else "#adb5bd", ";")),
-                      tags$small(m$saved_at %||% "",
-                                 style = "color:#adb5bd; font-size:10px; margin-left:auto;")),
-                  tags$div(class = "text-muted mt-1",
-                           style = paste0("font-size:11px;", if (!is_act) "opacity:0.5;" else ""),
-                           paste(strip_common_prefix(unlist(m$merged)), collapse = " + ")))
-            })),
-            hr(style = "margin:10px 0;")
-          ),
-          if (has_session) tagList(
-            div(style = "display:flex; align-items:center; gap:8px; margin-bottom:8px;",
-                icon("clock", style = "color:#6c757d; font-size:12px;"),
-                tags$strong("This session",
-                            style = "font-size:11.5px; color:#6c757d;")),
-            if (length(hist) > 0)
-              actionButton(session$ns("btn_undo"),
-                           tagList(icon("rotate-left"), " Undo Last Merge"),
-                           class = "btn-outline-secondary btn-sm w-100 mb-2"),
-            lapply(rev(seq_along(log)), function(i) {
-              m  <- log[[i]]
-              vb <- switch(m$view %||% "all",
-                           "focus"    = tags$span(style = "background:#EBF3FB; color:#5B9BD5; padding:1px 6px; border-radius:8px; font-size:10px;", "FOCUS"),
-                           "nonfocus" = tags$span(style = "background:#f4f6f9; color:#6c757d; padding:1px 6px; border-radius:8px; font-size:10px; border:1px solid #dee2e6;", "NON-FOCUS"),
-                           tags$span(style = "background:#fff3cd; color:#856404; padding:1px 6px; border-radius:8px; font-size:10px;", "ALL"))
-              div(class = "mb-2 p-2",
-                  style = paste0(
-                    "background:#f4f6f9; border-radius:6px;",
-                    "border-left:3px solid #5B9BD5; font-size:12px;",
-                    if (i == length(log)) "border-left-width:4px;" else ""),
-                  div(class = "d-flex align-items-center gap-2 mb-1",
-                      icon("arrow-right", style = "color:#5B9BD5;"),
-                      tags$strong(m$new_name), vb,
-                      if (i == length(log))
-                        tags$span("latest", style = "font-size:9px; color:#8a9bb0; margin-left:auto;")),
-                  tags$div(class = "text-muted",
-                           paste(strip_common_prefix(m$merged), collapse = " + ")),
-                  if (length(m$spend_merged) > 0)
-                    tags$div(class = "text-muted", style = "font-size:11px;",
-                             paste0("Spend -> ", m$new_spend_name)))
-            }),
-            hr(style = "margin:10px 0;")
-          ),
-          div(style = "display:flex; flex-direction:column; gap:6px;",
-              if (has_session && !is.null(update_merges))
-                actionButton(session$ns("btn_save_merges"),
-                             tagList(icon("bookmark"), " Save merges to config"),
-                             class = "btn-primary btn-sm w-100"),
-              downloadButton(session$ns("dl_config_process"),
-                             label = tagList(icon("download"), " Download config CSV"),
-                             class = "btn-outline-secondary btn-sm w-100"),
-              actionButton(session$ns("btn_reset_merges"),
-                           tagList(icon("trash"), " Reset All Merges"),
-                           class = "btn-outline-danger btn-sm w-100"))
-        )
-      )
-    })
-    
+    # ── Reset all merges ───────────────────────────────────────────────────
     observeEvent(input$btn_reset_merges, {
-      nm       <- req(input$channel_select); req(valid_nm(nm))
-      n_merges <- length(get_log(nm))
+      nm <- req(input$channel_select); req(valid_nm(nm))
       showModal(modalDialog(
-        title = tagList(icon("triangle-exclamation", style = "color:#f39c12;"),
+        title = tagList(icon("triangle-exclamation", class = "banner-icon-yellow"),
                         " Reset all merges"),
-        tags$p("This will reset all merges for channel ", tags$strong(nm), "."),
-        if (n_merges > 0)
-          tags$p(class = "text-muted small",
-                 paste0(n_merges, " session merge(s) will be lost.")),
+        tags$p("Reset all merges for ", tags$strong(nm), "?"),
+        tags$p(class = "text-muted small", "This will also clear them from the saved config."),
         footer = tagList(
-          actionButton(session$ns("btn_confirm_reset"), "Reset all merges",
-                       class = "btn-danger"),
+          actionButton(session$ns("btn_confirm_reset"), "Reset", class = "btn-danger"),
           modalButton("Cancel")),
         easyClose = TRUE, size = "s"))
     })
     
     observeEvent(input$btn_confirm_reset, {
-      nm   <- req(input$channel_select); req(valid_nm(nm))
+      nm <- req(input$channel_select); req(valid_nm(nm))
       orig <- get_orig(nm); req(orig)
       set_res(nm, orig); set_log(nm, list()); set_hist(nm, list())
+      if (!is.null(update_merges)) update_merges(nm, list())
       removeModal()
-      showNotification(paste("All merges reset for", nm), type = "message")
+      showNotification(paste("All merges reset for", nm, "\u2014 config cleared."),
+                       type = "message")
     }, ignoreInit = TRUE)
     
-    # ── Activity table ─────────────────────────────────────────────
+    # ── Merge history card ─────────────────────────────────────────────────
+    output$merge_history_card <- renderUI({
+      results_trigger()
+      nm   <- input$channel_select; if (!valid_nm(nm)) return(NULL)
+      log  <- get_log(nm)
+      hist <- get_hist(nm)
+      if (!length(log)) return(NULL)
+      
+      card(
+        card_header(
+          div(class = "card-header-inner",
+              icon("code-merge", class = "icon-blue-sm"),
+              "Merge History",
+              tags$small(
+                paste0(length(log), " merge", if (length(log) != 1) "s" else "",
+                       " \u2014 auto-saved to config"),
+                class = "merge-history-subtitle"))
+        ),
+        tagList(
+          div(
+            class = "mb-3",
+            lapply(rev(seq_along(log)), function(i) {
+              m       <- log[[i]]
+              is_last <- i == length(log)
+              vb <- switch(m$view %||% "all",
+                           "focus"    = tags$span("FOCUS",     class = "badge-focus-sm"),
+                           "nonfocus" = tags$span("NON-FOCUS", class = "badge-nonfocus-sm"),
+                           tags$span("ALL", class = "badge-all-sm"))
+              div(
+                class = "merge-history-row",
+                icon("arrow-right",
+                     class = if (is_last) "merge-icon-latest" else "merge-icon-old"),
+                div(
+                  class = "flex-1-mw0",
+                  div(class = "d-flex align-items-center gap-2 flex-wrap",
+                      tags$strong(m$new_name,
+                                  class = if (is_last) "merge-name-latest"
+                                  else "merge-name-old"),
+                      vb,
+                      if (is_last) tags$span("latest", class = "latest-marker")),
+                  tags$div(class = "merge-splits-text",
+                           paste(strip_common_prefix(m$merged), collapse = " + "))
+                )
+              )
+            })
+          ),
+          div(
+            class = "d-flex gap-2",
+            if (length(hist) > 0)
+              actionButton(session$ns("btn_undo"),
+                           tagList(icon("rotate-left"), " Undo Last"),
+                           class = "btn-outline-secondary btn-sm flex-fill"),
+            actionButton(session$ns("btn_reset_merges"),
+                         tagList(icon("trash"), " Reset All"),
+                         class = paste("btn-outline-danger btn-sm",
+                                       if (length(hist) > 0) "flex-fill" else "w-100"))
+          )
+        )
+      )
+    })
+    
+    # ── Activity table ─────────────────────────────────────────────────────
     output$diag_act <- DT::renderDT({
       results_trigger()
-      nm        <- req(input$channel_select)
-      req(results_store[[nm]])
-      df        <- current_act_data(); req(nrow(df) > 0)
-      threshold <- input$threshold_pct %||% 5
-      max_pct   <- max(df$pct_total_activity, na.rm = TRUE)
-      if (!is.finite(max_pct) || max_pct == 0) max_pct <- 1
-      df_display <- df %>%
+      nm  <- req(input$channel_select); req(results_store[[nm]])
+      df  <- current_act_data(); req(nrow(df) > 0)
+      threshold   <- input$threshold_pct %||% 1
+      finite_pcts <- df$pct_total_activity[is.finite(df$pct_total_activity)]
+      max_pct     <- if (length(finite_pcts) > 0 && max(finite_pcts) > 0) max(finite_pcts) else 1
+      df_display  <- df %>%
         mutate(Split = strip_common_prefix(VariableSplit)) %>%
         select(Split, everything(), -VariableSplit)
-      num_fmt <- intersect(
-        c("sd", "min", "quartile_1", "median", "quartile_3", "max_no_outlier", "max"),
-        names(df_display))
+      num_fmt  <- intersect(c("sd", "min", "quartile_1", "median",
+                              "quartile_3", "max_no_outlier", "max"), names(df_display))
       col_defs <- list(
         list(className = "dt-left", targets = 0),
         list(targets = which(names(df_display) == "total_activity") - 1,
@@ -1162,11 +1204,10 @@ mod_process_server <- function(id, data, config, channels,
                     color = styleInterval(threshold, c("#dc3545", "#333")))
     }, server = TRUE)
     
-    # ── Spend table ────────────────────────────────────────────────
+    # ── Spend table ────────────────────────────────────────────────────────
     output$diag_cost <- DT::renderDT({
       results_trigger()
-      nm      <- req(input$channel_select)
-      req(results_store[[nm]])
+      nm <- req(input$channel_select); req(results_store[[nm]])
       cost_df <- current_spend_data()
       if (is.null(cost_df) || nrow(cost_df) == 0) {
         cfg <- channels()[[nm]]
@@ -1178,30 +1219,30 @@ mod_process_server <- function(id, data, config, channels,
       df_display <- cost_df %>%
         mutate(Split = strip_common_prefix(VariableSplit)) %>%
         select(Split, everything(), -VariableSplit)
-      num_fmt <- intersect(
-        c("sd", "min", "quartile_1", "median", "quartile_3", "max_no_outlier", "max"),
-        names(df_display))
+      num_fmt <- intersect(c("sd", "min", "quartile_1", "median",
+                             "quartile_3", "max_no_outlier", "max"), names(df_display))
       dt <- df_display %>%
-        datatable(extensions = "Buttons",
-                  options = list(scrollX = TRUE, pageLength = 15,
-                                 initComplete = dt_blue_callback, dom = "Bfrtip",
-                                 buttons = make_export_buttons("spend", nm),
-                                 columnDefs = list(
-                                   list(className = "dt-left", targets = 0),
-                                   list(targets = which(names(df_display) == "total_spend") - 1,
-                                        render = JS("function(d,t){if(t!=='display')return d;",
-                                                    "var n=parseFloat(d);",
-                                                    "if(n>=1e9)return(n/1e9).toFixed(1)+'B';",
-                                                    "if(n>=1e6)return(n/1e6).toFixed(1)+'M';",
-                                                    "if(n>=1e3)return(n/1e3).toFixed(0)+'K';",
-                                                    "return n.toLocaleString();}")))),
-                  rownames = FALSE)
+        datatable(
+          options = list(
+            scrollX = TRUE, scrollY = "460px",
+            paging  = FALSE, dom = "frt",
+            initComplete = dt_blue_callback,
+            columnDefs = list(
+              list(className = "dt-left", targets = 0),
+              list(targets = which(names(df_display) == "total_spend") - 1,
+                   render = JS("function(d,t){if(t!=='display')return d;",
+                               "var n=parseFloat(d);",
+                               "if(n>=1e9)return(n/1e9).toFixed(1)+'B';",
+                               "if(n>=1e6)return(n/1e6).toFixed(1)+'M';",
+                               "if(n>=1e3)return(n/1e3).toFixed(0)+'K';",
+                               "return n.toLocaleString();}")))),
+          rownames = FALSE)
       if (length(num_fmt) > 0)
         dt <- dt %>% formatCurrency(num_fmt, currency = "", digits = 0, mark = ",")
       dt
     })
     
-    # ── Total Check ────────────────────────────────────────────────
+    # ── Total Check ────────────────────────────────────────────────────────
     output$diag_check <- DT::renderDT({
       results_trigger()
       nm  <- req(input$channel_select)
@@ -1214,111 +1255,95 @@ mod_process_server <- function(id, data, config, channels,
       cross_cols    <- res$cross_cols %||% gcfg$cross_cols %||% "Geography"
       full_cross_id <- c(cross_cols, "Period")
       geo_col       <- cross_cols[1]
+      model_var     <- cfg$model_variable %||% ""
+      valid_vars    <- intersect(c(model_var), names(d$analytical))
       
-      # ── Missing variable check ─────────────────────────────────
-      missing_vars <- setdiff(cfg$model_variables, names(d$analytical))
-      if (length(missing_vars) > 0) {
+      if (!length(valid_vars) || !nzchar(model_var)) {
         avail_num <- names(d$analytical)[sapply(d$analytical, is.numeric)]
         return(datatable(
           data.frame(
-            Problem = paste0("Variable not found: '",
-                             paste(missing_vars, collapse = "', '"), "'"),
-            Hint    = paste0("Available: ",
-                             paste(head(avail_num, 5), collapse = ", "),
+            Problem = paste0("model_variable '", model_var, "' not found."),
+            Hint    = paste0("Available: ", paste(head(avail_num, 5), collapse = ", "),
                              if (length(avail_num) > 5)
                                paste0(" ... (", length(avail_num) - 5, " more)") else "")),
-          options  = list(initComplete = dt_blue_callback, dom = "t"),
-          rownames = FALSE) %>%
+          options = list(initComplete = dt_blue_callback, dom = "t"), rownames = FALSE) %>%
             formatStyle("Problem", color = "#721c24", fontWeight = "600",
                         backgroundColor = "#f8d7da"))
       }
       
-      rag_df <- as.data.frame(res$rag)
+      rag_df     <- as.data.frame(res$rag)
+      an_periods <- sort(unique(d$analytical$Period))
+      an_min_p   <- min(an_periods); an_max_p <- max(an_periods)
       
-      # ── Period scope ───────────────────────────────────────────
-      an_periods      <- sort(unique(d$analytical$Period))
-      an_min_p        <- min(an_periods)
-      an_max_p        <- max(an_periods)
+      scope_min_p <- tryCatch({
+        if (!is.null(cfg$min_period) && !is.na(as.Date(cfg$min_period)))
+          max(an_min_p, as.Date(cfg$min_period)) else an_min_p
+      }, error = function(e) an_min_p)
+      scope_max_p <- tryCatch({
+        if (!is.null(cfg$max_period) && !is.na(as.Date(cfg$max_period)))
+          min(an_max_p, as.Date(cfg$max_period)) else an_max_p
+      }, error = function(e) an_max_p)
+      if (is.na(scope_min_p) || is.na(scope_max_p) || scope_min_p > scope_max_p) {
+        scope_min_p <- an_min_p; scope_max_p <- an_max_p
+      }
+      
       rag_periods_all <- sort(unique(rag_df$Period))
       rag_periods <- {
-        in_scope <- rag_periods_all[rag_periods_all >= an_min_p & rag_periods_all <= an_max_p]
+        in_scope <- rag_periods_all[rag_periods_all >= scope_min_p &
+                                      rag_periods_all <= scope_max_p]
         if (length(in_scope) > 0) in_scope else rag_periods_all
       }
       if (length(rag_periods) == 0) {
         return(datatable(
-          data.frame(Message = "No RAG data within the analytical date range. Re-process the channel."),
-          options  = list(initComplete = dt_blue_callback, dom = "t"),
-          rownames = FALSE) %>%
+          data.frame(Message = "No RAG data within channel date range. Re-process."),
+          options = list(initComplete = dt_blue_callback, dom = "t"), rownames = FALSE) %>%
             formatStyle("Message", color = "#856404", backgroundColor = "#fff3cd"))
       }
       
-      # ── Period alignment ────────────────────────────────────────
+      an_periods_scoped <- an_periods[an_periods >= scope_min_p &
+                                        an_periods <= scope_max_p]
+      if (length(an_periods_scoped) == 0) {
+        return(datatable(
+          data.frame(Message = paste0("No analytical periods in channel scope (",
+                                      format(scope_min_p), " \u2192 ",
+                                      format(scope_max_p), ").")),
+          options = list(initComplete = dt_blue_callback, dom = "t"), rownames = FALSE) %>%
+            formatStyle("Message", color = "#856404", backgroundColor = "#fff3cd"))
+      }
+      
       period_map <- tibble(
-        an_period  = an_periods,
+        an_period  = an_periods_scoped,
         rag_period = rag_periods[vapply(
-          an_periods,
+          an_periods_scoped,
           function(p) which.min(abs(as.numeric(rag_periods) - as.numeric(p))),
           integer(1))])
       max_offset_days <- max(
         abs(as.numeric(period_map$an_period) - as.numeric(period_map$rag_period)),
         na.rm = TRUE)
       
-      # ── Build model at full cross_id ────────────────────────────
       model_at_an_full <- build_model_total(
-        d$analytical, full_cross_id, cfg$model_variables, cfg$break_dates)
+        d$analytical, full_cross_id, c(model_var), character(0)) %>%
+        filter(Period >= scope_min_p & Period <= scope_max_p)
       
-      # ── Geography name normalization ────────────────────────────
       normalize_geo <- function(x)
         trimws(gsub("\\s+", " ", tolower(gsub("[,.]", " ", as.character(x)))))
-      
       rag_geos <- unique(rag_df[[geo_col]])
       an_geos  <- unique(model_at_an_full[[geo_col]])
       geo_map  <- tibble(an_geo = an_geos, norm = normalize_geo(an_geos)) %>%
         left_join(tibble(rag_geo = rag_geos, norm = normalize_geo(rag_geos)), by = "norm") %>%
         mutate(rag_geo = if_else(is.na(rag_geo), an_geo, rag_geo)) %>%
         select(an_geo, rag_geo)
-      
       model_remapped <- model_at_an_full %>%
         rename(an_geo = !!sym(geo_col)) %>%
         left_join(geo_map, by = "an_geo") %>%
         mutate(!!geo_col := if_else(!is.na(rag_geo), rag_geo, an_geo)) %>%
         select(-an_geo, -rag_geo)
       
-      # ── Comparison level ────────────────────────────────────────
-      # Two cases only — no auto-detection by product variation:
-      # - National (all_transformed): Period only
-      # - Geographic (all_rags):      full cross_id always
-      tc_cross_id     <- full_cross_id
-      tc_cross_cols   <- cross_cols
-      comparison_note <- NULL
+      tc_cross_id   <- full_cross_id
+      tc_cross_cols <- cross_cols
+      model_at_an   <- model_remapped
       
-      if (!isTRUE(res$is_rag)) {
-        tc_cross_id   <- "Period"
-        tc_cross_cols <- character(0)
-        comparison_note <- htmltools::tags$div(
-          style = paste0(
-            "background:#EBF3FB; color:#1e40af;",
-            "padding:4px 10px; border-radius:4px;",
-            "font-size:11.5px; margin-bottom:4px; display:inline-block;"),
-          paste0("\u2139 National channel (all_transformed). ",
-                 "Comparison at Period level \u2014 ",
-                 "splits replicated across all analytical entities."))
-      }
-      
-      # ── Aggregate model to comparison level ─────────────────────
-      model_at_an <- if (identical(tc_cross_id, "Period")) {
-        model_at_an_full %>%
-          group_by(Period) %>%
-          summarise(ModelTotal = dplyr::first(ModelTotal), .groups = "drop")
-      } else {
-        model_remapped
-      }
-      
-      # ── Geo filter helper ───────────────────────────────────────
       seg_overrides <- cfg$segment_overrides %||% list()
-      break_dates_d <- as.Date(cfg$break_dates %||% character(0))
-      n_segs        <- length(cfg$model_variables)
-      
       apply_geo_filters <- function(df, col) {
         if (!col %in% names(df)) return(df)
         for (p in cfg$geography_exclude %||% character(0))
@@ -1326,46 +1351,35 @@ mod_process_server <- function(id, data, config, channels,
             df <- df[!grepl(p, df[[col]], ignore.case = TRUE), ]
         if (length(seg_overrides) > 0 && "Period" %in% names(df)) {
           for (so in seg_overrides) {
-            geo_exc   <- so$geography_exclude %||% character(0)
+            geo_exc <- so$geography_exclude %||% character(0)
             if (!length(geo_exc)) next
-            seg_start <- if (so$seg == 1) as.Date("1900-01-01")
-            else break_dates_d[so$seg - 1] + 1
-            seg_end   <- if (so$seg == n_segs) as.Date("2999-12-31")
-            else break_dates_d[so$seg]
             for (p in geo_exc)
-              if (nchar(p %||% "") > 0) {
-                in_seg    <- df$Period >= seg_start & df$Period <= seg_end
-                geo_match <- grepl(p, df[[col]], ignore.case = TRUE)
-                df        <- df[!(in_seg & geo_match), ]
-              }
+              if (nchar(p %||% "") > 0)
+                df <- df[!(rep(TRUE, nrow(df)) &
+                             grepl(p, df[[col]], ignore.case = TRUE)), ]
           }
         }
         df
       }
       
-      # Apply geo filters BEFORE computing splits (performance + correctness)
-      rag_in_scope <- rag_df %>% filter(Period >= an_min_p & Period <= an_max_p)
-      if (isTRUE(res$is_rag)) {
-        rag_in_scope <- apply_geo_filters(rag_in_scope, geo_col)
-        model_at_an  <- apply_geo_filters(model_at_an, geo_col)
-      }
+      rag_in_scope <- rag_df %>% filter(Period >= scope_min_p & Period <= scope_max_p)
+      rag_in_scope <- apply_geo_filters(rag_in_scope, geo_col)
+      model_at_an  <- apply_geo_filters(model_at_an, geo_col)
       
-      # ── Splits side ─────────────────────────────────────────────
       id_in_rag  <- intersect(full_cross_id, names(rag_in_scope))
-      split_cols <- setdiff(names(rag_in_scope)[sapply(rag_in_scope, is.numeric)],
-                            id_in_rag)
+      spend_kw_f <- cfg$spend_keyword %||% "Spend"
+      all_num    <- setdiff(names(rag_in_scope)[sapply(rag_in_scope, is.numeric)], id_in_rag)
+      split_cols <- all_num[!grepl(spend_kw_f, all_num, ignore.case = TRUE)]
+      
       rag_in_scope$row_splits <- if (length(split_cols) > 0)
         rowSums(rag_in_scope[, split_cols, drop = FALSE], na.rm = TRUE) else 0
       
-      group_cols  <- intersect(
-        if (identical(tc_cross_id, "Period")) "Period" else tc_cross_id,
-        names(rag_in_scope))
+      group_cols  <- intersect(tc_cross_id, names(rag_in_scope))
       splits_side <- rag_in_scope %>%
         select(any_of(c(group_cols, "row_splits"))) %>%
         group_by(across(all_of(group_cols))) %>%
         summarise(SplitsTotal = sum(row_splits, na.rm = TRUE), .groups = "drop")
       
-      # ── Model side ──────────────────────────────────────────────
       model_side <- model_at_an %>%
         rename(an_period = Period) %>%
         left_join(period_map, by = "an_period", relationship = "many-to-one") %>%
@@ -1373,70 +1387,70 @@ mod_process_server <- function(id, data, config, channels,
         select(any_of(c(tc_cross_cols, "Period", "ModelTotal"))) %>%
         filter(ModelTotal > 0)
       
-      # ── Join ────────────────────────────────────────────────────
-      join_by_cols <- if (identical(tc_cross_id, "Period")) "Period" else tc_cross_id
       check_df <- model_side %>%
-        left_join(splits_side, by = join_by_cols) %>%
+        left_join(splits_side, by = tc_cross_id) %>%
         mutate(SplitsTotal = replace_na(SplitsTotal, 0),
-               Diff        = ModelTotal - SplitsTotal,
-               Status      = if_else(abs(Diff) < 0.01, "OK", "Mismatch")) %>%
+               Diff   = ModelTotal - SplitsTotal,
+               Status = if_else(abs(Diff) < 0.01, "OK", "Mismatch")) %>%
         filter(ModelTotal > 0) %>%
         mutate(across(where(is.numeric), \(x) round(x, 4))) %>%
         arrange(across(any_of(c(tc_cross_cols, "Period"))))
       
       n_total    <- nrow(check_df)
       n_mismatch <- sum(check_df$Status == "Mismatch", na.rm = TRUE)
-      cs_label   <- if (identical(tc_cross_id, "Period")) "Period"
-      else paste(tc_cross_cols, collapse = " \u00d7 ")
+      cs_label   <- paste(tc_cross_cols, collapse = " \u00d7 ")
+      
+      scope_note <- if (scope_min_p != an_min_p || scope_max_p != an_max_p)
+        htmltools::tags$div(
+          style = "background:#f0fdf4; color:#166634; padding:4px 10px; border-radius:4px; font-size:11.5px; margin-bottom:4px; display:inline-block;",
+          paste0(" \u2139 Scoped: ", format(scope_min_p), " \u2192 ", format(scope_max_p)))
+      else NULL
       
       offset_note <- if (max_offset_days > 0)
         htmltools::tags$div(
-          style = paste0("background:#d1ecf1; color:#0c5460;",
-                         "padding:4px 10px; border-radius:4px;",
-                         "font-size:11.5px; margin-bottom:4px; display:inline-block;"),
-          paste0("\u2139 Date offset (", max_offset_days,
-                 " day(s)) \u2014 model values auto-aligned to Data File periods."))
+          style = "background:#d1ecf1; color:#0c5460; padding:4px 10px; border-radius:4px; font-size:11.5px; margin-bottom:4px; display:inline-block;",
+          paste0(" \u2139 Date offset (", max_offset_days, " day(s)) \u2014 auto-aligned."))
       else NULL
       
       check_df <- check_df %>% filter(Status == "Mismatch")
       
-      # ── All OK ──────────────────────────────────────────────────
       if (nrow(check_df) == 0) {
         return(datatable(
           data.frame(Message = paste0(
-            "\u2713 All ", format(n_total, big.mark = ","),
+            " \u2713 All ", format(n_total, big.mark = ","),
             " rows match \u2014 no mismatches found.")),
-          caption = if (!is.null(comparison_note) || !is.null(offset_note))
+          caption = if (!is.null(scope_note) || !is.null(offset_note))
             htmltools::tags$caption(
               style = "caption-side:top; text-align:left; padding:4px 0;",
-              comparison_note, offset_note) else NULL,
-          options  = list(initComplete = dt_blue_callback, dom = "t"),
-          rownames = FALSE) %>%
+              scope_note, offset_note) else NULL,
+          options = list(initComplete = dt_blue_callback, dom = "t"), rownames = FALSE) %>%
             formatStyle("Message", color = "#155724", fontWeight = "600",
                         backgroundColor = "#d4edda"))
       }
       
-      # ── Mismatch table ──────────────────────────────────────────
       check_df %>%
         datatable(
           caption = htmltools::tags$caption(
             style = "caption-side:top; text-align:left; padding:4px 0;",
-            comparison_note, offset_note,
+            scope_note, offset_note,
             htmltools::tags$div(
               style = "font-size:12px; color:#721c24; padding:2px 0;",
-              htmltools::tags$span(style = "color:#e74c3c;", "\u2718 "),
+              htmltools::tags$span(style = "color:#e74c3c;", " \u2718 "),
               paste0(n_mismatch, " mismatch", if (n_mismatch != 1) "es" else "",
                      " out of ", format(n_total, big.mark = ","), " rows",
-                     " \u2014 level: ", cs_label,
-                     if (!identical(tc_cross_id, "Period")) " \u00d7 Period" else ""))),
+                     " \u2014 level: ", cs_label, " \u00d7 Period"))),
           extensions = "Buttons",
-          options    = list(scrollX = TRUE, pageLength = 25,
-                            initComplete = dt_blue_callback, dom = "Bfrtip",
-                            buttons = make_export_buttons("total_check", nm)),
+          options = list(scrollX = TRUE, pageLength = 25,
+                         initComplete = dt_blue_callback, dom = "Bfrtip",
+                         buttons = make_export_buttons("total_check", nm)),
           rownames = FALSE) %>%
         formatStyle("Status", backgroundColor = "#f8d7da")
     })
     
-    reactive(reactiveValuesToList(results_store))
+    # ── Return ─────────────────────────────────────────────────────────────
+    list(
+      results       = reactive(reactiveValuesToList(results_store)),
+      clean_results = reactive(reactiveValuesToList(clean_store))
+    )
   })
 }

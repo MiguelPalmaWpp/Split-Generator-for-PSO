@@ -2,8 +2,6 @@
 # R/processing.R
 # ═══════════════════════════════════════════════════════════════════════
 
-
-
 keep_nonzero_cols <- function(df) {
   df   <- as.data.frame(df)
   keep <- vapply(df, function(col) {
@@ -35,7 +33,6 @@ apply_dimension_breaks <- function(d, dimension_breaks, channel_name = NULL) {
   d
 }
 
-# Always geographic — filters to ref_cross_key
 get_diag_df <- function(df, cross_cols, ref_cross_key) {
   if (nrow(df) == 0) return(df)
   cross_data <- df[, cross_cols, drop = FALSE]
@@ -43,10 +40,13 @@ get_diag_df <- function(df, cross_cols, ref_cross_key) {
   df[cross_key == ref_cross_key, ]
 }
 
-build_model_total <- function(analytical, cross_id, model_variables, break_dates) {
+build_model_total <- function(analytical, cross_id, model_variables,
+                              break_dates) {
   n_vars        <- length(model_variables)
   break_dates_d <- as.Date(break_dates %||% character(0))
-  base <- analytical %>% select(all_of(cross_id)) %>% mutate(ModelTotal = 0)
+  base <- analytical %>%
+    select(all_of(cross_id)) %>%
+    mutate(ModelTotal = 0)
   for (i in seq_len(n_vars)) {
     mv <- model_variables[i]
     if (!mv %in% names(analytical)) {
@@ -80,7 +80,8 @@ build_activity_spend <- function(act_all, cost_all, cfg) {
   act_all %>%
     select(VariableSplit, total_activity, model_var) %>%
     mutate(key = str_remove_all(VariableSplit,
-                                regex(cfg$activity_keyword, ignore_case = TRUE))) %>%
+                                regex(cfg$activity_keyword,
+                                      ignore_case = TRUE))) %>%
     left_join(cost_key, by = "key") %>%
     mutate(Channel               = cfg$channel_name,
            MainModelVariableName = model_var) %>%
@@ -94,18 +95,18 @@ build_side_mapping <- function(act_all) {
   act_all %>%
     select(VariableSplit, model_var) %>%
     mutate(MainModelVariableName = model_var,
-           Weight    = 1, MinWeight = 0.5, MaxWeight = 2, rank = NA_real_) %>%
+           Weight    = 1, MinWeight = 0.5, MaxWeight = 2,
+           rank      = NA_real_) %>%
     select(-model_var)
 }
 
-# ═══════════════════════════════════════════════════════════════════════
-# splits_summary
-# ═══════════════════════════════════════════════════════════════════════
+# ── splits_summary ────────────────────────────────────────────────────────
 splits_summary <- function(df, type = "activity") {
   if (is.null(df) || nrow(df) == 0)
     return(tibble(VariableSplit = character()))
   
-  id_cols    <- intersect(c("Geography", "Product", "Period", "BP_Year"), names(df))
+  id_cols    <- intersect(c("Geography", "Product", "Period", "BP_Year"),
+                          names(df))
   split_cols <- setdiff(names(df)[sapply(df, is.numeric)], id_cols)
   if (!length(split_cols)) return(tibble(VariableSplit = character()))
   
@@ -159,6 +160,223 @@ splits_summary <- function(df, type = "activity") {
   result
 }
 
+# ── apply_single_merge ────────────────────────────────────────────────────
+# New function added to support interactive merging in mod_process.
+# Merges selected splits in the RAG and updates all diagnostic structures.
+apply_single_merge <- function(res, merge_entry, cfg) {
+  new_name        <- merge_entry$new_name
+  selected_splits <- unlist(merge_entry$merged)
+  view_filter     <- merge_entry$view %||% "focus"
+  act_kw          <- cfg$activity_keyword %||% "Impressions"
+  spend_kw        <- cfg$spend_keyword    %||% "Spend"
+  
+  # Guard: ensure diagnostic tibbles have VariableSplit column
+  if (is.null(res$act_diagnoses) ||
+      !"VariableSplit" %in% names(res$act_diagnoses))
+    res$act_diagnoses <- tibble::tibble(
+      VariableSplit = character(), period = character())
+  if (is.null(res$cost_diagnoses) ||
+      !"VariableSplit" %in% names(res$cost_diagnoses))
+    res$cost_diagnoses <- tibble::tibble(
+      VariableSplit = character(), period = character())
+  if (is.null(res$activity_spend) ||
+      !"VariableSplit" %in% names(res$activity_spend))
+    res$activity_spend <- tibble::tibble(
+      VariableSplit = character(), total_activity = numeric(),
+      total_spend = numeric(), Channel = character(),
+      MainModelVariableName = character())
+  if (is.null(res$side_mapping) ||
+      !"VariableSplit" %in% names(res$side_mapping))
+    res$side_mapping <- tibble::tibble(VariableSplit = character())
+  
+  # Find matching RAG columns
+  rag_cols <- intersect(selected_splits, names(res$rag))
+  
+  if (!length(rag_cols)) {
+    id_cols         <- intersect(c(res$cross_cols, "Period"), names(res$rag))
+    rag_split_names <- setdiff(
+      names(res$rag)[sapply(as.data.frame(res$rag), is.numeric)], id_cols)
+    
+    # Filter by view to avoid duplicate stripped names
+    rag_candidates <- if (view_filter == "focus") {
+      rag_split_names[!grepl("Before", rag_split_names, fixed = TRUE)]
+    } else {
+      rag_split_names[grepl("Before", rag_split_names, fixed = TRUE)]
+    }
+    if (!length(rag_candidates)) rag_candidates <- rag_split_names
+    
+    strip_time <- function(x)
+      stringr::str_remove(
+        x, "(_Before .*|_Before_.*|_[Ll]ast\\d+[wW].*|_\\d+[wW].*)$")
+    
+    rag_stripped   <- setNames(rag_candidates, strip_time(rag_candidates))
+    split_stripped <- strip_time(selected_splits)
+    matched_keys   <- intersect(split_stripped, names(rag_stripped))
+    
+    if (length(matched_keys)) {
+      rag_cols <- unname(rag_stripped[matched_keys])
+      rag_cols <- rag_cols[!is.na(rag_cols) & nzchar(rag_cols)]
+    }
+  }
+  
+  if (!length(rag_cols)) {
+    showNotification(
+      paste0("Merge '", new_name, "': splits not found in RAG."),
+      type = "warning", duration = 8)
+    return(res)
+  }
+  
+  # RAG — activity
+  new_rag             <- res$rag
+  new_rag[[new_name]] <- rowSums(new_rag[, rag_cols, drop = FALSE], na.rm = TRUE)
+  new_rag             <- new_rag[, setdiff(names(new_rag), rag_cols)]
+  
+  # RAG — spend
+  spend_rag_cands  <- stringr::str_replace_all(
+    rag_cols, stringr::regex(act_kw, ignore_case = TRUE), spend_kw)
+  spend_rag_cols   <- intersect(spend_rag_cands, names(new_rag))
+  new_spend_rag_nm <- stringr::str_replace_all(
+    new_name, stringr::regex(act_kw, ignore_case = TRUE), spend_kw)
+  if (new_spend_rag_nm == new_name)
+    new_spend_rag_nm <- paste0(new_name, "_", spend_kw)
+  if (length(spend_rag_cols) > 0) {
+    new_rag[[new_spend_rag_nm]] <- rowSums(
+      new_rag[, spend_rag_cols, drop = FALSE], na.rm = TRUE)
+    new_rag <- new_rag[, setdiff(names(new_rag), spend_rag_cols)]
+  }
+  
+  # act_diagnoses
+  selected_diag <- res$act_diagnoses %>%
+    dplyr::filter(VariableSplit %in% selected_splits, period == view_filter)
+  if (nrow(selected_diag) == 0 && nrow(res$act_diagnoses) > 0)
+    selected_diag <- res$act_diagnoses %>%
+    dplyr::filter(VariableSplit %in% selected_splits)
+  if (nrow(selected_diag) == 0) {
+    rag_vals <- as.data.frame(new_rag)[[new_name]]
+    non_zero <- rag_vals[!is.na(rag_vals) & rag_vals > 0]
+    if (length(non_zero) > 0)
+      selected_diag <- tibble::tibble(
+        VariableSplit = new_name, total_activity = sum(non_zero),
+        pct_total_activity = NA_real_, num_weeks_activity = length(non_zero),
+        max_index = NA_real_, min_consecutive_weeks = NA_real_,
+        sd = if (length(non_zero) > 1) sd(non_zero) else 0,
+        min = min(non_zero), quartile_1 = as.numeric(quantile(non_zero, 0.25)),
+        median = as.numeric(quantile(non_zero, 0.50)),
+        quartile_3 = as.numeric(quantile(non_zero, 0.75)),
+        max_no_outlier = as.numeric(quantile(non_zero, 0.95)),
+        max = max(non_zero), period = view_filter, seg = 1L,
+        model_var = cfg$model_variable %||% "")
+  }
+  
+  merged_act <- if (nrow(selected_diag) > 0) {
+    tibble::tibble(
+      VariableSplit         = new_name,
+      total_activity        = sum(selected_diag$total_activity,        na.rm = TRUE),
+      pct_total_activity    = NA_real_,
+      num_weeks_activity    = max(selected_diag$num_weeks_activity,     na.rm = TRUE),
+      max_index             = NA_real_,
+      min_consecutive_weeks = max(selected_diag$min_consecutive_weeks,  na.rm = TRUE),
+      sd             = NA_real_,
+      min            = min(selected_diag$min,          na.rm = TRUE),
+      quartile_1     = mean(selected_diag$quartile_1,  na.rm = TRUE),
+      median         = mean(selected_diag$median,      na.rm = TRUE),
+      quartile_3     = mean(selected_diag$quartile_3,  na.rm = TRUE),
+      max_no_outlier = max(selected_diag$max_no_outlier, na.rm = TRUE),
+      max            = max(selected_diag$max,          na.rm = TRUE)
+    ) %>% dplyr::bind_cols(
+      selected_diag %>% dplyr::slice(1) %>%
+        dplyr::select(dplyr::any_of(c("seg", "period", "model_var"))))
+  } else NULL
+  
+  new_act_diag <- res$act_diagnoses %>%
+    dplyr::filter(!VariableSplit %in% selected_splits)
+  if (!is.null(merged_act))
+    new_act_diag <- new_act_diag %>%
+    dplyr::bind_rows(merged_act) %>%
+    dplyr::group_by(period) %>%
+    dplyr::mutate(
+      grand_p            = sum(total_activity, na.rm = TRUE),
+      pct_total_activity = round(total_activity / pmax(grand_p, 1) * 100, 4)) %>%
+    dplyr::ungroup() %>%
+    dplyr::select(-grand_p)
+  
+  merged_as <- res$activity_spend %>%
+    dplyr::filter(VariableSplit %in% selected_splits) %>%
+    dplyr::summarise(
+      VariableSplit         = new_name,
+      total_activity        = sum(total_activity, na.rm = TRUE),
+      total_spend           = sum(total_spend,    na.rm = TRUE),
+      Channel               = dplyr::first(Channel),
+      MainModelVariableName = dplyr::first(MainModelVariableName))
+  new_act_spend <- res$activity_spend %>%
+    dplyr::filter(!VariableSplit %in% selected_splits) %>%
+    dplyr::bind_rows(merged_as)
+  
+  merged_sm <- res$side_mapping %>%
+    dplyr::filter(VariableSplit %in% selected_splits) %>%
+    dplyr::slice(1) %>%
+    dplyr::mutate(VariableSplit = new_name)
+  new_side_map <- res$side_mapping %>%
+    dplyr::filter(!VariableSplit %in% selected_splits) %>%
+    dplyr::bind_rows(merged_sm)
+  
+  stored_spend    <- unlist(merge_entry$spend_merged %||% character(0))
+  derived_spend   <- stringr::str_replace_all(
+    rag_cols, stringr::regex(act_kw, ignore_case = TRUE), spend_kw)
+  all_spend_cands <- unique(c(stored_spend, derived_spend))
+  all_spend_cands <- all_spend_cands[nzchar(all_spend_cands)]
+  new_spend_name  <- if (nzchar(merge_entry$new_spend_name %||% ""))
+    merge_entry$new_spend_name else new_spend_rag_nm
+  matching_cost   <- intersect(all_spend_cands, res$cost_diagnoses$VariableSplit)
+  
+  new_cost_diag <- tryCatch({
+    if (!length(matching_cost)) {
+      res$cost_diagnoses
+    } else {
+      sel_cost <- res$cost_diagnoses %>%
+        dplyr::filter(VariableSplit %in% matching_cost)
+      mc_row <- tibble::tibble(
+        VariableSplit         = new_spend_name,
+        total_spend           = sum(sel_cost$total_spend,          na.rm = TRUE),
+        pct_total_spend       = NA_real_,
+        num_weeks_spend       = max(sel_cost$num_weeks_spend,       na.rm = TRUE),
+        min_consecutive_weeks = max(sel_cost$min_consecutive_weeks, na.rm = TRUE),
+        sd             = NA_real_,
+        min            = min(sel_cost$min,          na.rm = TRUE),
+        quartile_1     = mean(sel_cost$quartile_1,  na.rm = TRUE),
+        median         = mean(sel_cost$median,      na.rm = TRUE),
+        quartile_3     = mean(sel_cost$quartile_3,  na.rm = TRUE),
+        max_no_outlier = max(sel_cost$max_no_outlier, na.rm = TRUE),
+        max            = max(sel_cost$max,          na.rm = TRUE),
+        max_index      = NA_real_,
+        period    = sel_cost$period[1]    %||% "focus",
+        seg       = sel_cost$seg[1]       %||% NA_integer_,
+        model_var = sel_cost$model_var[1] %||% NA_character_)
+      cc <- res$cost_diagnoses %>%
+        dplyr::filter(!VariableSplit %in% matching_cost) %>%
+        dplyr::bind_rows(mc_row)
+      if ("period" %in% names(cc))
+        cc %>% dplyr::group_by(period) %>%
+        dplyr::mutate(gp = sum(total_spend, na.rm = TRUE),
+                      pct_total_spend = round(total_spend / pmax(gp, 1) * 100, 4)) %>%
+        dplyr::ungroup() %>% dplyr::select(-gp)
+      else {
+        gt <- sum(cc$total_spend, na.rm = TRUE)
+        cc %>% dplyr::mutate(
+          pct_total_spend = round(total_spend / pmax(gt, 1) * 100, 4))
+      }
+    }
+  }, error = \(e) res$cost_diagnoses)
+  
+  list(rag            = new_rag,
+       cross_cols     = res$cross_cols,
+       ref_cross      = res$ref_cross,
+       activity_spend = new_act_spend,
+       side_mapping   = new_side_map,
+       act_diagnoses  = new_act_diag,
+       cost_diagnoses = new_cost_diag)
+}
+
 # ═══════════════════════════════════════════════════════════════════════
 # process_channel — always geographic (all_rags only)
 # ═══════════════════════════════════════════════════════════════════════
@@ -189,13 +407,13 @@ process_channel <- function(all_rags,
   source_data <- all_rags
   if (is.null(source_data)) stop("All RAGs data not uploaded.")
   
-  # ── Filter to channel's VOF date range ──────────────────────────────────
+  # Filter to channel's VOF date range
   if (!is.null(min_period) && !is.na(as.Date(min_period)))
     source_data <- source_data[source_data$Period >= as.Date(min_period), ]
   if (!is.null(max_period) && !is.na(as.Date(max_period)))
     source_data <- source_data[source_data$Period <= as.Date(max_period), ]
   
-  # ── Constrain to analytical date spine ──────────────────────────────────
+  # Constrain to analytical date spine
   if (nrow(dates_df) > 0) {
     an_min_date <- min(dates_df$Period, na.rm = TRUE)
     an_max_date <- max(dates_df$Period, na.rm = TRUE)
@@ -208,21 +426,18 @@ process_channel <- function(all_rags,
     stop("No data available in the channel's date range (",
          min_period, " \u2192 ", max_period, ").")
   
-  # ── Geographic setup ─────────────────────────────────────────────────────
   cross_data    <- source_data[, cross_cols, drop = FALSE]
   cross_key     <- do.call(paste, c(as.list(cross_data), list(sep = " / ")))
   ref_cross_key <- sort(unique(cross_key))[1]
   
   cross_id   <- c(cross_cols, "Period")
-  join_key   <- cross_id   # always geographic
+  join_key   <- cross_id
   id_protect <- cross_id
   
   rag_base <- unique(source_data[, cross_id, drop = FALSE])
   rag_base <- rag_base[order(rag_base$Period), ]
   
-  # ── Single model_variable (new architecture) ─────────────────────────────
   model_var <- cfg$model_variable %||% ""
-  # n=1 always; keep loop for dimension_breaks compatibility
   n     <- 1L
   s_beg <- c(as.Date(NA_character_))
   s_end <- c(as.Date(end_report_date))
@@ -235,7 +450,6 @@ process_channel <- function(all_rags,
     any(sapply(segment_overrides,
                \(o) length(o$geography_exclude %||% character(0)) > 0))
   
-  # ── Pre-filter ────────────────────────────────────────────────────────────
   pb("Filtering source data...", 0.10)
   
   d_prefilt <- data.table::as.data.table(source_data)
@@ -270,7 +484,6 @@ process_channel <- function(all_rags,
       if (nchar(p %||% "") > 0)
         d_prefilt <- d_prefilt[!grepl(p, Creative, ignore.case = TRUE)]
   
-  # ── Segment loop (n=1 always) ─────────────────────────────────────────────
   pb("Building splits...", 0.20)
   
   d <- data.table::copy(d_prefilt)
@@ -301,7 +514,6 @@ process_channel <- function(all_rags,
                              c(lapply(cfg$split_columns, function(col) d[[col]]),
                                list(sep = "_")))]
     
-    # ── Pivot wide — always geographic ──────────────────────────────────────
     lhs    <- paste(cross_id, collapse = " + ")
     d_wide <- data.table::dcast(d,
                                 as.formula(paste(lhs, "~ SplitName")),
@@ -317,7 +529,7 @@ process_channel <- function(all_rags,
     d_wide <- as.data.frame(d_wide)
     d_wide <- d_wide[order(d_wide$Period), ]
     
-    # ── Non-focus suffix — uses time_break_label from VOF detection ──────────
+    # Non-focus suffix — uses time_break_label from VOF detection
     nf_sfx <- {
       tbr <- cfg$time_break_label %||% ""
       if (nzchar(tbr))
@@ -326,7 +538,7 @@ process_channel <- function(all_rags,
         paste0("Before ", update_label)
     }
     
-    # ── Non-focus slice ──────────────────────────────────────────────────────
+    # Non-focus slice
     nf_raw <- as.data.frame(d_wide[d_wide$Period < as.Date(start_report_date), ])
     nf     <- keep_nonzero_cols(nf_raw)
     
@@ -359,7 +571,7 @@ process_channel <- function(all_rags,
       }
     }
     
-    # ── Focus slice ──────────────────────────────────────────────────────────
+    # Focus slice
     fc_raw <- as.data.frame(
       d_wide[d_wide$Period >= as.Date(start_report_date) &
                d_wide$Period <= as.Date(end_report_date), ])
@@ -397,7 +609,6 @@ process_channel <- function(all_rags,
     rm(d, d_df, d_wide, nf_raw, nf, fc_raw, fc)
   }
   
-  # ── Assemble RAG ───────────────────────────────────────────────────────────
   pb("Assembling RAG...", 0.82)
   
   rag <- data.table::as.data.table(rag_base)
@@ -438,7 +649,8 @@ process_channel <- function(all_rags,
     act_all <- act_all %>%
       group_by(period) %>%
       mutate(grand_p = sum(total_activity, na.rm = TRUE),
-             pct_total_activity = round(total_activity / pmax(grand_p, 1) * 100, 4)) %>%
+             pct_total_activity = round(
+               total_activity / pmax(grand_p, 1) * 100, 4)) %>%
       ungroup() %>% select(-grand_p)
   }
   
@@ -446,7 +658,8 @@ process_channel <- function(all_rags,
     cost_all <- cost_all %>%
       group_by(period) %>%
       mutate(grand_p = sum(total_spend, na.rm = TRUE),
-             pct_total_spend = round(total_spend / pmax(grand_p, 1) * 100, 4)) %>%
+             pct_total_spend = round(
+               total_spend / pmax(grand_p, 1) * 100, 4)) %>%
       ungroup() %>% select(-grand_p)
   }
   

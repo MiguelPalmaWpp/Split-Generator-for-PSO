@@ -39,7 +39,7 @@ paintBlue();
 api.on('draw', paintBlue);
 }
 
-/* ── Tab disabling (Setup validation blocks Channels / Process / Export) ──
+/* ── Tab disabling ────────────────────────────────────────────────────────
  Called from server.R via session$sendCustomMessage("setTabsDisabled", ...)
  ─────────────────────────────────────────────────────────────────────── */
 Shiny.addCustomMessageHandler('setTabsDisabled', function(msg) {
@@ -64,7 +64,6 @@ tabs.forEach(function(tab) {
   }
 });
 
-/* If currently on a blocked tab → redirect to Setup */
 if (msg.disabled) {
   var active = document.querySelector(
     '.wpp-main-nav a.active[data-value]'
@@ -76,4 +75,46 @@ if (msg.disabled) {
     if (setupTab) setupTab.click();
   }
 }
+});
+
+/* ── Notification panel — force top-right position ───────────────────────
+ Uses setProperty('!important') to override Shiny's own inline styles.
+ CSS rules alone cannot win against inline styles — this approach can.
+ ─────────────────────────────────────────────────────────────────────── */
+$(document).ready(function () {
+
+function forceNotifPosition() {
+  var panel = document.querySelector('.shiny-notification-panel');
+  if (!panel) return;
+  panel.style.setProperty('top',    '120px',  'important');
+  panel.style.setProperty('bottom', 'auto',   'important');
+  panel.style.setProperty('right',  '20px',   'important');
+  panel.style.setProperty('left',   'auto',   'important');
+  panel.style.setProperty('width',  '340px',  'important');
+  panel.style.setProperty('z-index','99999',  'important');
+}
+
+// Run once immediately (in case panel already exists)
+forceNotifPosition();
+
+// Watch for panel being added or modified
+var observer = new MutationObserver(function (mutations) {
+  for (var i = 0; i < mutations.length; i++) {
+    var nodes = mutations[i].addedNodes;
+    for (var j = 0; j < nodes.length; j++) {
+      if (nodes[j].classList &&
+          nodes[j].classList.contains('shiny-notification-panel')) {
+        forceNotifPosition();
+      }
+    }
+  }
+  // Also check if panel exists but wasn't the added node
+  forceNotifPosition();
+});
+
+observer.observe(document.body, {
+  childList : true,
+  subtree   : true
+});
+
 });

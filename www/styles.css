@@ -638,19 +638,36 @@ background-color: #5B9BD5 !important;
 
 /*
 ═══════════════════════════════════════════════════════════════════════
-SHINY NOTIFICATIONS
+SHINY NOTIFICATIONS — top-right below header
 ═══════════════════════════════════════════════════════════════════════
 */
-.shiny-notification {
-border-radius: 7px;
-font-size: 13px;
-border: none;
-box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+.shiny-notification-panel {
+top:    120px  !important;   
+right:   20px  !important;
+bottom:  auto  !important;   
+left:    auto  !important;
+width:   340px !important;
+z-index: 9999  !important;   
 }
 
-.shiny-notification-message { background: #EBF3FB; color: #1565c0; }
-.shiny-notification-warning { background: #fff8e1; color: #856404; }
-.shiny-notification-error   { background: #fdecea; color: #842029; }
+.shiny-notification {
+border-radius: 7px    !important;
+font-size:     13px   !important;
+border:        none   !important;
+box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15) !important;
+margin-bottom: 8px    !important;
+animation: slideInRight 0.2s ease;
+}
+
+@keyframes slideInRight {
+from { opacity: 0; transform: translateX(20px); }
+to   { opacity: 1; transform: translateX(0);    }
+}
+
+.shiny-notification-message { background: #EBF3FB !important; color: #1565c0 !important; }
+.shiny-notification-warning { background: #fff8e1 !important; color: #856404 !important; }
+.shiny-notification-error   { background: #fdecea !important; color: #842029 !important; }
+
 
 /*
 ═══════════════════════════════════════════════════════════════════════

@@ -1,4 +1,5 @@
 options(shiny.maxRequestSize = 200 * 1024^2)
+options(future.globals.maxSize = 2 * 1024^3)
 
 library(shiny)
 library(bslib)
@@ -14,14 +15,27 @@ library(sortable)
 library(data.table)
 library(arrow)
 library(zip)
+library(here)
+library(future)
+library(future.apply)
+
+
+
+plan(sequential)
 
 # ── Source modules ────────────────────────────────────────────────────────
-source("R/functions.R")
-source("R/processing.R")
-source("R/mod_setup.R")
-source("R/mod_channels.R")
-source("R/mod_process.R")
-source("R/mod_export.R")
+
+source_dir <- function(path, pattern = "\\.R$") {
+  files <- list.files(
+    path       = here(path),
+    pattern    = pattern,
+    full.names = TRUE
+  )
+  invisible(lapply(files, source))
+}
+
+source_dir("R/utils")
+source_dir("R", "^mod_.*\\.R$")
 
 # ── Null-coalescing operator ──────────────────────────────────────────────
 `%||%` <- function(a, b) if (is.null(a) || length(a) == 0) b else a

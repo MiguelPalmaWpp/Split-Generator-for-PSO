@@ -2,16 +2,16 @@
 # R/functions.R
 # ═══════════════════════════════════════════════════════════════════════
 
-# ── Ordinal tag (used by build_media_index for time-break labels) ──────────
+# ── Ordinal tag ────────────────────────────────────────────────────────────
 ordinal_tag <- function(i) {
   c("First", "Second", "Third", "Fourth", "Fifth")[min(i, 5L)]
 }
 
-# ── Date parsers ──────────────────────────────────────────────────────────────
+# ── Date parsers ───────────────────────────────────────────────────────────
 parse_period_robust <- function(x) {
   x <- trimws(as.character(x))
-  x <- gsub("^(\\d{4})(\\d{2})(\\d{2})$",    "\\1-\\2-\\3", x)
-  x <- gsub("^(\\d{1,2})/(\\d{1,2})/(\\d{4})$", "\\3-\\1-\\2", x)
+  x <- gsub("^(\\d{4})(\\d{2})(\\d{2})$",       "\\1-\\2-\\3", x)
+  x <- gsub("^(\\d{1,2})/(\\d{1,2})/(\\d{4})$",  "\\3-\\1-\\2", x)
   x <- gsub("^(\\d{1,2})/(\\d{1,2})/(\\d{2})$",  "20\\3-\\1-\\2", x)
   x <- gsub("^(\\d{1,2})\\.(\\d{1,2})\\.(\\d{4})$", "\\3-\\2-\\1", x)
   suppressWarnings(as.Date(x))
@@ -29,7 +29,7 @@ parse_vof_period <- function(x) {
   as.Date(NA_character_)
 }
 
-# ── Cross-section detection ────────────────────────────────────────────────────
+# ── Cross-section detection ────────────────────────────────────────────────
 auto_detect_cross_cols <- function(analytical) {
   candidates <- intersect(CROSS_SECTION_CANDIDATES, names(analytical))
   found <- Filter(function(col) {
@@ -39,10 +39,7 @@ auto_detect_cross_cols <- function(analytical) {
   if (!length(found)) "Geography" else found
 }
 
-# auto_detect_source_type REMOVED — app only supports all_rags
-
-# ── File reader ───────────────────────────────────────────────────────────────
-# Renamed from read_all_transformed — reads the main data file (always all_rags)
+# ── File reader ────────────────────────────────────────────────────────────
 read_main_data <- function(path, ext) {
   raw <- if (tolower(ext) == "parquet") {
     arrow::read_parquet(path)
@@ -85,7 +82,7 @@ read_main_data <- function(path, ext) {
     arrange(Geography, Product, VariableName, Period)
 }
 
-# ── Config CSV ─────────────────────────────────────────────────────────────────
+# ── Config CSV ─────────────────────────────────────────────────────────────
 export_channels_csv <- function(channels) {
   if (!length(channels)) return(data.frame())
   rows <- list()
@@ -122,7 +119,7 @@ export_channels_csv <- function(channels) {
   bind_rows(rows)
 }
 
-# ── Media keyword detectors ────────────────────────────────────────────────────
+# ── Media keyword detectors ────────────────────────────────────────────────
 detect_activity_keyword <- function(var_names,
                                     keyword_dict = MEDIA_KEYWORD_DICT) {
   for (kw in keyword_dict$activity) {
@@ -147,7 +144,7 @@ detect_spend_keyword <- function(main_data, varname_include,
   "Spend"
 }
 
-# ── var_key builder ───────────────────────────────────────────────────────────
+# ── var_key builder ────────────────────────────────────────────────────────
 build_var_key <- function(main_data, vof_analytical_names) {
   if (is.null(main_data) || !"VariableName" %in% names(main_data))
     return(list(type = "standard", key_col = "var_key_v1",
@@ -166,17 +163,17 @@ build_var_key <- function(main_data, vof_analytical_names) {
   }
   
   list(
-    type      = if (use_product) "with_product" else "standard",
-    key_col   = if (use_product) "var_key_v2" else "var_key_v1",
-    coverage  = if (use_product)
+    type        = if (use_product) "with_product" else "standard",
+    key_col     = if (use_product) "var_key_v2" else "var_key_v1",
+    coverage    = if (use_product)
       mean(dv$var_key_v2 %in% vof_analytical_names) else cov_v1,
     distinct_df = dv
   )
 }
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════
 # build_media_index
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════
 build_media_index <- function(main_data, analytical, vof_df, model_details,
                               channels_rois = NULL,
                               cross_cols    = "Geography",
@@ -192,7 +189,7 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
   an_max_date <- if (!is.null(analytical) && "Period" %in% names(analytical))
     max(analytical$Period, na.rm = TRUE) else as.Date(NA_character_)
   
-  # ── Step 1: filter ModelDetails to Type = IN / FIXED ──────────────────────
+  # ── Step 1: filter ModelDetails to Type = IN / FIXED ────────────────────
   in_model_vars <- if (
     !is.null(model_details) &&
     all(c("Type", "VariableName") %in% names(model_details))
@@ -207,7 +204,7 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
     unique(vof_df$MainModelVariableName)
   }
   
-  # ── Step 2: validate VOF + filter ─────────────────────────────────────────
+  # ── Step 2: validate VOF ─────────────────────────────────────────────────
   req_vof  <- c("AnalyticalVariableName", "MainModelVariableName",
                 "MinPeriod", "MaxPeriod", "Geographies")
   miss_vof <- setdiff(req_vof, names(vof_df))
@@ -228,10 +225,10 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
     )
   }
   
-  # ── Step 3: var_key detection ──────────────────────────────────────────────
+  # ── Step 3: var_key detection ────────────────────────────────────────────
   vk_info <- build_var_key(main_data, unique(vof_filtered$AnalyticalVariableName))
   
-  # ── Step 4: ROI lookup by MainModelVariableName ────────────────────────────
+  # ── Step 4: ROI lookup ───────────────────────────────────────────────────
   roi_lookup <- NULL
   if (!is.null(channels_rois) &&
       "MainModelVariableName" %in% names(channels_rois)) {
@@ -245,7 +242,7 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
     }
   }
   
-  # ── Step 5: one channel per MainModelVariableName ─────────────────────────
+  # ── Step 5: one channel per MainModelVariableName ────────────────────────
   for (mv in unique(vof_filtered$MainModelVariableName)) {
     vof_rows       <- vof_filtered %>% filter(MainModelVariableName == mv)
     anal_var_names <- unique(vof_rows$AnalyticalVariableName)
@@ -298,25 +295,24 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
     }
     
     channels[[mv]] <- list(
-      channel_name      = mv,
-      model_variable    = mv,
-      varname_include   = varname_include,
+      channel_name       = mv,
+      model_variable     = mv,
+      varname_include    = varname_include,
       analytical_varkeys = anal_var_names,
-      min_period        = min_period,
-      max_period        = max_period,
-      segment_overrides = segment_overrides,
-      activity_keyword  = act_kw,
-      spend_keyword     = spend_kw,
-      split_columns     = c("VariableName"),
-      saved_merges      = list(),
-      dimension_breaks  = list(),
-      roi               = roi_val,
-      source            = "vof"
-      # time_break_label assigned in Step 7
+      min_period         = min_period,
+      max_period         = max_period,
+      segment_overrides  = segment_overrides,
+      activity_keyword   = act_kw,
+      spend_keyword      = spend_kw,
+      split_columns      = c("VariableName"),
+      saved_merges       = list(),
+      dimension_breaks   = list(),
+      roi                = roi_val,
+      source             = "vof"
     )
   }
   
-  # ── Step 6: fallback — non-VOF Analytical variables ───────────────────────
+  # ── Step 6: fallback — non-VOF Analytical variables ──────────────────────
   if (!is.null(analytical)) {
     cross_id_cols <- c(cross_cols, "Period", "BP_Year")
     model_cols    <- setdiff(
@@ -350,55 +346,46 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
       }
       
       channels[[col]] <- list(
-        channel_name      = col,
-        model_variable    = col,
-        varname_include   = varname_include,
+        channel_name       = col,
+        model_variable     = col,
+        varname_include    = varname_include,
         analytical_varkeys = col,
-        min_period        = an_min_date,
-        max_period        = an_max_date,
-        segment_overrides = list(),
-        activity_keyword  = act_kw,
-        spend_keyword     = spend_kw,
-        split_columns     = c("VariableName"),
-        saved_merges      = list(),
-        dimension_breaks  = list(),
-        roi               = roi_val,
-        source            = "keyword_fallback"
+        min_period         = an_min_date,
+        max_period         = an_max_date,
+        segment_overrides  = list(),
+        activity_keyword   = act_kw,
+        spend_keyword      = spend_kw,
+        split_columns      = c("VariableName"),
+        saved_merges       = list(),
+        dimension_breaks   = list(),
+        roi                = roi_val,
+        source             = "keyword_fallback"
       )
     }
   }
   
-  # ── Step 7: assign time_break_labels ──────────────────────────────────────
-  # VOF channels sharing the same AnalyticalVariableName(s) are time segments
-  # of the same underlying variable → FirstTimeBreak, SecondTimeBreak, ...
-  
+  # ── Step 7: assign time_break_labels ────────────────────────────────────
   vof_sigs <- vapply(names(channels), function(nm) {
     ch <- channels[[nm]]
     if (!identical(ch$source, "vof")) return(NA_character_)
     paste(sort(unique(ch$analytical_varkeys)), collapse = "||")
   }, character(1))
   
-  vof_sigs <- vof_sigs[!is.na(vof_sigs)]
-  
-  dup_sigs <- names(which(table(vof_sigs) > 1))
+  vof_sigs  <- vof_sigs[!is.na(vof_sigs)]
+  dup_sigs  <- names(which(table(vof_sigs) > 1))
   
   for (sig in dup_sigs) {
     group_nms <- names(vof_sigs[vof_sigs == sig])
-    
-    # Sort chronologically by min_period → First = earliest segment
     min_dates <- sapply(group_nms, function(nm) {
       mp <- channels[[nm]]$min_period
       if (!is.null(mp) && !is.na(mp)) as.numeric(as.Date(mp)) else 0
     })
     sorted_nms <- group_nms[order(min_dates)]
-    
-    for (i in seq_along(sorted_nms)) {
-      channels[[sorted_nms[i]]]$time_break_label <-
-        paste0(ordinal_tag(i), "TimeBreak")
-    }
+    for (i in seq_along(sorted_nms))
+      channels[[sorted_nms[i]]]$time_break_label <- paste0(ordinal_tag(i), "TimeBreak")
   }
   
-  # ── Return ─────────────────────────────────────────────────────────────────
+  # ── Return ─────────────────────────────────────────────────────────────
   n_vof      <- sum(sapply(channels, \(c) identical(c$source, "vof")))
   n_fallback <- sum(sapply(channels, \(c) identical(c$source, "keyword_fallback")))
   n_with_roi <- sum(sapply(channels, \(c) !is.na(c$roi %||% NA_real_)))

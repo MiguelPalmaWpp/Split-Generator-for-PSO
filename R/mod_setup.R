@@ -8,11 +8,9 @@ mod_setup_ui <- function(id) {
   mk_file_card <- function(num, title, formats, input_ui) {
     div(
       class = "file-card",
-      div(
-        class = "file-card-header",
-        tags$span(num,     class = "file-card-num"),
-        tags$span(title,   class = "file-card-title")
-      ),
+      div(class = "file-card-header",
+          tags$span(num,   class = "file-card-num"),
+          tags$span(title, class = "file-card-title")),
       tags$span(formats, class = "file-card-formats"),
       div(class = "mt-auto", input_ui)
     )
@@ -23,15 +21,10 @@ mod_setup_ui <- function(id) {
     # ── Row 1: Data Files ──────────────────────────────────────────────
     card(
       class = "setup-files-card", fill = FALSE,
-      card_header(div(
-        class = "card-header-inner",
-        icon("folder-open", class = "icon-blue-sm"),
-        "Data Files"
-      )),
-      
+      card_header(div(class = "card-header-inner",
+                      "Data Files")),
       layout_columns(
-        col_widths = c(4, 4, 4),
-        class = "mb-3",
+        col_widths = c(4, 4, 4), class = "mb-3",
         mk_file_card("1", "Main Data File", ".csv  .parquet  .zip  .gz",
                      fileInput(ns("file_main"), NULL,
                                accept = c(".csv", ".parquet", ".zip", ".gz"))),
@@ -42,7 +35,6 @@ mod_setup_ui <- function(id) {
                      fileInput(ns("file_vof"), NULL,
                                accept = c(".csv", ".xlsx", ".xls")))
       ),
-      
       layout_columns(
         col_widths = c(4, 4, 4),
         mk_file_card("4", "ModelDetails", ".csv",
@@ -57,7 +49,6 @@ mod_setup_ui <- function(id) {
     # ── Row 2: Global Parameters + Column Suffix Preview ───────────────
     layout_columns(
       col_widths = c(7, 5),
-      
       card(
         card_header("Global Parameters"),
         uiOutput(ns("update_label_ui")),
@@ -66,8 +57,10 @@ mod_setup_ui <- function(id) {
           tags$label("Reporting Period", class = "form-label"),
           div(class = "ds-pill-group",
               radioButtons(ns("period_preset"), NULL,
-                           choices  = c("Last 52w" = "last52", "Last 13w" = "last13",
-                                        "All Period" = "all", "Custom" = "custom"),
+                           choices  = c("Last 52w"   = "last52",
+                                        "Last 13w"   = "last13",
+                                        "All Period" = "all",
+                                        "Custom"     = "custom"),
                            selected = "last52", inline = TRUE))
         ),
         uiOutput(ns("custom_dates_ui")),
@@ -76,7 +69,6 @@ mod_setup_ui <- function(id) {
         hr(),
         uiOutput(ns("validation_alerts"))
       ),
-      
       card(
         card_header("Column Suffix Preview"),
         uiOutput(ns("suffix_preview"))
@@ -85,10 +77,30 @@ mod_setup_ui <- function(id) {
     
     # ── Row 3: File Validation ─────────────────────────────────────────
     card(
-      class    = "setup-comparison-card",
+      class       = "setup-comparison-card",
       full_screen = TRUE,
       card_header("File Validation"),
       uiOutput(ns("file_comparison"))
+    ),
+    
+    # ── Row 4: Media Variable Index — manual only ──────────────────────
+    # Auto-build removed: index only builds when user clicks "Rebuild".
+    # This keeps Setup fast — building happens on demand.
+    card(
+      card_header(div(
+        class = "card-header-between",
+        div(class = "card-header-inner",
+            icon("diagram-project", class = "icon-blue-sm"),
+            "Media Variable Index",
+            tags$small("VOF + ModelDetails + ROIs",
+                       class = "section-subtitle")),
+        div(class = "d-flex align-items-center gap-2",
+            uiOutput(ns("media_index_status_badge")),
+            actionButton(ns("btn_rebuild_index"),
+                         tagList(icon("rotate"), " Build Index"),
+                         class = "btn-outline-secondary btn-sm"))
+      )),
+      uiOutput(ns("media_index_display"))
     )
   )
 }
@@ -112,6 +124,9 @@ mod_setup_server <- function(id) {
       media_index       = NULL
     )
     
+    # Tracks whether media index is currently being built
+    mi_building <- reactiveVal(FALSE)
+    
     normalize_geo <- function(x)
       trimws(gsub("\\s+", " ", tolower(gsub("[,.]", " ", as.character(x)))))
     
@@ -130,22 +145,48 @@ mod_setup_server <- function(id) {
     # ── Load Main Data File ────────────────────────────────────────────
     observeEvent(input$file_main, {
       req(input$file_main)
-      ext <- tools::file_ext(input$file_main$name)
-      withProgress(message = "Loading Main Data File...", {
-        tryCatch({
-          df <- read_main_data(input$file_main$datapath, ext)
-          if (!validate_required_cols(df, "Main data file")) return()
-          rv$main_data <- df
-          gc()
-          showNotification(
-            paste0("Main Data File loaded — ",
-                   format(nrow(df), big.mark = ","), " rows"),
-            type = "message")
-        }, error = \(e) showNotification(e$message, type = "error", duration = 10))
-      })
+      ext  <- tools::file_ext(input$file_main$name)
+      size <- round(input$file_main$size / 1024^2, 1)
+      
+      withProgress(
+        message = paste0("Loading Main Data File (", size, " MB)..."),
+        value = 0, {
+          incProgress(0.05, detail = "Checking columns...")
+          tryCatch({
+            header_check <- data.table::fread(
+              input$file_main$datapath, nrows = 5,
+              data.table = FALSE, showProgress = FALSE)
+            missing <- setdiff(REQUIRED_COLS, names(header_check))
+            if (length(missing) > 0) {
+              showNotification(
+                paste0("Missing columns: ", paste(missing, collapse = ", ")),
+                type = "error", duration = 15)
+              return()
+            }
+            incProgress(0.10, detail = "Reading file...")
+            df <- read_main_data(input$file_main$datapath, ext)
+            
+            incProgress(0.70, detail = "Validating...")
+            if (!validate_required_cols(df, "Main data file")) return()
+            
+            incProgress(0.10, detail = "Storing...")
+            rv$main_data <- df
+            gc()
+            
+            incProgress(0.05, detail = "Done!")
+            showNotification(
+              tagList(icon("circle-check", class = "icon-ch-ok"),
+                      paste0(" Main Data File loaded — ",
+                             format(nrow(df), big.mark = ","),
+                             " rows | ", size, " MB")),
+              type = "message", duration = 4)
+            
+          }, error = \(e) showNotification(e$message,
+                                           type = "error", duration = 10))
+        })
     })
     
-    # ── Load AnalyticalDataset ─────────────────────────────────────────
+    # ── Load Analytical Dataset ────────────────────────────────────────
     observeEvent(input$file_analytical, {
       req(input$file_analytical)
       ext <- tools::file_ext(input$file_analytical$name)
@@ -191,9 +232,10 @@ mod_setup_server <- function(id) {
         
         rm(df); gc()
         showNotification(
-          paste0("AnalyticalDataset loaded — ",
-                 format(nrow(rv$analytical), big.mark = ","), " rows"),
-          type = "message")
+          tagList(icon("circle-check", class = "icon-ch-ok"),
+                  paste0(" AnalyticalDataset loaded — ",
+                         format(nrow(rv$analytical), big.mark = ","), " rows")),
+          type = "message", duration = 4)
         
       }, error = \(e) showNotification(
         paste("AnalyticalDataset error:", e$message),
@@ -216,7 +258,6 @@ mod_setup_server <- function(id) {
         req_vof  <- c("AnalyticalVariableName", "MainModelVariableName",
                       "MinPeriod", "MaxPeriod", "Geographies")
         miss_vof <- setdiff(req_vof, names(vof_raw))
-        
         if (length(miss_vof) > 0) {
           showNotification(
             paste0("VOF missing required columns: ",
@@ -227,10 +268,12 @@ mod_setup_server <- function(id) {
         
         rv$vof_data <- vof_raw
         showNotification(
-          paste0("VOF loaded — ", format(nrow(vof_raw), big.mark = ","),
-                 " rows, ", n_distinct(vof_raw$MainModelVariableName),
-                 " model variables"),
-          type = "message")
+          tagList(icon("circle-check", class = "icon-ch-ok"),
+                  paste0(" VOF loaded — ",
+                         format(nrow(vof_raw), big.mark = ","), " rows, ",
+                         n_distinct(vof_raw$MainModelVariableName),
+                         " model variables")),
+          type = "message", duration = 4)
       }, error = \(e) showNotification(
         paste("VOF error:", e$message), type = "error", duration = 10))
     })
@@ -244,13 +287,15 @@ mod_setup_server <- function(id) {
           showProgress = FALSE) %>%
           filter(!str_detect(str_to_lower(Type), "none"))
         gc()
+        n_in <- sum(str_detect(str_to_lower(rv$details$Type),
+                               "\\b(in|fixed)\\b"), na.rm = TRUE)
         showNotification(
-          paste0("ModelDetails loaded — ",
-                 sum(str_detect(str_to_lower(rv$details$Type),
-                                "\\b(in|fixed)\\b"), na.rm = TRUE),
-                 " Type='IN'/'FIXED' variables"),
-          type = "message")
-      }, error = \(e) showNotification(e$message, type = "error", duration = 10))
+          tagList(icon("circle-check", class = "icon-ch-ok"),
+                  paste0(" ModelDetails loaded — ", n_in,
+                         " Type='IN'/'FIXED' variables")),
+          type = "message", duration = 4)
+      }, error = \(e) showNotification(e$message,
+                                       type = "error", duration = 10))
     })
     
     # ── Load ROIs by Channel ───────────────────────────────────────────
@@ -265,39 +310,143 @@ mod_setup_server <- function(id) {
                             data.table = FALSE, showProgress = FALSE)
         gc()
         showNotification(
-          paste0("ROIs loaded — ", nrow(rv$channels_rois), " rows"),
-          type = "message")
-      }, error = \(e) showNotification(e$message, type = "error", duration = 10))
+          tagList(icon("circle-check", class = "icon-ch-ok"),
+                  paste0(" ROIs loaded — ", nrow(rv$channels_rois), " rows")),
+          type = "message", duration = 4)
+      }, error = \(e) showNotification(e$message,
+                                       type = "error", duration = 10))
     })
     
-    # ── Build Media Variable Index ─────────────────────────────────────
-    observe({
-      req(rv$main_data, rv$analytical, rv$vof_data, rv$details, rv$cross_cols)
-      tryCatch({
-        mi <- build_media_index(
-          main_data     = rv$main_data,
-          analytical    = rv$analytical,
-          vof_df        = rv$vof_data,
-          model_details = rv$details,
-          channels_rois = rv$channels_rois,
-          cross_cols    = rv$cross_cols %||% "Geography"
-        )
-        rv$media_index <- mi
+    # ── Build Media Index — MANUAL ONLY ───────────────────────────────
+    # Option A: no auto-trigger. Only builds when user clicks "Build Index".
+    # This keeps Setup fast — the build happens on demand.
+    observeEvent(input$btn_rebuild_index, {
+      if (!is.null(rv$analytical) && !is.null(rv$details)) {
+        if (isTRUE(mi_building())) return()
+        mi_building(TRUE)
+        
+        tryCatch({
+          mi <- build_media_index(
+            main_data     = rv$main_data,
+            analytical    = rv$analytical,
+            vof_df        = rv$vof_data,
+            model_details = rv$details,
+            channels_rois = rv$channels_rois,
+            cross_cols    = rv$cross_cols %||% "Geography"
+          )
+          rv$media_index <- mi
+          
+          if (mi$summary$total_channels > 0)
+            showNotification(
+              tagList(
+                icon("circle-check", class = "icon-ch-ok"),
+                paste0(" Media Index — ", mi$summary$total_channels,
+                       " channels (", mi$summary$from_vof, " VOF, ",
+                       mi$summary$from_fallback, " keyword)")),
+              type = "message", duration = 4)
+          else
+            showNotification(
+              "Media Index built but 0 channels found. Check ModelDetails.",
+              type = "warning", duration = 8)
+          
+        }, error = function(e) {
+          rv$media_index <- NULL
+          showNotification(paste("Media Index error:", e$message),
+                           type = "error", duration = 10)
+        })
+        
+        mi_building(FALSE)
+        
+      } else {
         showNotification(
-          tagList(
-            icon("circle-check", class = "icon-success-sm"),
-            paste0(" Media Index built — ", mi$summary$total_channels,
-                   " channels (", mi$summary$from_vof, " from VOF",
-                   if (mi$summary$from_fallback > 0)
-                     paste0(", ", mi$summary$from_fallback, " keyword fallback")
-                   else "", ")")
-          ),
-          type = "message", duration = 5)
-      }, error = function(e) {
-        rv$media_index <- NULL
-        showNotification(paste("Media Index error:", e$message),
-                         type = "error", duration = 10)
-      })
+          "Upload Analytical Dataset and ModelDetails first.",
+          type = "warning", duration = 5)
+      }
+    })
+    
+    # ── Media Index status badge ───────────────────────────────────────
+    output$media_index_status_badge <- renderUI({
+      mi_building()
+      if (isTRUE(mi_building()))
+        return(tags$span(class = "badge-not-ready",
+                         icon("hourglass-half", class = "icon-xs"),
+                         " Building..."))
+      mi <- rv$media_index
+      if (is.null(mi))
+        return(tags$span(class = "badge-count-neutral",
+                         "Not built yet"))
+      if (mi$summary$total_channels == 0)
+        return(tags$span(class = "badge-not-ready",
+                         icon("triangle-exclamation", class = "icon-xs"),
+                         " 0 channels"))
+      tags$span(class = "badge-ready",
+                icon("circle-check", class = "icon-xs"),
+                paste0(" ", mi$summary$total_channels, " channels"))
+    })
+    
+    # ── Media Index display ────────────────────────────────────────────
+    output$media_index_display <- renderUI({
+      mi_building()
+      
+      if (isTRUE(mi_building()))
+        return(div(class = "mi-box-pending",
+                   div(class = "mi-box-pending-inner",
+                       icon("hourglass-half", class = "icon-blue-sm"),
+                       tags$span("Building Media Index..."))))
+      
+      mi <- rv$media_index
+      
+      # Not built yet — waiting for user action
+      if (is.null(mi)) {
+        if (is.null(rv$analytical) || is.null(rv$details))
+          return(div(class = "mi-box-na",
+                     div(class = "mi-box-na-inner",
+                         icon("clock", class = "icon-blue-sm"),
+                         tags$span(
+                           "Load Analytical Dataset and ModelDetails, then click Build Index."
+                         ))))
+        return(div(class = "mi-box-na",
+                   div(class = "mi-box-na-inner",
+                       icon("play-circle", class = "icon-blue-sm"),
+                       tags$span(
+                         "Files ready. Click ",
+                         tags$strong("Build Index"),
+                         " to generate channels."
+                       ))))
+      }
+      
+      # No channels found
+      if (mi$summary$total_channels == 0)
+        return(div(class = "alert alert-warning alert-sm p-3",
+                   icon("triangle-exclamation", class = "icon-warning-sm me-2"),
+                   "No channels found. Check ModelDetails has IN/FIXED variables."))
+      
+      # Success — display stats
+      div(class = "mi-box",
+          div(class = "mi-header",
+              div(class = "mi-header-left",
+                  icon("circle-check", class = "icon-ch-ok"),
+                  tags$strong(
+                    paste0(mi$summary$total_channels, " channel",
+                           if (mi$summary$total_channels != 1) "s" else "",
+                           " auto-generated"),
+                    class = "mi-title")),
+              tags$span(paste0("VOF coverage: ", mi$summary$vof_coverage, "%"),
+                        class = "mi-coverage")),
+          div(class = "mi-stats",
+              div(tags$span(mi$summary$from_vof,      class = "stat-number"),
+                  tags$span("from VOF",               class = "stat-label")),
+              if (mi$summary$from_fallback > 0)
+                div(tags$span(mi$summary$from_fallback, class = "stat-number"),
+                    tags$span("keyword fallback",       class = "stat-label")),
+              div(tags$span(mi$summary$with_roi,      class = "stat-number"),
+                  tags$span("with ROI",               class = "stat-label")),
+              div(tags$span(
+                if (mi$summary$var_key_type == "with_product")
+                  "Geography \u00d7 Product" else "Geography",
+                class = "stat-type"),
+                tags$span("var_key type", class = "stat-label")))
+      )
     })
     
     # ── Update label UI ────────────────────────────────────────────────
@@ -323,7 +472,7 @@ mod_setup_server <- function(id) {
           layout_columns(col_widths = c(6, 6),
                          dateInput(ns("start_report_date"), "Start Date",
                                    value = default_start),
-                         dateInput(ns("end_report_date"),   "End Date",
+                         dateInput(ns("end_report_date"), "End Date",
                                    value = default_end)))
     })
     
@@ -389,11 +538,18 @@ mod_setup_server <- function(id) {
       n_an_total  <- length(an_periods)
       n_mn_extra  <- sum(mn_periods < an_min_p) + sum(mn_periods > an_max_p)
       
+      # Robust max_offset — handles Date periods safely
       max_offset <- if (length(mn_in_range) > 0) {
-        sample_mn <- head(mn_in_range, min(20, length(mn_in_range)))
-        max(vapply(sample_mn, function(p)
-          min(abs(as.numeric(an_periods) - as.numeric(p))), numeric(1)),
-          na.rm = TRUE)
+        sample_mn  <- head(mn_in_range, min(20, length(mn_in_range)))
+        an_numeric <- suppressWarnings(as.numeric(an_periods))
+        an_numeric <- an_numeric[is.finite(an_numeric)]
+        offsets    <- vapply(sample_mn, function(p) {
+          p_num <- suppressWarnings(as.numeric(p))
+          if (!is.finite(p_num) || !length(an_numeric)) return(NA_real_)
+          min(abs(an_numeric - p_num), na.rm = TRUE)
+        }, numeric(1))
+        finite_off <- offsets[is.finite(offsets)]
+        if (length(finite_off) > 0) max(finite_off) else 0L
       } else if (length(mn_periods) > 0) 999L else 0L
       
       period_align_st <- if (n_common >= n_an_total * 0.95 && max_offset == 0) "green"
@@ -417,9 +573,9 @@ mod_setup_server <- function(id) {
       check_dim_na <- function(col_name) {
         if (!col_name %in% names(df_main))
           return(list(label = col_name, n_na = 0, n_total = 0, status = "na"))
-        vals <- df_main[[col_name]]; n_tot <- length(vals)
-        n_na <- sum(is.na(vals) | (is.character(vals) & !nzchar(trimws(vals))),
-                    na.rm = TRUE)
+        vals  <- df_main[[col_name]]; n_tot <- length(vals)
+        n_na  <- sum(is.na(vals) | (is.character(vals) & !nzchar(trimws(vals))),
+                     na.rm = TRUE)
         list(label = col_name, n_na = n_na, n_total = n_tot,
              status = if (n_na > 0) "yellow" else "green")
       }
@@ -432,7 +588,8 @@ mod_setup_server <- function(id) {
         an_geos    <- unique(as.character(df_an$Geography))
         src_geos   <- unique(as.character(df_main$Geography))
         not_in_src <- setdiff(an_geos, src_geos)
-        n_fuzzy    <- length(intersect(normalize_geo(an_geos), normalize_geo(src_geos)))
+        n_fuzzy    <- length(intersect(normalize_geo(an_geos),
+                                       normalize_geo(src_geos)))
         n_total_g  <- length(an_geos)
         geo_st     <- if (length(not_in_src) == 0) "green"
         else if (n_fuzzy >= n_total_g * 0.95) "yellow" else "red"
@@ -443,24 +600,6 @@ mod_setup_server <- function(id) {
       } else {
         list(n_exact = NA, n_total = NA, n_fuzzy = NA,
              n_missing = 0, sample_missing = character(0), status = "na")
-      }
-      
-      checks$media_index <- if (!is.null(rv$media_index)) {
-        mi      <- rv$media_index
-        vof_cov <- mi$summary$vof_coverage
-        list(
-          n_channels   = mi$summary$total_channels,
-          from_vof     = mi$summary$from_vof,
-          from_fb      = mi$summary$from_fallback,
-          with_roi     = mi$summary$with_roi,
-          vof_cov      = vof_cov,
-          var_key_type = mi$summary$var_key_type,
-          status       = if (mi$summary$total_channels == 0) "red" else "green"
-        )
-      } else {
-        list(n_channels = 0,
-             status = if (!is.null(rv$vof_data) && !is.null(rv$details))
-               "pending" else "na")
       }
       
       all_s   <- sapply(checks, \(c) c$status)
@@ -486,8 +625,7 @@ mod_setup_server <- function(id) {
         tags$strong("Cross-sections detected:", class = "section-strong"),
         div(class = "tag-group",
             lapply(rv$cross_cols, function(col)
-              tags$span(col, class = "badge-blue")
-            ))
+              tags$span(col, class = "badge-blue")))
       )
     })
     
@@ -499,30 +637,27 @@ mod_setup_server <- function(id) {
                    "No column suffix — All Period selected."))
       lbl <- input$update_label %||% "Last52w"
       tagList(
-        tags$p(class = "text-muted small mb-2", "Column names based on Update Label:"),
+        tags$p(class = "text-muted small mb-2",
+               "Column names based on Update Label:"),
         div(class = "suffix-box",
-            
             div(class = "mb-10",
                 tags$span("Non-Focus", class = "preview-label"),
                 tags$code(class = "code-tag", paste0("_Before ", lbl))),
-            
             div(class = "mb-10",
                 tags$span("Focus", class = "preview-label-focus"),
                 tags$code(class = "code-tag-blue", paste0("_", lbl))),
-            
             hr(class = "hr-sm"),
-            
             div(
-              tags$span("Time-break (auto-detected from VOF):", class = "preview-label"),
+              tags$span("Time-break (auto-detected from VOF):",
+                        class = "preview-label"),
               tags$code(class = "code-tag d-block mb-1",
                         paste0("_Before ", lbl, "|FirstTimeBreak")),
               tags$code(class = "code-tag d-block",
                         paste0("_Before ", lbl, "|SecondTimeBreak")),
               tags$p(class = "hint-text",
                      icon("circle-info", class = "icon-xs"),
-                     " Applied automatically when VOF has multiple entries for the same variable.")
-            )
-        )
+                     " Applied automatically when VOF has multiple entries.")
+            ))
       )
     })
     
@@ -537,14 +672,15 @@ mod_setup_server <- function(id) {
       
       if (start <= min_d) alerts <- c(alerts, list(div(
         class = "alert alert-warning alert-sm p-2 mb-1",
-        icon("triangle-exclamation"), " Start Date is at or before model scope start.")))
+        icon("triangle-exclamation"),
+        " Start Date is at or before model scope start.")))
       if (start > max_d) alerts <- c(alerts, list(div(
         class = "alert alert-danger alert-sm p-2 mb-1",
         icon("circle-xmark"), " Start Date is outside the date spine.")))
       if (end > max_d) alerts <- c(alerts, list(div(
         class = "alert alert-warning alert-sm p-2 mb-1",
         icon("triangle-exclamation"),
-        paste0(" End Date (", end, ") exceeds last available period (", max_d, ")."))))
+        paste0(" End Date (", end, ") exceeds last period (", max_d, ")."))))
       if (end < start) alerts <- c(alerts, list(div(
         class = "alert alert-danger alert-sm p-2 mb-1",
         icon("circle-xmark"), " End Date is before Start Date.")))
@@ -561,7 +697,7 @@ mod_setup_server <- function(id) {
       else tagList(alerts)
     })
     
-    # ── File comparison ────────────────────────────────────────────────
+    # ── File comparison — alignment + data quality only ────────────────
     output$file_comparison <- renderUI({
       
       if (is.null(rv$main_data) || is.null(rv$analytical)) {
@@ -587,27 +723,24 @@ mod_setup_server <- function(id) {
       banner_conf <- switch(overall,
                             green = list(
                               cls  = "banner-validation banner-green",
-                              icon = icon("circle-check",          class = "banner-icon-green"),
+                              icon = icon("circle-check",         class = "banner-icon-green"),
                               text = "All checks passed — ready to proceed to Channels."),
                             yellow = list(
                               cls  = "banner-validation banner-yellow",
-                              icon = icon("triangle-exclamation",  class = "banner-icon-yellow"),
+                              icon = icon("triangle-exclamation", class = "banner-icon-yellow"),
                               text = "Warnings found — review before processing."),
                             red = list(
                               cls  = "banner-validation banner-red",
-                              icon = icon("circle-xmark",          class = "banner-icon-red"),
+                              icon = icon("circle-xmark",         class = "banner-icon-red"),
                               text = "Critical issues found — fix before processing."),
                             list(
                               cls  = "banner-validation banner-neutral",
                               icon = icon("circle-info"),
                               text = "Validating files..."))
       
-      banner <- div(
-        class = banner_conf$cls,
-        banner_conf$icon,
-        tags$strong(banner_conf$text, class = "banner-text"))
+      banner <- div(class = banner_conf$cls, banner_conf$icon,
+                    tags$strong(banner_conf$text, class = "banner-text"))
       
-      # ── mk_badge ──────────────────────────────────────────────────────
       mk_badge <- function(status, text = NULL) {
         label <- switch(status,
                         green   = text %||% "OK",
@@ -624,7 +757,8 @@ mod_setup_server <- function(id) {
         div(class = "section-title-row",
             icon("arrows-left-right", class = "icon-blue-sm"),
             tags$strong("File Alignment"),
-            tags$small("Analytical vs Main Data File", class = "section-subtitle")),
+            tags$small("Analytical vs Main Data File",
+                       class = "section-subtitle")),
         div(class = "table-responsive",
             tags$table(
               class = "table table-sm mb-0",
@@ -639,10 +773,14 @@ mod_setup_server <- function(id) {
                 local({ chk <- checks$geography
                 txt <- switch(chk$status,
                               green  = "Match",
-                              yellow = if (is.numeric(chk$n_main) && is.numeric(chk$n_an))
-                                paste0("+", chk$n_main - chk$n_an, " extra") else "Data has more",
-                              red    = if (is.numeric(chk$n_main) && is.numeric(chk$n_an))
-                                paste0("-", chk$n_an - chk$n_main, " missing") else "Data has fewer",
+                              yellow = if (is.numeric(chk$n_main) &&
+                                           is.numeric(chk$n_an))
+                                paste0("+", chk$n_main - chk$n_an, " extra")
+                              else "Data has more",
+                              red = if (is.numeric(chk$n_main) &&
+                                        is.numeric(chk$n_an))
+                                paste0("-", chk$n_an - chk$n_main, " missing")
+                              else "Data has fewer",
                               "N/A")
                 tags$tr(
                   tags$td("Geography",              class = "td-val-bold"),
@@ -671,7 +809,8 @@ mod_setup_server <- function(id) {
                 data_cell <- if (chk$status == "green")
                   tags$td(tagList(
                     icon("circle-check", class = "icon-success-sm"),
-                    paste0(" All ", format(chk$n_an, big.mark = ","), " periods found")),
+                    paste0(" All ", format(chk$n_an, big.mark = ","),
+                           " periods found")),
                     class = "td-val text-success")
                 else if (chk$status == "yellow")
                   tags$td(tagList(
@@ -682,25 +821,32 @@ mod_setup_server <- function(id) {
                 else
                   tags$td(tagList(
                     icon("circle-xmark", class = "icon-danger-sm"),
-                    tags$span(paste0(" Only ", chk$n_common, "/", chk$n_an, " found"),
+                    tags$span(paste0(" Only ", chk$n_common, "/",
+                                     chk$n_an, " found"),
                               class = "fw-bold text-danger")),
                     class = "td-val")
                 detail <- if (chk$status == "green") {
                   extra <- if (chk$n_mn_extra > 0)
-                    paste0(" (Data has ", chk$n_mn_extra, " extra historical — normal.)") else ""
-                  paste0("Analytical: ", chk$an_sample, " | Data: ", chk$mn_sample, extra)
+                    paste0(" (Data has ", chk$n_mn_extra,
+                           " extra historical — normal.)") else ""
+                  paste0("Analytical: ", chk$an_sample,
+                         " | Data: ", chk$mn_sample, extra)
                 } else if (chk$status == "yellow")
-                  paste0("Analytical: ", chk$an_sample, " | Data: ", chk$mn_sample,
+                  paste0("Analytical: ", chk$an_sample,
+                         " | Data: ", chk$mn_sample,
                          ". Small offset — Total Check will auto-align.")
                 else
-                  paste0("Analytical: ", chk$an_sample, " | Data: ", chk$mn_sample)
+                  paste0("Analytical: ", chk$an_sample,
+                         " | Data: ", chk$mn_sample)
                 tags$tr(
                   tags$td("Period Values", class = "td-val-bold"),
                   data_cell,
                   tags$td(detail, class = "td-val text-muted small"),
                   mk_badge(chk$status, switch(chk$status,
                                               green  = "Exact match",
-                                              yellow = paste0("\u00b1", chk$max_offset, "d"),
+                                              yellow = paste0("\u00b1",
+                                                              chk$max_offset,
+                                                              "d"),
                                               "Missing periods"))) }),
                 
                 local({ chk <- checks$geo_names
@@ -728,11 +874,15 @@ mod_setup_server <- function(id) {
                   paste0(chk$n_fuzzy, "/", chk$n_total,
                          " match after normalization. Total Check will auto-correct.",
                          if (length(chk$sample_missing) > 0)
-                           paste0(" Sample: ", paste(chk$sample_missing, collapse = " | ")) else "")
+                           paste0(" Sample: ",
+                                  paste(chk$sample_missing, collapse = " | "))
+                         else "")
                 else
                   paste0(chk$n_missing, " not found in Data File. ",
                          if (length(chk$sample_missing) > 0)
-                           paste0("Sample: ", paste(chk$sample_missing, collapse = " | ")) else "")
+                           paste0("Sample: ",
+                                  paste(chk$sample_missing, collapse = " | "))
+                         else "")
                 tags$tr(
                   tags$td("Geography Names", class = "td-val-bold"),
                   data_cell,
@@ -741,8 +891,7 @@ mod_setup_server <- function(id) {
                                               green  = "Exact match",
                                               yellow = "Auto-corrected",
                                               "Mismatch"))) })
-              )
-            )
+              ))
         )
       )
       
@@ -754,11 +903,13 @@ mod_setup_server <- function(id) {
         tags$td(if (vv_chk$n_na == 0)
           tagList(icon("circle-check", class = "icon-success-sm"), " No NAs")
           else tagList(icon("circle-xmark", class = "icon-danger-sm"),
-                       tags$span(paste0(" ", format(vv_chk$n_na, big.mark = ","), " NAs"),
+                       tags$span(paste0(" ", format(vv_chk$n_na, big.mark = ","),
+                                        " NAs"),
                                  class = "fw-bold text-danger")),
           class = "td-val"),
         tags$td(if (vv_chk$n_na == 0)
-          paste0("All ", format(vv_chk$n_total, big.mark = ","), " rows have a value")
+          paste0("All ", format(vv_chk$n_total, big.mark = ","),
+                 " rows have a value")
           else paste0(round(vv_chk$n_na / max(vv_chk$n_total, 1) * 100, 1),
                       "% missing — splits will have 0 activity"),
           class = "td-val text-muted small"),
@@ -771,7 +922,8 @@ mod_setup_server <- function(id) {
             tagList(icon("circle-check",          class = "icon-success-sm"),
                     " No empty values")
             else tagList(icon("triangle-exclamation", class = "icon-warning-sm"),
-                         tags$span(paste0(" ", format(chk$n_na, big.mark = ","), " empty"),
+                         tags$span(paste0(" ", format(chk$n_na, big.mark = ","),
+                                          " empty"),
                                    class = "fw-semibold text-warning")),
             class = "td-val"),
           tags$td(if (chk$n_na == 0)
@@ -804,66 +956,11 @@ mod_setup_server <- function(id) {
                 mk_dim_row(checks$creative))))
       )
       
-      # ── Section 3: Media Variable Index ───────────────────────────────
-      mi_chk <- checks$media_index
-      
-      section3 <- div(
-        div(class = "section-title-row",
-            icon("diagram-project", class = "icon-blue-sm"),
-            tags$strong("Media Variable Index"),
-            tags$small("VOF + ModelDetails + ROIs", class = "section-subtitle")),
-        
-        if (mi_chk$status == "na") {
-          div(class = "mi-box-na",
-              div(class = "mi-box-na-inner",
-                  icon("clock", class = "icon-blue-sm"),
-                  tags$span("Load VOF, ModelDetails and ROIs to build the Media Index.")))
-          
-        } else if (mi_chk$status == "pending") {
-          div(class = "mi-box-pending",
-              div(class = "mi-box-pending-inner",
-                  icon("hourglass-half", class = "icon-blue-sm"),
-                  tags$span("Building Media Index...")))
-          
-        } else {
-          div(class = "mi-box",
-              div(class = "mi-header",
-                  div(class = "mi-header-left",
-                      if (mi_chk$status == "red")
-                        icon("circle-xmark",  class = "icon-danger-sm")
-                      else
-                        icon("circle-check",  class = "icon-success-sm"),
-                      tags$strong(
-                        paste0(mi_chk$n_channels, " channel",
-                               if (mi_chk$n_channels != 1) "s" else "",
-                               " auto-generated"),
-                        class = "mi-title")),
-                  tags$span(paste0("VOF coverage: ", mi_chk$vof_cov, "%"),
-                            class = "mi-coverage")),
-              div(class = "mi-stats",
-                  div(tags$span(mi_chk$from_vof, class = "stat-number"),
-                      tags$span("from VOF",      class = "stat-label")),
-                  if (mi_chk$from_fb > 0)
-                    div(tags$span(mi_chk$from_fb,    class = "stat-number"),
-                        tags$span("keyword fallback", class = "stat-label")),
-                  div(tags$span(mi_chk$with_roi, class = "stat-number"),
-                      tags$span("with ROI",      class = "stat-label")),
-                  div(tags$span(
-                    if (mi_chk$var_key_type == "with_product")
-                      "Geography \u00d7 Product" else "Geography",
-                    class = "stat-type"),
-                    tags$span("var_key type", class = "stat-label"))
-              )
-          )
-        }
-      )
-      
-      tagList(banner, section1, section2, section3)
+      tagList(banner, section1, section2)
     })
     
     # ── Return ─────────────────────────────────────────────────────────
     list(
-      
       data = reactive(list(
         all_rags       = rv$main_data,
         analytical     = rv$analytical,
@@ -873,19 +970,18 @@ mod_setup_server <- function(id) {
         channels_rois  = rv$channels_rois,
         vof_data       = rv$vof_data
       )),
-      
       config = reactive({
         preset <- input$period_preset %||% "last52"
         dates  <- tryCatch(period_dates(), error = \(e) NULL)
         list(
-          update_label      = if (preset == "all") "" else (input$update_label %||% "Last52w"),
+          update_label      = if (preset == "all") ""
+          else (input$update_label %||% "Last52w"),
           start_report_date = if (!is.null(dates)) dates$start else NULL,
           end_report_date   = if (!is.null(dates)) dates$end   else NULL,
           cross_cols        = rv$cross_cols,
           period_preset     = preset
         )
       }),
-      
       media_index       = reactive(rv$media_index),
       validation_status = reactive(rv$validation_status)
     )

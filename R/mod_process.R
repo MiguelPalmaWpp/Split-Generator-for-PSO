@@ -62,12 +62,15 @@ mod_process_server <- function(id, data, config, channels,
     merge_log_store <- reactiveValues()
     history_store   <- reactiveValues()
     clean_store     <- reactiveValues()
-    results_trigger <- reactiveVal(0L)
+    results_trigger  <- reactiveVal(0L)
+    is_batch_processing <- reactiveVal(FALSE)  
     
     get_res  <- function(nm) results_store[[nm]]
     set_res  <- function(nm, val) {
       results_store[[nm]] <- val
-      results_trigger(isolate(results_trigger()) + 1L)
+      # ── OPT: only trigger UI update when not in batch mode
+      if (!isTRUE(is_batch_processing()))
+        results_trigger(isolate(results_trigger()) + 1L)
     }
     get_orig <- function(nm) original_store[[nm]]
     set_orig <- function(nm, val) { original_store[[nm]] <- val }
@@ -308,7 +311,7 @@ mod_process_server <- function(id, data, config, channels,
       if (!is.null(err_stored)) {
         showNotification(paste(nm, "error:", err_stored),
                          type = "error", duration = 12)
-        gc(verbose = FALSE, full = TRUE); return()
+        gc(verbose = FALSE, full = FALSE); return()   
       }
       
       if (!is.null(res_stored)) {
@@ -351,7 +354,7 @@ mod_process_server <- function(id, data, config, channels,
                          type = if (n_skipped > 0 && n_applied == 0)
                            "warning" else "message",
                          duration = 4)
-        rm(res_stored); gc(verbose = FALSE, full = TRUE)
+        rm(res_stored); gc(verbose = FALSE, full = FALSE)   # ── OPT: was full=TRUE
       }
     }
     
@@ -359,7 +362,7 @@ mod_process_server <- function(id, data, config, channels,
       nm <- req(input$channel_select); req(valid_nm(nm)); run_one(nm)
     })
     
-    # ── Process All — sequential + pre-filter + optimized GC ──────────────
+    # ── Process All — optimized ────────────────────────────────────────────
     observeEvent(input$btn_all, {
       nms <- names(channels())
       if (!length(nms)) {
@@ -368,15 +371,18 @@ mod_process_server <- function(id, data, config, channels,
       
       d    <- data()
       gcfg <- config()
+      ch   <- channels()   # ── OPT: snapshot once — not per iteration
       
       if (is.null(d$all_rags)) {
         showNotification("All RAGs not uploaded.", type = "error"); return()
       }
       if (is.null(d$analytical)) {
-        showNotification("Upload AnalyticalDataset first.", type = "error"); return()
+        showNotification("Upload AnalyticalDataset first.",
+                         type = "error"); return()
       }
       if (is.null(gcfg$start_report_date) || is.null(gcfg$end_report_date)) {
-        showNotification("Configure reporting period first.", type = "error"); return()
+        showNotification("Configure reporting period first.",
+                         type = "error"); return()
       }
       if (is.null(gcfg$cross_cols)) {
         showNotification("Cross-sections not detected. Upload Analytical first.",
@@ -394,23 +400,22 @@ mod_process_server <- function(id, data, config, channels,
         return()
       }
       
-      # ── Pre-filter all_rags per channel ONCE ───────────────────────────
-      # Avoids re-filtering the full dataset on every channel iteration
-      pre_filtered <- lapply(to_process, function(nm) {
-        cfg <- channels()[[nm]]
-        vi  <- cfg$varname_include[nzchar(cfg$varname_include %||% "")]
-        if (!length(vi) || !"VariableName" %in% names(d$all_rags))
-          return(d$all_rags)
-        pattern <- paste0("^(", paste(vi, collapse = "|"), ")")
-        d$all_rags[grepl(pattern, d$all_rags$VariableName,
-                         ignore.case = TRUE, perl = TRUE), , drop = FALSE]
-      })
-      names(pre_filtered) <- to_process
-      
       n_total  <- length(to_process)
       n_ok     <- 0L; n_skipped <- 0L; n_err <- 0L
       err_msgs <- character(0); info_msgs <- character(0)
       t_start  <- proc.time()
+      
+      # ── OPT: pre-compute constants used in every iteration ────────────
+      cross_cols_val <- gcfg$cross_cols %||% "Geography"
+      has_vn_col     <- "VariableName" %in% names(d$all_rags)
+      
+      # ── OPT: suppress intermediate UI triggers ────────────────────────
+      # Single batch update at the end instead of one per channel
+      is_batch_processing(TRUE)
+      on.exit({
+        is_batch_processing(FALSE)
+        results_trigger(isolate(results_trigger()) + 1L)
+      }, add = TRUE)
       
       withProgress(
         message = paste0("Processing ", n_total, " channel(s)..."),
@@ -418,7 +423,7 @@ mod_process_server <- function(id, data, config, channels,
           
           for (i in seq_along(to_process)) {
             nm  <- to_process[i]
-            cfg <- channels()[[nm]]
+            cfg <- ch[[nm]]   # use snapshot
             
             setProgress((i - 1) / n_total,
                         message = paste0("(", i, "/", n_total, ")  ", nm))
@@ -438,14 +443,26 @@ mod_process_server <- function(id, data, config, channels,
               next
             }
             
+            # ── OPT: inline pre-filter per channel ────────────────────
+            # Avoids holding N filtered subsets simultaneously in RAM
+            vi <- cfg$varname_include[nzchar(cfg$varname_include %||% "")]
+            rags_nm <- if (!length(vi) || !has_vn_col) {
+              d$all_rags
+            } else {
+              pat <- paste0("^(", paste(vi, collapse = "|"), ")")
+              d$all_rags[grepl(pat, d$all_rags$VariableName,
+                               ignore.case = TRUE, perl = TRUE), ,
+                         drop = FALSE]
+            }
+            
             res_stored <- NULL; err_msg <- NULL
             tryCatch({
               res_stored <- process_channel(
-                all_rags          = pre_filtered[[nm]],  # pre-filtered subset
+                all_rags          = rags_nm,
                 analytical        = d$analytical,
                 dates_df          = d$dates_df,
                 cfg               = cfg,
-                cross_cols        = gcfg$cross_cols %||% "Geography",
+                cross_cols        = cross_cols_val,
                 start_report_date = gcfg$start_report_date,
                 end_report_date   = gcfg$end_report_date,
                 update_label      = gcfg$update_label,
@@ -457,10 +474,14 @@ mod_process_server <- function(id, data, config, channels,
               )
             }, error = function(e) { err_msg <<- conditionMessage(e) })
             
+            # ── OPT: release per-channel filter + fast GC ─────────────
+            rm(rags_nm)
+            gc(verbose = FALSE, full = FALSE)   # full=FALSE in loop
+            
             if (!is.null(err_msg)) {
               n_err    <- n_err + 1L
               err_msgs <- c(err_msgs, paste0(nm, ": ", err_msg))
-              gc(verbose = FALSE, full = TRUE); next
+              next
             }
             
             if (!is.null(res_stored)) {
@@ -484,15 +505,17 @@ mod_process_server <- function(id, data, config, channels,
                                  paste0(nm, ": ", n_applied, " merge(s)"))
               }
               
-              set_res(nm, res_stored); set_orig(nm, res_stored)
-              set_log(nm, list());     set_hist(nm, list())
+              # Direct assign — set_res skips trigger during batch
+              results_store[[nm]]   <- res_stored
+              original_store[[nm]]  <- res_stored
+              merge_log_store[[nm]] <- list()
+              history_store[[nm]]   <- list()
               n_ok <- n_ok + 1L
               rm(res_stored)
-              gc(verbose = FALSE, full = FALSE)
             }
           }
           
-          rm(pre_filtered)
+          # ── OPT: full GC once at the end — not once per channel ──────
           gc(verbose = FALSE, full = TRUE)
           setProgress(1.0, message = "Done!")
         })
@@ -500,10 +523,10 @@ mod_process_server <- function(id, data, config, channels,
       elapsed  <- round((proc.time() - t_start)[["elapsed"]], 1)
       all_msgs <- c(err_msgs, info_msgs)
       parts    <- c(
-        if (n_ok       > 0) paste0(n_ok,       " processed"),
+        if (n_ok         > 0) paste0(n_ok,         " processed"),
         if (already_done > 0) paste0(already_done, " already done"),
-        if (n_skipped  > 0) paste0(n_skipped,  " skipped"),
-        if (n_err      > 0) paste0(n_err,      " failed"),
+        if (n_skipped    > 0) paste0(n_skipped,    " skipped"),
+        if (n_err        > 0) paste0(n_err,        " failed"),
         paste0(elapsed, "s"))
       
       showNotification(
@@ -576,7 +599,6 @@ mod_process_server <- function(id, data, config, channels,
         !grepl(spend_kw_f, num_cols_r, ignore.case = TRUE)]
       if (!length(num_cols_r)) return(tibble(VariableSplit = character()))
       
-      # data.table aggregation — 3-5x faster than dplyr
       dt     <- data.table::as.data.table(rag_df)
       agg_dt <- dt[, lapply(.SD, sum, na.rm = TRUE),
                    by = "Period", .SDcols = num_cols_r]
@@ -1124,7 +1146,7 @@ mod_process_server <- function(id, data, config, channels,
       )
     })
     
-    # ── Activity table — optimized DT ──────────────────────────────────────
+    # ── Activity table ─────────────────────────────────────────────────────
     output$diag_act <- DT::renderDT({
       results_trigger()
       nm  <- req(input$channel_select); req(results_store[[nm]])
@@ -1224,7 +1246,7 @@ mod_process_server <- function(id, data, config, channels,
       dt
     })
     
-    # ── Total Check — cached reactive ─────────────────────────────────────
+    # ── Total Check ────────────────────────────────────────────────────────
     total_check_data <- reactive({
       results_trigger()
       nm  <- req(input$channel_select)

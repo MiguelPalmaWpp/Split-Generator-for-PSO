@@ -8,16 +8,13 @@ mod_export_ui <- function(id) {
     uiOutput(ns("summary_strip")),
     layout_columns(
       col_widths = c(4, 8),
-      
       card(
         class = "h-100",
-        card_header(div(
-          class = "card-header-inner",
-          icon("circle-check", class = "icon-blue-sm"),
-          "Channel Status")),
+        card_header(div(class = "card-header-inner",
+                        icon("circle-check", class = "icon-blue-sm"),
+                        "Channel Status")),
         uiOutput(ns("channel_status"))
       ),
-      
       tagList(
         card(
           card_header(div(
@@ -42,39 +39,50 @@ mod_export_server <- function(id, results, data, config, channels,
                               clean_results = reactive(list())) {
   moduleServer(id, function(input, output, session) {
     
-    # ── Channel-level summaries ────────────────────────────────────────────
+    # ═══════════════════════════════════════════════════════════════════
+    # Channel-level summaries
+    # ═══════════════════════════════════════════════════════════════════
     channel_summary <- reactive({
       ch_names <- names(channels())
       res_list <- results()
       d        <- data()
       gcfg     <- config()
       
+      an_periods_all <- if (!is.null(d$analytical) &&
+                            "Period" %in% names(d$analytical))
+        sort(unique(d$analytical$Period)) else NULL
+      an_min_all <- if (length(an_periods_all)) min(an_periods_all) else NULL
+      an_max_all <- if (length(an_periods_all)) max(an_periods_all) else NULL
+      has_analytical <- !is.null(d$analytical) &&
+        !is.null(gcfg$cross_cols) && length(an_periods_all) > 0
+      
       lapply(ch_names, function(nm) {
         res <- res_list[[nm]]
-        if (is.null(res))
-          return(list(name = nm, processed = FALSE, has_warning = FALSE,
-                      tc_mismatch = FALSE, n_splits = 0L))
+        if (is.null(res)) return(list(name = nm, processed = FALSE,
+                                      has_warning = FALSE,
+                                      tc_mismatch = FALSE, n_splits = 0L))
         
-        # Count splits from side_mapping → act_diagnoses → RAG fallback
         n_splits_total <- if (!is.null(res$side_mapping) &&
                               nrow(res$side_mapping) > 0 &&
                               "VariableSplit" %in% names(res$side_mapping)) {
           nrow(res$side_mapping)
-        } else if (!is.null(res$act_diagnoses) && nrow(res$act_diagnoses) > 0 &&
+        } else if (!is.null(res$act_diagnoses) &&
+                   nrow(res$act_diagnoses) > 0 &&
                    "VariableSplit" %in% names(res$act_diagnoses)) {
-          n_distinct(res$act_diagnoses$VariableSplit)
+          dplyr::n_distinct(res$act_diagnoses$VariableSplit)
         } else 0L
         
-        # Fallback: count active activity columns directly from RAG
         if (n_splits_total == 0L && !is.null(res$rag)) {
           rag_df    <- as.data.frame(res$rag)
-          cross_id  <- c(res$cross_cols %||% gcfg$cross_cols %||% "Geography", "Period")
+          cross_id  <- c(res$cross_cols %||% gcfg$cross_cols %||% "Geography",
+                         "Period")
           id_in_rag <- intersect(cross_id, names(rag_df))
           act_kw_ch <- channels()[[nm]]$activity_keyword %||% "Impressions"
-          all_num   <- setdiff(names(rag_df)[sapply(rag_df, is.numeric)], id_in_rag)
+          all_num   <- setdiff(names(rag_df)[sapply(rag_df, is.numeric)],
+                               id_in_rag)
           act_cols  <- grep(act_kw_ch, all_num, ignore.case = TRUE, value = TRUE)
           if (length(act_cols) > 0) {
-            active         <- act_cols[vapply(act_cols, function(col)
+            active <- act_cols[vapply(act_cols, function(col)
               sum(rag_df[[col]], na.rm = TRUE) > 0, logical(1))]
             n_splits_total <- length(active)
           }
@@ -84,95 +92,132 @@ mod_export_server <- function(id, results, data, config, channels,
           return(list(name = nm, processed = TRUE, has_warning = TRUE,
                       tc_mismatch = FALSE, n_splits = 0L))
         
-        # Total Check mismatch detection (>5% deviation)
         tc_mismatch <- tryCatch({
-          if (is.null(d$analytical) || is.null(gcfg$cross_cols)) return(FALSE)
+          if (!has_analytical) return(FALSE)
           cfg_ch    <- channels()[[nm]]
           model_var <- cfg_ch$model_variable %||% ""
-          if (!nzchar(model_var) || !model_var %in% names(d$analytical)) return(FALSE)
+          if (!nzchar(model_var) || !model_var %in% names(d$analytical))
+            return(FALSE)
           
           cross_cols <- res$cross_cols %||% gcfg$cross_cols %||% "Geography"
           cross_id   <- c(cross_cols, "Period")
-          an_periods <- sort(unique(d$analytical$Period))
-          an_min_p   <- min(an_periods); an_max_p <- max(an_periods)
+          
+          cfg_min <- tryCatch(as.Date(cfg_ch$min_period), error = \(e) NA)
+          cfg_max <- tryCatch(as.Date(cfg_ch$max_period), error = \(e) NA)
+          scope_min_p <- if (!is.na(cfg_min)) max(an_min_all, cfg_min)
+          else an_min_all
+          scope_max_p <- if (!is.na(cfg_max)) min(an_max_all, cfg_max)
+          else an_max_all
+          if (is.na(scope_min_p) || is.na(scope_max_p) ||
+              scope_min_p > scope_max_p) {
+            scope_min_p <- an_min_all; scope_max_p <- an_max_all
+          }
           
           model_df  <- build_model_total(d$analytical, cross_id,
                                          c(model_var), character(0))
           model_sum <- sum(model_df$ModelTotal[
-            model_df$Period >= an_min_p & model_df$Period <= an_max_p], na.rm = TRUE)
+            model_df$Period >= scope_min_p &
+              model_df$Period <= scope_max_p], na.rm = TRUE)
           if (model_sum == 0) return(FALSE)
           
-          rag_df     <- as.data.frame(res$rag)
-          rag_scope  <- rag_df[rag_df$Period >= an_min_p & rag_df$Period <= an_max_p, ]
-          id_in_rag  <- intersect(cross_id, names(rag_scope))
-          act_kw_ch  <- cfg_ch$activity_keyword %||% "Impressions"
-          all_num    <- setdiff(names(rag_scope)[sapply(rag_scope, is.numeric)], id_in_rag)
-          split_cols <- grep(act_kw_ch, all_num, ignore.case = TRUE, value = TRUE)
+          rag_df      <- as.data.frame(res$rag)
+          rag_periods <- sort(unique(rag_df$Period))
+          an_scoped   <- an_periods_all[an_periods_all >= scope_min_p &
+                                          an_periods_all <= scope_max_p]
+          if (!length(an_scoped) || !length(rag_periods)) return(FALSE)
+          
+          matched_idx     <- vapply(an_scoped, function(p)
+            which.min(abs(as.numeric(rag_periods) - as.numeric(p))),
+            integer(1))
+          mapped_rag_periods <- unique(rag_periods[matched_idx])
+          rag_scope          <- rag_df[rag_df$Period %in% mapped_rag_periods, ]
+          id_in_rag          <- intersect(cross_id, names(rag_scope))
+          act_kw_ch          <- cfg_ch$activity_keyword %||% "Impressions"
+          all_num            <- setdiff(
+            names(rag_scope)[sapply(rag_scope, is.numeric)], id_in_rag)
+          split_cols <- grep(act_kw_ch, all_num,
+                             ignore.case = TRUE, value = TRUE)
           if (!length(split_cols)) return(FALSE)
           
-          splits_sum <- sum(rowSums(rag_scope[, split_cols, drop = FALSE], na.rm = TRUE))
+          splits_sum <- sum(rowSums(rag_scope[, split_cols, drop = FALSE],
+                                    na.rm = TRUE))
           abs(model_sum - splits_sum) / max(abs(model_sum), 1) > 0.05
-          
         }, error = function(e) FALSE)
         
-        list(name = nm, processed = TRUE, has_warning = tc_mismatch,
-             tc_mismatch = tc_mismatch, n_splits = n_splits_total)
+        list(name = nm, processed = TRUE,
+             has_warning = tc_mismatch, tc_mismatch = tc_mismatch,
+             n_splits = n_splits_total)
       })
+    }) %>% bindCache(
+      paste(names(results()), collapse = ","),
+      sum(vapply(results(), function(r)
+        if (is.null(r$rag)) 0L else nrow(r$rag), integer(1))),
+      nrow(data()$analytical %||% data.frame())
+    )
+    
+    # ── Summary counters ──────────────────────────────────────────────────
+    n_ok <- reactive({
+      summ <- channel_summary(); if (!length(summ)) return(0L)
+      sum(vapply(summ, \(x) isTRUE(x$processed) && !isTRUE(x$has_warning),
+                 logical(1)))
+    })
+    n_warnings <- reactive({
+      summ <- channel_summary(); if (!length(summ)) return(0L)
+      sum(vapply(summ, \(x) isTRUE(x$processed) && isTRUE(x$has_warning),
+                 logical(1)))
+    })
+    n_critical <- reactive({
+      summ <- channel_summary(); if (!length(summ)) return(0L)
+      sum(vapply(summ, \(x) !isTRUE(x$processed), logical(1)))
+    })
+    n_splits <- reactive({
+      summ <- channel_summary(); if (!length(summ)) return(0L)
+      sum(vapply(summ, \(x) as.integer(x$n_splits %||% 0L), integer(1)))
     })
     
-    # ── Summary counters ───────────────────────────────────────────────────
-    n_ok       <- reactive({ summ <- channel_summary(); if (!length(summ)) return(0L)
-    sum(vapply(summ, \(x) isTRUE(x$processed) && !isTRUE(x$has_warning), logical(1))) })
-    n_warnings <- reactive({ summ <- channel_summary(); if (!length(summ)) return(0L)
-    sum(vapply(summ, \(x) isTRUE(x$processed) && isTRUE(x$has_warning), logical(1))) })
-    n_critical <- reactive({ summ <- channel_summary(); if (!length(summ)) return(0L)
-    sum(vapply(summ, \(x) !isTRUE(x$processed), logical(1))) })
-    n_splits   <- reactive({ summ <- channel_summary(); if (!length(summ)) return(0L)
-    sum(vapply(summ, \(x) as.integer(x$n_splits %||% 0L), integer(1))) })
-    
-    # ── Summary strip ──────────────────────────────────────────────────────
+    # ── Summary strip ─────────────────────────────────────────────────────
     output$summary_strip <- renderUI({
-      mk_stat <- function(ico, value, label, color_key, is_always_colored = FALSE) {
+      mk_stat <- function(ico, value, label, color_key,
+                          is_always_colored = FALSE) {
         active <- is_always_colored || (is.numeric(value) && value > 0)
         key    <- if (active) color_key else "muted"
         div(class = "stat-strip-item",
-            div(class = paste("stat-strip-icon", paste0("stat-strip-icon-", key)),
+            div(class = paste("stat-strip-icon",
+                              paste0("stat-strip-icon-", key)),
                 icon(ico, class = paste0("stat-icon-", key, "-c"))),
             div(
-              tags$span(if (is.numeric(value)) format(value, big.mark = ",") else value,
+              tags$span(if (is.numeric(value)) format(value, big.mark = ",")
+                        else value,
                         class = paste0("stat-value-", key)),
               tags$span(label, class = "stat-strip-label")))
       }
-      
       sep <- div(class = "stat-separator")
-      
       card(class = "mb-4",
            div(class = "d-flex align-items-stretch",
-               mk_stat("circle-check",        n_ok(),      "Channels OK",     "ok",
+               mk_stat("circle-check", n_ok(), "Channels OK", "ok",
                        is_always_colored = n_ok() > 0),
                sep,
-               mk_stat("triangle-exclamation", n_warnings(), "Warnings",       "warn"),
+               mk_stat("triangle-exclamation", n_warnings(), "Warnings", "warn"),
                sep,
-               mk_stat("circle-xmark",         n_critical(), "Critical Issues", "error"),
+               mk_stat("circle-xmark", n_critical(), "Critical Issues", "error"),
                sep,
-               mk_stat("layer-group",
-                       format(n_splits(), big.mark = ","),
+               mk_stat("layer-group", format(n_splits(), big.mark = ","),
                        "Splits Matched", "blue", is_always_colored = TRUE)))
     })
     
-    # ── Channel status list ────────────────────────────────────────────────
+    # ── Channel status list ───────────────────────────────────────────────
     output$channel_status <- renderUI({
       summ <- channel_summary()
-      if (!length(summ)) return(div(
-        class = "ch-status-empty",
-        icon("layer-group", class = "icon-status-empty"),
-        tags$p("No channels configured.", class = "ch-status-empty-msg")))
-      
+      if (!length(summ))
+        return(div(class = "ch-status-empty",
+                   icon("layer-group", class = "icon-status-empty"),
+                   tags$p("No channels configured.",
+                          class = "ch-status-empty-msg")))
       tagList(lapply(seq_along(summ), function(i) {
         ch <- summ[[i]]
         if (!ch$processed) {
-          ic  <- icon("circle",               class = "icon-ch-empty")
-          val <- tags$span("Not processed",   class = "status-val-empty")
+          ic  <- icon("circle",            class = "icon-ch-empty")
+          val <- tags$span("Not processed", class = "status-val-empty")
         } else if (ch$has_warning && ch$tc_mismatch) {
           ic  <- icon("triangle-exclamation", class = "icon-ch-warn")
           val <- tags$span("Total Check mismatch", class = "status-val-warn")
@@ -180,18 +225,18 @@ mod_export_server <- function(id, results, data, config, channels,
           ic  <- icon("triangle-exclamation", class = "icon-ch-warn")
           val <- tags$span("0 splits found",  class = "status-val-warn")
         } else {
-          ic  <- icon("circle-check",         class = "icon-ch-ok")
-          val <- tags$span(
-            paste0(format(ch$n_splits, big.mark = ","), " split",
-                   if (ch$n_splits != 1) "s" else ""),
-            class = "status-val-ok")
+          ic  <- icon("circle-check", class = "icon-ch-ok")
+          val <- tags$span(paste0(format(ch$n_splits, big.mark = ","),
+                                  " split",
+                                  if (ch$n_splits != 1) "s" else ""),
+                           class = "status-val-ok")
         }
-        div(class = "ch-status-row", ic,
-            tags$span(ch$name, class = "ch-status-name"), val)
+        div(class = "ch-status-row",
+            ic, tags$span(ch$name, class = "ch-status-name"), val)
       }))
     })
     
-    # ── File dimension estimates ───────────────────────────────────────────
+    # ── File dimension estimates ──────────────────────────────────────────
     file_dims <- reactive({
       res_list <- results(); d <- data(); gcfg <- config()
       cross_id <- c(gcfg$cross_cols %||% "Geography", "Period")
@@ -201,21 +246,24 @@ mod_export_server <- function(id, results, data, config, channels,
         r <- res_list[[nm]]; if (is.null(r)) next
         if (!is.null(r$side_mapping) && "VariableSplit" %in% names(r$side_mapping))
           total_splits <- total_splits + nrow(r$side_mapping)
-        rag        <- as.data.frame(r$rag)
-        id_in_rag  <- intersect(cross_id, names(rag))
-        act_kw_ch  <- channels()[[nm]]$activity_keyword %||% "Impressions"
-        all_num    <- setdiff(names(rag)[sapply(rag, is.numeric)], id_in_rag)
-        act_cols   <- grep(act_kw_ch, all_num, ignore.case = TRUE, value = TRUE)
+        rag       <- as.data.frame(r$rag)
+        id_in_rag <- intersect(cross_id, names(rag))
+        act_kw_ch <- channels()[[nm]]$activity_keyword %||% "Impressions"
+        all_num   <- setdiff(names(rag)[sapply(rag, is.numeric)], id_in_rag)
+        act_cols  <- grep(act_kw_ch, all_num, ignore.case = TRUE, value = TRUE)
         total_split_cols <- total_split_cols + length(act_cols)
       }
       
       in_vars <- if (!is.null(d$details) &&
                      all(c("Type", "VariableName") %in% names(d$details))) {
         d$details %>%
-          filter(str_detect(str_to_lower(trimws(Type)), "\\b(in|fixed)\\b")) %>%
-          pull(VariableName) %>% unique()
+          dplyr::filter(
+            !stringr::str_detect(
+              stringr::str_to_lower(trimws(Type)), "none")) %>%
+          dplyr::pull(VariableName) %>% unique()
       } else {
-        mv <- unique(vapply(channels(), \(c) c$model_variable %||% "", character(1)))
+        mv <- unique(vapply(channels(), \(c) c$model_variable %||% "",
+                            character(1)))
         mv[nzchar(mv)]
       }
       
@@ -228,15 +276,15 @@ mod_export_server <- function(id, results, data, config, channels,
       n_ch    <- length(channels())
       
       list(
-        analytical  = if (an_rows > 0)     list(rows = an_rows,           cols = an_cols) else NULL,
-        side_map    = if (total_splits > 0) list(rows = total_splits,      cols = 6L)      else NULL,
-        activity    = if (total_splits > 0) list(rows = total_splits,      cols = 5L)      else NULL,
-        composition = if (total_splits > 0) list(rows = total_splits * 2L, cols = 10L)     else NULL,
-        config      = if (n_ch > 0)         list(rows = n_ch,              cols = NULL)    else NULL
+        analytical = if (an_rows > 0) list(rows = an_rows, cols = an_cols) else NULL,
+        side_map   = if (total_splits > 0) list(rows = total_splits, cols = 6L) else NULL,
+        activity   = if (total_splits > 0) list(rows = total_splits, cols = 5L) else NULL,
+        composition = if (total_splits > 0) list(rows = total_splits * 2L, cols = 10L) else NULL,
+        config     = if (n_ch > 0) list(rows = n_ch, cols = NULL) else NULL
       )
     })
     
-    # ── Readiness badge ────────────────────────────────────────────────────
+    # ── Readiness badge ───────────────────────────────────────────────────
     output$readiness_badge <- renderUI({
       summ    <- channel_summary()
       n_ready <- sum(vapply(summ, \(x) isTRUE(x$processed), logical(1)))
@@ -252,13 +300,14 @@ mod_export_server <- function(id, results, data, config, channels,
                   paste0(" ", n_ready, "/", n_total, " ready"))
     })
     
-    # ── Export package contents ────────────────────────────────────────────
+    # ── Export package contents ───────────────────────────────────────────
     output$export_contents <- renderUI({
       dims <- file_dims()
-      
-      mk_file_row <- function(ico, icon_class, filename, description, dims_info) {
+      mk_file_row <- function(ico, icon_class, filename, description,
+                              dims_info) {
         div(class = "export-file-row",
-            div(class = paste("export-file-icon", paste0("export-icon-", icon_class)),
+            div(class = paste("export-file-icon",
+                              paste0("export-icon-", icon_class)),
                 icon(ico, class = paste0("icon-export-", icon_class))),
             div(class = "flex-1-mw0",
                 tags$span(filename,    class = "export-file-name"),
@@ -267,30 +316,36 @@ mod_export_server <- function(id, results, data, config, channels,
               div(class = "export-file-dims",
                   tags$span(paste0(format(dims_info$rows, big.mark = ","),
                                    if (!is.null(dims_info$cols))
-                                     paste0(" \u00d7 ", dims_info$cols) else ""),
+                                     paste0(" \u00d7 ", dims_info$cols)
+                                   else ""),
                             class = "export-dims-value"),
-                  tags$span(if (!is.null(dims_info$cols)) "rows \u00d7 cols" else "channels",
+                  tags$span(if (!is.null(dims_info$cols)) "rows \u00d7 cols"
+                            else "channels",
                             class = "export-dims-label"))
             else
               div(class = "export-file-dims",
                   tags$span("\u2014", class = "export-dims-na")))
       }
-      
       div(
-        mk_file_row("table-cells",     "blue",   "analytical_splits_extended.csv",
-                    "IN/FIXED model variables + all split columns appended",  dims$analytical),
+        mk_file_row("table-cells",   "blue",   "analytical_splits_extended.csv",
+                    "IN/FIXED model variables + all split columns appended",
+                    dims$analytical),
         mk_file_row("diagram-project", "purple", "side_model_mapping.csv",
-                    "Split-to-model mapping with PSO weight structure",        dims$side_map),
-        mk_file_row("chart-column",    "green",  "activity_cost_rois.csv",
-                    "Activity and spend totals enriched with ROI data",        dims$activity),
-        mk_file_row("code-branch",     "teal",   "split_composition.csv",
-                    "Split lineage: components, activity and spend per period", dims$composition),
-        mk_file_row("gear",            "amber",  "channel_config.csv",
-                    "Split order, merges, breaks and segment overrides",       dims$config)
+                    "Split-to-model mapping with PSO weight structure",
+                    dims$side_map),
+        mk_file_row("chart-column",  "green",  "activity_cost_rois.csv",
+                    "Activity and spend totals enriched with ROI data",
+                    dims$activity),
+        mk_file_row("code-branch",   "teal",   "split_composition.csv",
+                    "Split lineage: components, activity and spend per period",
+                    dims$composition),
+        mk_file_row("gear",          "amber",  "channel_config.csv",
+                    "Split order, merges, breaks and segment overrides",
+                    dims$config)
       )
     })
     
-    # ── ROI coverage indicator ─────────────────────────────────────────────
+    # ── ROI coverage indicator ────────────────────────────────────────────
     output$roi_coverage <- renderUI({
       req(data()$channels_rois)
       roi_df <- data()$channels_rois
@@ -304,21 +359,20 @@ mod_export_server <- function(id, results, data, config, channels,
       
       res_list <- results(); if (!length(res_list)) return(NULL)
       
-      all_mvs <- bind_rows(lapply(names(res_list), function(nm) {
+      all_mvs <- dplyr::bind_rows(lapply(names(res_list), function(nm) {
         cfg <- channels()[[nm]]; mv <- cfg$model_variable %||% ""
         if (!nzchar(mv)) return(NULL)
-        tibble(Channel = nm, MainModelVariableName = mv)
+        tibble::tibble(Channel = nm, MainModelVariableName = mv)
       }))
       if (!nrow(all_mvs)) return(NULL)
       
-      # Normalize names before checking coverage
       normalize_mv <- function(x)
-        trimws(str_remove(x, regex("(_Total)+$", ignore_case = TRUE)))
-      
+        trimws(stringr::str_remove(x, stringr::regex("(_Total)+$",
+                                                     ignore_case = TRUE)))
       roi_names_norm <- normalize_mv(roi_df$MainModelVariableName)
-      
       checked <- all_mvs %>%
-        mutate(.has_roi = normalize_mv(MainModelVariableName) %in% roi_names_norm)
+        dplyr::mutate(.has_roi =
+                        normalize_mv(MainModelVariableName) %in% roi_names_norm)
       
       n_total   <- nrow(all_mvs)
       n_matched <- sum(checked$.has_roi)
@@ -332,9 +386,9 @@ mod_export_server <- function(id, results, data, config, channels,
                           class = "roi-ok-msg")))
       } else {
         missing_rows <- checked %>%
-          filter(!.has_roi) %>%
-          mutate(label = paste0(Channel, " \u2192 ", MainModelVariableName)) %>%
-          pull(label)
+          dplyr::filter(!.has_roi) %>%
+          dplyr::mutate(label = paste0(Channel, " \u2192 ", MainModelVariableName)) %>%
+          dplyr::pull(label)
         
         div(class = "roi-box-warn",
             div(class = "card-header-between mb-2",
@@ -349,25 +403,23 @@ mod_export_server <- function(id, results, data, config, channels,
                 tagList(lapply(seq_along(head(missing_rows, 6)), function(i)
                   div(class = "roi-warn-row",
                       div(class = "roi-warn-dot"),
-                      tags$span(missing_rows[[i]], class = "roi-warn-name"))
-                )),
+                      tags$span(missing_rows[[i]], class = "roi-warn-name")))),
                 if (length(missing_rows) > 6)
                   tags$p(paste0("... and ", length(missing_rows) - 6, " more"),
-                         class = "roi-warn-more"))
-        )
+                         class = "roi-warn-more")))
       }
     })
     
-    # ── Download section ───────────────────────────────────────────────────
+    # ── Download section ──────────────────────────────────────────────────
     output$download_section <- renderUI({
       summ    <- channel_summary()
       n_ready <- sum(vapply(summ, \(x) isTRUE(x$processed), logical(1)))
       n_total <- length(summ)
       
-      if (n_ready == 0) return(div(
-        class = "dl-empty",
-        icon("hourglass-half", class = "icon-dl-empty"),
-        tags$p("Process channels first.", class = "dl-empty-msg")))
+      if (n_ready == 0)
+        return(div(class = "dl-empty",
+                   icon("hourglass-half", class = "icon-dl-empty"),
+                   tags$p("Process channels first.", class = "dl-empty-msg")))
       
       div(class = "text-center pb-2",
           if (n_ready < n_total)
@@ -383,41 +435,63 @@ mod_export_server <- function(id, results, data, config, channels,
                         icon("circle-check", class = "icon-stat-ok"),
                         paste0(n_ready, " channel", if (n_ready != 1) "s" else "")),
               tags$span(class = "dl-stat-item",
-                        icon("layer-group",  class = "icon-stat-blue"),
+                        icon("layer-group", class = "icon-stat-blue"),
                         paste0(format(n_splits(), big.mark = ","), " splits")),
               tags$span(class = "dl-stat-item",
-                        icon("file-csv",     class = "icon-stat-muted"), "5 files")))
+                        icon("file-csv", class = "icon-stat-muted"), "5 files")))
     })
     
-    # ═══════════════════════════════════════════════════════════════════════
-    # Dataset builders — all accept explicit parameters (no reactive closures)
-    # ═══════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════
+    # Dataset builders
+    # ═══════════════════════════════════════════════════════════════════
     
-    # ── 1. Analytical dataset extended with split columns ──────────────────
-    build_analytical_extended <- function(d, res_list, channels_list, gcfg) {
+    # ── 1. Analytical extended ────────────────────────────────────────────
+    build_analytical_extended <- function(d, res_list, channels_list, gcfg,
+                                          schema_metadata = NULL) {
       if (is.null(d$analytical)) return(NULL)
       
       cross_cols <- gcfg$cross_cols %||% "Geography"
       cross_id   <- c(cross_cols, "Period")
       
-      # Filter Analytical to IN/FIXED variables only
-      model_var_filter <- if (!is.null(d$details) &&
-                              all(c("Type", "VariableName") %in% names(d$details))) {
+      in_fixed_mv <- if (!is.null(d$details) &&
+                         all(c("Type", "VariableName") %in% names(d$details))) {
         d$details %>%
-          filter(str_detect(str_to_lower(trimws(Type)), "\\b(in|fixed)\\b"),
-                 !str_detect(str_to_lower(trimws(Type)), "none")) %>%
-          pull(VariableName) %>% unique()
+          dplyr::filter(
+            !stringr::str_detect(
+              stringr::str_to_lower(trimws(Type)), "none")) %>%
+          dplyr::pull(VariableName) %>% unique()
       } else {
-        mf <- unique(vapply(channels_list, \(c) c$model_variable %||% "", character(1)))
+        mf <- unique(vapply(channels_list, \(c) c$model_variable %||% "",
+                            character(1)))
         mf[nzchar(mf)]
       }
       
-      id_cols_an    <- intersect(c(cross_cols, "Period", "BP_Year"), names(d$analytical))
-      model_cols_an <- intersect(model_var_filter, names(d$analytical))
-      keep_an_cols  <- union(id_cols_an, model_cols_an)
-      result        <- as.data.frame(d$analytical) %>% select(all_of(keep_an_cols))
+      model_cols_an <- if (!is.null(schema_metadata) &&
+                           !is.null(schema_metadata$name_lookup) &&
+                           nrow(schema_metadata$name_lookup) > 0) {
+        lookup  <- schema_metadata$name_lookup
+        direct  <- intersect(in_fixed_mv, names(d$analytical))
+        via_lkp <- lookup$OriginalName[
+          lookup$VariableName %in% in_fixed_mv & !is.na(lookup$OriginalName)]
+        unique(c(direct, via_lkp))
+      } else {
+        intersect(in_fixed_mv, names(d$analytical))
+      }
+      model_cols_an <- intersect(model_cols_an, names(d$analytical))
       
-      # Append activity split columns from each channel's RAG
+      id_cols_an   <- intersect(c(cross_cols, "Period", "BP_Year"),
+                                names(d$analytical))
+      keep_an_cols <- union(id_cols_an, model_cols_an)
+      
+      # ── Always include Weight Variable MMM if present in Analytical ──────
+      keep_an_cols <- union(
+        keep_an_cols,
+        intersect("Weight Variable MMM", names(d$analytical))
+      )
+      
+      result <- as.data.frame(d$analytical) %>%
+        dplyr::select(dplyr::all_of(keep_an_cols))
+      
       for (nm in names(res_list)) {
         r <- res_list[[nm]]; if (is.null(r)) next
         rag      <- as.data.frame(r$rag)
@@ -437,29 +511,26 @@ mod_export_server <- function(id, results, data, config, channels,
           names(rag_sub)[names(rag_sub) %in% conflict] <-
           paste0(names(rag_sub)[names(rag_sub) %in% conflict], "_", nm)
         
-        result <- left_join(result, rag_sub, by = valid_jk)
+        result <- dplyr::left_join(result, rag_sub, by = valid_jk)
       }
       
       result[is.na(result)] <- 0
       result
     }
-    
-    # ── 2. Side model mapping ──────────────────────────────────────────────
+    # ── 2. Side model mapping ─────────────────────────────────────────────
     build_side_mapping_export <- function(res_list) {
       rows <- Filter(Negate(is.null), lapply(names(res_list), function(nm) {
         r <- res_list[[nm]]
-        if (is.null(r) || is.null(r$side_mapping) ||
-            !nrow(r$side_mapping) ||
+        if (is.null(r) || is.null(r$side_mapping) || !nrow(r$side_mapping) ||
             !"VariableSplit" %in% names(r$side_mapping)) return(NULL)
         r$side_mapping
       }))
       if (!length(rows)) return(NULL)
-      bind_rows(rows)
+      data.table::rbindlist(rows, fill = TRUE) %>% as.data.frame()
     }
     
-    # ── 3. Activity, spend and ROIs ────────────────────────────────────────
+    # ── 3. Activity, spend and ROIs ───────────────────────────────────────
     build_activity_rois <- function(d, res_list, channels_list, gcfg) {
-      
       rows <- Filter(Negate(is.null), lapply(names(res_list), function(nm) {
         r   <- res_list[[nm]]
         cfg <- channels_list[[nm]]
@@ -473,322 +544,268 @@ mod_export_server <- function(id, results, data, config, channels,
         act_kw     <- cfg$activity_keyword %||% "Impressions"
         spend_kw   <- cfg$spend_keyword    %||% "Spend"
         
-        all_split_cols <- setdiff(names(rag_df)[sapply(rag_df, is.numeric)], id_in_rag)
+        all_split_cols <- setdiff(names(rag_df)[sapply(rag_df, is.numeric)],
+                                  id_in_rag)
         act_cols  <- grep(act_kw,   all_split_cols, ignore.case = TRUE, value = TRUE)
         cost_cols <- grep(spend_kw, all_split_cols, ignore.case = TRUE, value = TRUE)
+        
+        act_cols  <- act_cols[!grepl("Before", act_cols,  fixed = TRUE)]
+        cost_cols <- cost_cols[!grepl("Before", cost_cols, fixed = TRUE)]
         if (!length(act_cols)) return(NULL)
         
-        # Dedup by geo x Period to remove product duplication
-        all_cols_for_dedup <- union(act_cols, cost_cols)
+        all_dedup_cols <- union(act_cols, cost_cols)
         cs_period <- if (geo_col %in% names(rag_df)) {
           rag_df %>%
-            group_by(across(all_of(c(geo_col, "Period")))) %>%
-            summarise(across(all_of(all_cols_for_dedup),
-                             \(x) max(x, na.rm = TRUE)), .groups = "drop") %>%
+            dplyr::group_by(dplyr::across(dplyr::all_of(c(geo_col, "Period")))) %>%
+            dplyr::summarise(
+              dplyr::across(dplyr::all_of(all_dedup_cols), \(x) max(x, na.rm = TRUE)),
+              .groups = "drop") %>%
             as.data.frame()
         } else rag_df
         
-        # Detect local vs national and compute totals accordingly
+        periods  <- cs_period$Period
+        uniq_p   <- sort(unique(periods))
+        test_p   <- head(uniq_p, 5)
+        
         get_total <- function(col) {
-          if (!col %in% names(cs_period)) return(0)
-          periods      <- sort(unique(cs_period$Period))
-          test_periods <- head(periods, min(5, length(periods)))
-          is_local     <- FALSE
-          for (p in test_periods) {
-            vals     <- cs_period[[col]][cs_period$Period == p]
-            non_zero <- vals[!is.na(vals) & vals > 0]
-            if (length(non_zero) >= 2 &&
-                diff(range(non_zero)) / max(non_zero) > 0.01) {
-              is_local <- TRUE; break
-            }
-          }
-          if (is_local) {
-            sum(cs_period[[col]], na.rm = TRUE)
-          } else {
-            total <- 0
-            for (p in periods) {
-              vals     <- cs_period[[col]][cs_period$Period == p]
-              non_zero <- vals[!is.na(vals) & vals > 0]
-              total    <- total + if (length(non_zero) > 0) max(non_zero) else 0
-            }
-            total
-          }
+          vals <- cs_period[[col]]
+          if (all(is.na(vals) | vals == 0)) return(0)
+          is_local <- any(vapply(test_p, function(p) {
+            nz <- vals[periods == p]; nz <- nz[!is.na(nz) & nz > 0]
+            length(nz) >= 2 && diff(range(nz)) / max(nz) > 0.01
+          }, logical(1)))
+          if (is_local) sum(vals, na.rm = TRUE)
+          else sum(tapply(vals, periods, function(x) {
+            nz <- x[!is.na(x) & x > 0]; if (length(nz)) max(nz) else 0
+          }), na.rm = TRUE)
         }
         
-        act_totals  <- sapply(act_cols,  get_total)
-        cost_totals <- if (length(cost_cols)) sapply(cost_cols, get_total) else numeric(0)
+        act_totals  <- sapply(act_cols, get_total)
+        cost_totals <- if (length(cost_cols)) sapply(cost_cols, get_total)
+        else numeric(0)
         
-        act_df <- tibble(
+        act_df <- tibble::tibble(
           VariableSplit  = act_cols,
           total_activity = unname(act_totals),
-          key            = str_remove_all(act_cols, regex(act_kw, ignore_case = TRUE))
-        )
+          key = stringr::str_remove_all(act_cols,
+                                        stringr::regex(act_kw, ignore_case = TRUE)))
         cost_df <- if (length(cost_totals))
-          tibble(total_spend = unname(cost_totals),
-                 key         = str_remove_all(cost_cols, regex(spend_kw, ignore_case = TRUE)))
-        else
-          tibble(total_spend = numeric(0), key = character(0))
+          tibble::tibble(
+            total_spend = unname(cost_totals),
+            key = stringr::str_remove_all(cost_cols,
+                                          stringr::regex(spend_kw, ignore_case = TRUE)))
+        else tibble::tibble(total_spend = numeric(0), key = character(0))
         
-        # MainModelVariableName taken directly from channel config (not side_mapping)
-        # to ensure nonfocus splits also get a valid value for the ROI join
         result <- act_df %>%
-          left_join(cost_df, by = "key") %>%
-          select(-key) %>%
-          filter(total_activity > 0) %>%
-          mutate(
-            Channel               = nm,
-            MainModelVariableName = cfg$model_variable %||% NA_character_
-          )
+          dplyr::left_join(cost_df, by = "key") %>%
+          dplyr::select(-key) %>%
+          dplyr::filter(total_activity > 0) %>%
+          dplyr::mutate(Channel = nm,
+                        MainModelVariableName = cfg$model_variable %||% NA_character_)
         
         if (!nrow(result)) return(NULL)
-        result %>% select(VariableSplit, total_activity, total_spend,
-                          Channel, MainModelVariableName)
+        result %>% dplyr::select(VariableSplit, total_activity, total_spend,
+                                 Channel, MainModelVariableName)
       }))
       
       if (!length(rows)) return(NULL)
-      act_df <- bind_rows(rows)
+      act_df <- dplyr::bind_rows(rows)
       
-      # ── Join ROIs — supports Sourced VariableName for granular matching ────────
       if (!is.null(d$channels_rois) && nrow(d$channels_rois) > 0) {
         tryCatch({
           roi_df <- d$channels_rois
+          if (!"MainModelVariableName" %in% names(roi_df)) return(act_df)
           
-          if ("MainModelVariableName" %in% names(roi_df)) {
+          roi_num_cols <- setdiff(names(roi_df)[sapply(roi_df, is.numeric)],
+                                  names(act_df))
+          if (!length(roi_num_cols)) return(act_df)
+          
+          normalize_mv <- function(x)
+            trimws(stringr::str_remove(as.character(x),
+                                       stringr::regex("(_Total)+$",
+                                                      ignore_case = TRUE)))
+          src_col_name   <- "Sourced VariableName"
+          has_source_col <- src_col_name %in% names(roi_df) &&
+            any(!is.na(roi_df[[src_col_name]]) &
+                  nzchar(trimws(as.character(roi_df[[src_col_name]]))),
+                na.rm = TRUE)
+          
+          if (has_source_col) {
+            roi_sourced <- roi_df %>%
+              dplyr::mutate(
+                mv_join  = normalize_mv(MainModelVariableName),
+                sv_clean = trimws(as.character(
+                  dplyr::coalesce(.data[[src_col_name]], "")))) %>%
+              dplyr::filter(nzchar(sv_clean)) %>%
+              dplyr::select(mv_join, sv_clean, dplyr::all_of(roi_num_cols))
             
-            roi_num_cols <- setdiff(
-              names(roi_df)[sapply(roi_df, is.numeric)],
-              names(act_df))
+            roi_fallback <- roi_df %>%
+              dplyr::mutate(mv_join = normalize_mv(MainModelVariableName)) %>%
+              dplyr::filter(is.na(.data[[src_col_name]]) |
+                              !nzchar(trimws(as.character(
+                                .data[[src_col_name]])))) %>%
+              dplyr::distinct(mv_join, .keep_all = TRUE) %>%
+              dplyr::select(mv_join, dplyr::all_of(roi_num_cols))
             
-            if (length(roi_num_cols) > 0) {
-              
-              normalize_mv <- function(x)
-                trimws(stringr::str_remove(
-                  x, stringr::regex("(_Total)+$", ignore_case = TRUE)))
-              
-              has_source_col <- "Sourced VariableName" %in% names(roi_df) &&
-                any(nzchar(roi_df[["Sourced VariableName"]] %||% ""),
-                    na.rm = TRUE)
-              
-              if (has_source_col) {
-                # ── Granular join: MainModelVariableName + Sourced VariableName ──
-                # Matches splits whose name STARTS WITH the Sourced VariableName
-                # e.g. "National Audio Impressions_Total_Last52w" starts with
-                #      "National Audio Impressions"
-                
-                roi_clean <- roi_df %>%
-                  dplyr::select(MainModelVariableName,
-                                SourcedVN = `Sourced VariableName`,
-                                dplyr::all_of(roi_num_cols)) %>%
-                  dplyr::mutate(
-                    mv_join = normalize_mv(MainModelVariableName),
-                    # Normalize Sourced VariableName for robust matching
-                    sv_norm = trimws(SourcedVN %||% "")) %>%
-                  dplyr::filter(nzchar(sv_norm))
-                
-                # For each split, find the best matching ROI row
-                roi_rows <- lapply(seq_len(nrow(act_df)), function(i) {
-                  vs      <- act_df$VariableSplit[i]
-                  mv_norm <- normalize_mv(act_df$MainModelVariableName[i] %||% "")
-                  
-                  # Match: same MainModelVariableName AND split starts with SourcedVN
-                  candidates <- roi_clean %>%
-                    dplyr::filter(
-                      mv_join == mv_norm,
-                      startsWith(vs, sv_norm))
-                  
-                  if (nrow(candidates) == 0) {
-                    # Fallback: match by MainModelVariableName only
-                    candidates <- roi_clean %>%
-                      dplyr::filter(mv_join == mv_norm)
-                  }
-                  
-                  if (nrow(candidates) == 0)
-                    return(setNames(
-                      as.list(rep(NA_real_, length(roi_num_cols))), roi_num_cols))
-                  
-                  # Take first match (most specific)
-                  as.list(candidates[1, roi_num_cols, drop = FALSE])
-                })
-                
-                roi_joined <- dplyr::bind_rows(roi_rows)
-                act_df     <- dplyr::bind_cols(act_df, roi_joined)
-                
-              } else {
-                # ── Standard join: MainModelVariableName only (existing behavior) ──
-                roi_clean <- roi_df %>%
-                  dplyr::select(MainModelVariableName,
-                                dplyr::all_of(roi_num_cols)) %>%
-                  dplyr::distinct(MainModelVariableName, .keep_all = TRUE) %>%
-                  dplyr::mutate(mv_join = normalize_mv(MainModelVariableName))
-                
-                act_df <- act_df %>%
-                  dplyr::mutate(mv_join = normalize_mv(MainModelVariableName)) %>%
-                  dplyr::left_join(
-                    roi_clean %>% dplyr::select(mv_join,
-                                                dplyr::all_of(roi_num_cols)),
-                    by = "mv_join") %>%
-                  dplyr::select(-mv_join)
+            empty_roi     <- setNames(as.list(rep(NA_real_, length(roi_num_cols))),
+                                      roi_num_cols)
+            matched_rois  <- lapply(seq_len(nrow(act_df)), function(i) {
+              vs      <- trimws(as.character(act_df$VariableSplit[i]))
+              mv_norm <- normalize_mv(act_df$MainModelVariableName[i] %||% "")
+              cands   <- roi_sourced[roi_sourced$mv_join == mv_norm, , drop = FALSE]
+              if (nrow(cands) > 0) {
+                pm    <- startsWith(vs, cands$sv_clean)
+                cands <- cands[pm, , drop = FALSE]
               }
-              
-              # ── Diagnostic: warn about unmatched channels ─────────────────
-              unmatched <- act_df %>%
-                dplyr::filter(dplyr::if_any(dplyr::all_of(roi_num_cols), is.na)) %>%
-                dplyr::distinct(Channel, MainModelVariableName) %>%
-                dplyr::arrange(Channel)
-              
-              if (nrow(unmatched) > 0) {
-                msg_lines <- paste0(unmatched$Channel, " \u2192 ",
-                                    unmatched$MainModelVariableName)
-                showNotification(
-                  tagList(
-                    icon("triangle-exclamation", class = "icon-ch-warn me-1"),
-                    tags$strong(paste0(nrow(unmatched), " ROI(s) not matched:")),
-                    tags$ul(class = "mt-1 ps-3 small",
-                            lapply(head(msg_lines, 5), tags$li),
-                            if (nrow(unmatched) > 5)
-                              tags$li(paste0("... and ", nrow(unmatched) - 5,
-                                             " more")))
-                  ),
-                  type = "warning", duration = 15)
+              if (nrow(cands) > 0) {
+                best <- which.max(nchar(cands$sv_clean))
+                return(as.list(cands[best, roi_num_cols, drop = FALSE]))
               }
-            }
+              fb <- roi_fallback[roi_fallback$mv_join == mv_norm, , drop = FALSE]
+              if (nrow(fb) > 0) return(as.list(fb[1, roi_num_cols, drop = FALSE]))
+              empty_roi
+            })
+            act_df <- dplyr::bind_cols(act_df, dplyr::bind_rows(matched_rois))
+          } else {
+            roi_clean <- roi_df %>%
+              dplyr::select(MainModelVariableName, dplyr::all_of(roi_num_cols)) %>%
+              dplyr::distinct(MainModelVariableName, .keep_all = TRUE) %>%
+              dplyr::mutate(mv_join = normalize_mv(MainModelVariableName))
+            act_df <- act_df %>%
+              dplyr::mutate(mv_join = normalize_mv(MainModelVariableName)) %>%
+              dplyr::left_join(
+                roi_clean %>% dplyr::select(mv_join, dplyr::all_of(roi_num_cols)),
+                by = "mv_join") %>%
+              dplyr::select(-mv_join)
+          }
+          
+          unmatched <- act_df %>%
+            dplyr::filter(dplyr::if_any(dplyr::all_of(roi_num_cols), is.na)) %>%
+            dplyr::distinct(Channel, MainModelVariableName) %>%
+            dplyr::arrange(Channel)
+          if (nrow(unmatched) > 0) {
+            msg_lines <- paste0(unmatched$Channel, " \u2192 ",
+                                unmatched$MainModelVariableName)
+            showNotification(
+              tagList(icon("triangle-exclamation", class = "icon-ch-warn me-1"),
+                      tags$strong(paste0(nrow(unmatched), " ROI(s) not matched:")),
+                      tags$ul(class = "mt-1 ps-3 small",
+                              lapply(head(msg_lines, 5), tags$li),
+                              if (nrow(unmatched) > 5)
+                                tags$li(paste0("... and ", nrow(unmatched) - 5,
+                                               " more")))),
+              type = "warning", duration = 15)
           }
         }, error = function(e)
           showNotification(paste("ROI join error:", e$message),
                            type = "warning", duration = 6))
       }
-      
       act_df
     }
     
-    # ── 4. Split composition — pre-merge lineage ───────────────────────────
+    # ── 4. Split composition ──────────────────────────────────────────────
     build_split_composition <- function(res_list, clean_list, channels_list) {
       if (!length(res_list)) return(NULL)
       
-      lookup_act <- function(diag, split_nm, period_type) {
-        if (is.null(diag) || !nrow(diag)) return(0)
-        if (!all(c("VariableSplit", "period", "total_activity") %in% names(diag))) return(0)
-        rows <- diag[diag$VariableSplit == split_nm & diag$period == period_type, ]
-        if (!nrow(rows)) return(0)
-        rows$total_activity[1] %||% 0
-      }
+      strip_time <- function(x)
+        stringr::str_remove(x,
+                            "(_Before .*|_Before_.*|_[Ll]ast\\d+[wW].*|_\\d+[wW].*)$")
       
-      lookup_spend <- function(diag, split_nm, period_type) {
+      lookup_act <- function(diag, split_nm) {
         if (is.null(diag) || !nrow(diag)) return(0)
-        if (!all(c("VariableSplit", "period", "total_spend") %in% names(diag))) return(0)
-        rows <- diag[diag$VariableSplit == split_nm & diag$period == period_type, ]
-        if (!nrow(rows)) return(0)
-        rows$total_spend[1] %||% 0
+        if (!all(c("VariableSplit", "total_activity") %in% names(diag))) return(0)
+        sum(diag$total_activity[diag$VariableSplit == split_nm], na.rm = TRUE)
+      }
+      lookup_spend <- function(diag, split_nm) {
+        if (is.null(diag) || !nrow(diag)) return(0)
+        if (!all(c("VariableSplit", "total_spend") %in% names(diag))) return(0)
+        sum(diag$total_spend[diag$VariableSplit == split_nm], na.rm = TRUE)
       }
       
       rows <- Filter(Negate(is.null), lapply(names(res_list), function(nm) {
         res   <- res_list[[nm]]
         clean <- clean_list[[nm]]
         cfg   <- channels_list[[nm]]
+        
         if (is.null(res) || is.null(res$act_diagnoses)) return(NULL)
         if (!nrow(res$act_diagnoses)) return(NULL)
         
         act_kw   <- cfg$activity_keyword %||% "Impressions"
         spend_kw <- cfg$spend_keyword    %||% "Spend"
+        mmv      <- cfg$model_variable   %||% nm
         
-        to_spend_nm <- function(x) {
-          s <- str_replace_all(x, regex(act_kw, ignore_case = TRUE), spend_kw)
-          if (s == x) paste0(x, "_", spend_kw) else s
-        }
-        
-        # Build merge map: new_name → original components
         merge_map <- list()
         for (m in cfg$saved_merges %||% list())
           if (isTRUE(m$active)) merge_map[[m$new_name]] <- unlist(m$merged)
+        if (!length(merge_map)) return(NULL)
         
-        # MainModelVariableName lookup from side_mapping
-        mmv_map <- if (!is.null(res$side_mapping) && nrow(res$side_mapping) > 0 &&
-                       "VariableSplit" %in% names(res$side_mapping)) {
-          setNames(res$side_mapping$MainModelVariableName, res$side_mapping$VariableSplit)
-        } else character(0)
-        
-        # Pre-merge data for component-level activity/spend
-        pre_act  <- if (!is.null(clean)) clean$act_diagnoses  %||% tibble() else tibble()
-        pre_cost <- if (!is.null(clean)) clean$cost_diagnoses %||% tibble() else tibble()
+        pre_act  <- if (!is.null(clean)) clean$act_diagnoses  %||% tibble::tibble()
+        else tibble::tibble()
+        pre_cost <- if (!is.null(clean)) clean$cost_diagnoses %||% tibble::tibble()
+        else tibble::tibble()
         cur_act  <- res$act_diagnoses
-        cur_cost <- res$cost_diagnoses %||% tibble()
+        cur_cost <- res$cost_diagnoses %||% tibble::tibble()
         
-        period_types <- unique(c(
-          if (nrow(cur_act) > 0 && "period" %in% names(cur_act)) cur_act$period else character(0),
-          if (nrow(pre_act) > 0 && "period" %in% names(pre_act)) pre_act$period else character(0)
-        ))
-        if (!length(period_types)) period_types <- c("focus", "nonfocus")
-        
-        final_splits <- unique(cur_act$VariableSplit)
-        
-        bind_rows(lapply(final_splits, function(fs) {
-          was_merged <- fs %in% names(merge_map)
-          components <- if (was_merged) merge_map[[fs]] else fs
+        chan_rows <- lapply(names(merge_map), function(mname) {
+          components  <- unlist(merge_map[[mname]])
+          merged_act  <- lookup_act(cur_act, mname)
+          spend_name  <- { s <- stringr::str_replace_all(
+            mname, stringr::regex(act_kw, ignore_case = TRUE), spend_kw)
+          if (s == mname) paste0(mname, "_", spend_kw) else s }
+          merged_spend <- lookup_spend(cur_cost, spend_name)
           
-          # Safe lookup — avoids "subscript out of bounds" when fs not in mmv_map
-          mmv <- if (length(mmv_map) > 0 && fs %in% names(mmv_map))
-            mmv_map[[fs]] %||% ""
-          else
-            cfg$model_variable %||% ""
-          
-          fs_spend <- to_spend_nm(fs)
-          
-          bind_rows(lapply(period_types, function(pt) {
-            final_act   <- lookup_act(cur_act,   fs,       pt)
-            final_spend <- lookup_spend(cur_cost, fs_spend, pt)
-            
-            bind_rows(lapply(components, function(comp) {
-              comp_act_src  <- if (nrow(pre_act)  > 0 && was_merged) pre_act  else cur_act
-              comp_cost_src <- if (nrow(pre_cost) > 0 && was_merged) pre_cost else cur_cost
-              comp_spend    <- to_spend_nm(comp)
-              
-              tibble(
-                Channel               = nm,
-                MainModelVariableName = mmv,
-                FinalSplit            = fs,
-                WasMerged             = was_merged,
-                PeriodType            = pt,
-                ComponentSplit        = comp,
-                ComponentActivity     = lookup_act(comp_act_src,   comp,       pt),
-                ComponentSpend        = lookup_spend(comp_cost_src, comp_spend, pt),
-                FinalActivity         = final_act,
-                FinalSpend            = final_spend
-              )
-            }))
-          }))
-        }))
+          comp_rows <- lapply(components, function(comp) {
+            comp_clean <- strip_time(comp)
+            comp_sp    <- { s <- stringr::str_replace_all(
+              comp, stringr::regex(act_kw, ignore_case = TRUE), spend_kw)
+            if (s == comp) paste0(comp, "_", spend_kw) else s }
+            comp_act  <- lookup_act(pre_act, comp)
+            comp_spv  <- lookup_spend(pre_cost, comp_sp)
+            if (comp_act  == 0) comp_act  <- lookup_act(cur_act,  comp)
+            if (comp_spv  == 0) comp_spv  <- lookup_spend(cur_cost, comp_sp)
+            comp_pct <- if (merged_act > 0)
+              round(comp_act / merged_act * 100, 2) else NA_real_
+            list(Channel = nm, MainModelVariableName = mmv,
+                 MergedSplitName = mname, ComponentSplit = comp_clean,
+                 Component_Activity = comp_act, Component_Pct = comp_pct,
+                 Component_Spend = comp_spv, Merged_Activity = merged_act,
+                 Merged_Spend = merged_spend)
+          })
+          data.table::rbindlist(comp_rows, fill = TRUE)
+        })
+        data.table::rbindlist(chan_rows, fill = TRUE)
       }))
       
       if (!length(rows)) return(NULL)
-      bind_rows(rows) %>%
-        arrange(Channel, MainModelVariableName, FinalSplit, PeriodType, ComponentSplit)
+      data.table::rbindlist(rows, fill = TRUE) %>%
+        as.data.frame() %>%
+        dplyr::arrange(Channel, MainModelVariableName, MergedSplitName,
+                       dplyr::desc(Component_Activity))
     }
     
-    # ── ZIP download handler ───────────────────────────────────────────────
+    # ── ZIP download handler ──────────────────────────────────────────────
     output$dl_zip <- downloadHandler(
       filename = function()
         paste0("pso_export_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".zip"),
-      
       content = function(file) {
         tmp_dir <- file.path(tempdir(), paste0("pso_", as.integer(Sys.time())))
         dir.create(tmp_dir, showWarnings = FALSE, recursive = TRUE)
         on.exit(unlink(tmp_dir, recursive = TRUE), add = TRUE)
         written <- character(0)
         
-        # Snapshot all reactive values once before withProgress
-        # (reactive context is not available inside the progress loop)
-        d_snap        <- data()
-        res_snap      <- results()
-        clean_snap    <- clean_results()
+        d_snap       <- data()
+        res_snap     <- results()
+        clean_snap   <- clean_results()
         channels_snap <- channels()
-        gcfg_snap     <- config()
+        gcfg_snap    <- config()
         
         withProgress(message = "Building export files...", value = 0, {
           
           incProgress(0.20, message = "Analytical Splits Extended...")
           tryCatch({
-            df <- build_analytical_extended(d_snap, res_snap,
-                                            channels_snap, gcfg_snap)
+            df <- build_analytical_extended(d_snap, res_snap, channels_snap,
+                                            gcfg_snap,
+                                            schema_metadata = d_snap$schema_metadata)
             if (!is.null(df) && nrow(df) > 0) {
               f <- file.path(tmp_dir, "analytical_splits_extended.csv")
               readr::write_csv(df, f, na = ""); written <- c(written, f)
@@ -808,8 +825,7 @@ mod_export_server <- function(id, results, data, config, channels,
           
           incProgress(0.20, message = "Activity, Cost & ROIs...")
           tryCatch({
-            df <- build_activity_rois(d_snap, res_snap,
-                                      channels_snap, gcfg_snap)
+            df <- build_activity_rois(d_snap, res_snap, channels_snap, gcfg_snap)
             if (!is.null(df) && nrow(df) > 0) {
               f <- file.path(tmp_dir, "activity_cost_rois.csv")
               readr::write_csv(df, f, na = ""); written <- c(written, f)
@@ -851,6 +867,5 @@ mod_export_server <- function(id, results, data, config, channels,
                              type = "error", duration = 10))
       }
     )
-    
   })
 }

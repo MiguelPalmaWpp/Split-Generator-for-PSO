@@ -52,6 +52,7 @@ REQUIRED_COLS <- c(
 
 SPLIT_CHOICES            <- setdiff(REQUIRED_COLS, c("VariableValue", "Period"))
 CROSS_SECTION_CANDIDATES <- c("Geography", "Product", "Campaign", "Outlet", "Creative")
+MFF_DIMS_STD             <- c("Geography", "Product", "Campaign", "Outlet", "Creative")
 
 MEDIA_KEYWORD_DICT <- list(
   activity = c(

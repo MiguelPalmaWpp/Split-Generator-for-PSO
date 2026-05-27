@@ -118,3 +118,19 @@ observer.observe(document.body, {
 });
 
 });
+
+
+/* ── MFF badge colors ───────────────────────────────────────────────── */
+$(document).ready(function () {
+$('<style id="mff-badge-style">').html(
+  '.ch-badge-mff { background: #16a34a !important; color: white !important; ' +
+  'font-size: 9.5px !important; font-weight: 700 !important; ' +
+  'padding: 1px 5px !important; border-radius: 6px !important; flex-shrink: 0; }' +
+  '.badge-mff { background: #16a34a !important; color: white !important; ' +
+  'font-size: 10px !important; font-weight: 700 !important; ' +
+  'padding: 1px 8px !important; border-radius: 8px !important; }' +
+  '.info-box-mff { background: #f0fdf4 !important; border: 1px solid #86efac !important; ' +
+  'border-radius: 8px !important; padding: 12px 16px !important; margin-bottom: 20px !important; }' +
+  '.icon-mff-sm { color: #16a34a !important; font-size: 13px !important; }'
+).appendTo('head');
+});

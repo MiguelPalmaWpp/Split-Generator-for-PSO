@@ -300,6 +300,7 @@ mod_process_server <- function(id, data, config, channels,
             segment_overrides = cfg$segment_overrides %||% list(),
             min_period        = cfg$min_period,
             max_period        = cfg$max_period,
+            schema_metadata   = d$schema_metadata,
             progress_cb = function(detail, value = NULL) {
               if (!is.null(value)) setProgress(value, detail = detail)
               else incProgress(0, detail = detail)
@@ -469,6 +470,7 @@ mod_process_server <- function(id, data, config, channels,
                 dimension_breaks  = cfg$dimension_breaks  %||% list(),
                 segment_overrides = cfg$segment_overrides %||% list(),
                 min_period        = cfg$min_period,
+                schema_metadata   = d$schema_metadata, 
                 max_period        = cfg$max_period,
                 progress_cb       = function(detail, value = NULL) NULL
               )

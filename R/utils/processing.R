@@ -389,6 +389,7 @@ process_channel <- function(all_rags,
                             segment_overrides = list(),
                             min_period        = NULL,
                             max_period        = NULL,
+                            schema_metadata   = NULL,   # ← NEW
                             progress_cb       = NULL) {
   
   pb <- function(detail, value = NULL) {
@@ -404,7 +405,7 @@ process_channel <- function(all_rags,
   source_data <- all_rags
   if (is.null(source_data)) stop("All RAGs data not uploaded.")
   
-  # ── OPT: pre-convert all date params once ─────────────────────────────
+  # ── Pre-convert all date params once ──────────────────────────────────
   min_p   <- if (!is.null(min_period))
     tryCatch(as.Date(min_period), error = \(e) as.Date(NA)) else as.Date(NA)
   max_p   <- if (!is.null(max_period))
@@ -412,11 +413,11 @@ process_channel <- function(all_rags,
   start_d <- as.Date(start_report_date)
   end_d   <- as.Date(end_report_date)
   
-  # ── Filter to channel's VOF date range ──────────────────────────────────
+  # ── Filter to channel's VOF date range ────────────────────────────────
   if (!is.na(min_p)) source_data <- source_data[source_data$Period >= min_p, ]
   if (!is.na(max_p)) source_data <- source_data[source_data$Period <= max_p, ]
   
-  # ── Constrain to analytical date spine ──────────────────────────────────
+  # ── Constrain to analytical date spine ────────────────────────────────
   if (nrow(dates_df) > 0) {
     an_min_date <- min(dates_df$Period, na.rm = TRUE)
     an_max_date <- max(dates_df$Period, na.rm = TRUE)
@@ -427,19 +428,19 @@ process_channel <- function(all_rags,
   
   if (nrow(source_data) == 0)
     stop("No data available in the channel's date range (",
-         min_period, " \u2192 ", max_period, ").")
+         min_period, " -> ", max_period, ").")
   
   cross_id   <- c(cross_cols, "Period")
   join_key   <- cross_id
   id_protect <- cross_id
   
-  # ── OPT: rag_base via data.table (faster unique + setorder) ─────────────
+  # ── rag_base via data.table ───────────────────────────────────────────
   rag_base_dt <- unique(
     data.table::as.data.table(source_data)[, cross_id, with = FALSE])
   data.table::setorderv(rag_base_dt, "Period")
   rag_base <- as.data.frame(rag_base_dt)
   
-  # ── OPT: ref_cross_key from rag_base (~2k rows) not source_data (576k) ─
+  # ── ref_cross_key from rag_base (smaller) ─────────────────────────────
   cross_data_rb <- rag_base[, cross_cols, drop = FALSE]
   cross_key_rb  <- do.call(paste, c(as.list(cross_data_rb), list(sep = " / ")))
   ref_cross_key <- sort(unique(cross_key_rb))[1]
@@ -456,7 +457,7 @@ process_channel <- function(all_rags,
     any(sapply(segment_overrides,
                \(o) length(o$geography_exclude %||% character(0)) > 0))
   
-  # ── Pre-filter ────────────────────────────────────────────────────────────
+  # ── Pre-filter ────────────────────────────────────────────────────────
   pb("Filtering source data...", 0.10)
   
   d_prefilt <- data.table::as.data.table(source_data)
@@ -491,7 +492,29 @@ process_channel <- function(all_rags,
       if (nchar(p %||% "") > 0)
         d_prefilt <- d_prefilt[!grepl(p, Creative, ignore.case = TRUE)]
   
-  # ── Segment loop ─────────────────────────────────────────────────────────
+  # ── Filter by useful_long dimension values ────────────────────────────
+  # When Product (or another dim) is useful_long, each channel corresponds
+  # to specific values of that dimension. Without this filter, all product
+  # channels share the same RAG data, causing Total Check mismatches.
+  # e.g. Channel "Social_Prod1" should only see rows where Product = "Prod1"
+  if (!is.null(schema_metadata)              &&
+      !is.null(schema_metadata$name_lookup)  &&
+      length(schema_metadata$useful_long) > 0 &&
+      length(cfg$analytical_varkeys) > 0) {
+    
+    nl <- schema_metadata$name_lookup
+    
+    for (dim in schema_metadata$useful_long) {
+      if (!dim %in% names(d_prefilt)) next
+      
+      dim_vals <- get_useful_long_values(cfg$analytical_varkeys, nl, dim)
+      
+      if (length(dim_vals) > 0)
+        d_prefilt <- d_prefilt[d_prefilt[[dim]] %in% dim_vals]
+    }
+  }
+  
+  # ── Segment loop ──────────────────────────────────────────────────────
   pb("Building splits...", 0.20)
   
   d <- data.table::copy(d_prefilt)
@@ -518,9 +541,7 @@ process_channel <- function(all_rags,
                                    channel_name = cfg$channel_name)
     d <- data.table::as.data.table(d_df)
     
-    # ── OPT: SplitName — vectorized Reduce, no row-by-row loop ─────────────
-    # Was: vapply(seq_len(.N), function(i) { sapply(...) }, character(1))
-    # Now: fully vectorized — 100-500x faster on large datasets
+    # ── SplitName — vectorized ────────────────────────────────────────
     split_cols_present <- intersect(cfg$split_columns, names(d))
     if (!length(split_cols_present)) split_cols_present <- "VariableName"
     
@@ -539,7 +560,7 @@ process_channel <- function(all_rags,
     }
     d[, SplitName := ifelse(nzchar(combined), combined, "Unknown")]
     
-    # ── Pivot wide ───────────────────────────────────────────────────────────
+    # ── Pivot wide ────────────────────────────────────────────────────
     lhs    <- paste(cross_id, collapse = " + ")
     d_wide <- data.table::dcast(d,
                                 as.formula(paste(lhs, "~ SplitName")),
@@ -547,7 +568,6 @@ process_channel <- function(all_rags,
                                 fun.aggregate = sum, fill = 0)
     d_wide <- merge(rag_base_dt, d_wide, by = cross_id, all.x = TRUE)
     
-    # ── OPT: setnafill instead of for-loop over columns ──────────────────
     num_cols_w <- names(d_wide)[sapply(d_wide, is.numeric)]
     if (length(num_cols_w) > 0)
       data.table::setnafill(d_wide, fill = 0, cols = num_cols_w)
@@ -555,14 +575,14 @@ process_channel <- function(all_rags,
     d_wide <- as.data.frame(d_wide)
     d_wide <- d_wide[order(d_wide$Period), ]
     
-    # ── Non-focus suffix ─────────────────────────────────────────────────────
+    # ── Non-focus suffix ──────────────────────────────────────────────
     nf_sfx <- {
       tbr <- cfg$time_break_label %||% ""
       if (nzchar(tbr)) paste0("Before ", update_label, "|", tbr)
       else             paste0("Before ", update_label)
     }
     
-    # ── Non-focus slice ──────────────────────────────────────────────────────
+    # ── Non-focus slice ───────────────────────────────────────────────
     nf_raw <- as.data.frame(d_wide[d_wide$Period < start_d, ])
     nf     <- keep_nonzero_cols(nf_raw)
     
@@ -595,7 +615,7 @@ process_channel <- function(all_rags,
       }
     }
     
-    # ── Focus slice ──────────────────────────────────────────────────────────
+    # ── Focus slice ───────────────────────────────────────────────────
     fc_raw <- as.data.frame(
       d_wide[d_wide$Period >= start_d & d_wide$Period <= end_d, ])
     fc <- keep_nonzero_cols(fc_raw)
@@ -632,9 +652,7 @@ process_channel <- function(all_rags,
     rm(d, d_df, d_wide, nf_raw, nf, fc_raw, fc)
   }
   
-  # ── OPT: Assemble RAG — setnafill OUTSIDE the merge loop ────────────────
-  # Was: for-loop over columns after EACH merge (grows with every iteration)
-  # Now: single setnafill pass at the end over the final table
+  # ── Assemble RAG ──────────────────────────────────────────────────────
   pb("Assembling RAG...", 0.82)
   
   rag_dt <- rag_base_dt
@@ -702,3 +720,7 @@ process_channel <- function(all_rags,
     cost_diagnoses = cost_all
   )
 }
+
+
+
+

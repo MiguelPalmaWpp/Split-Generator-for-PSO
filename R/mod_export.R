@@ -353,60 +353,170 @@ mod_export_server <- function(id, results, data, config, channels,
       if (!"MainModelVariableName" %in% names(roi_df))
         return(div(class = "roi-box-error",
                    div(class = "card-header-inner",
-                       icon("circle-xmark", class = "icon-ch-error"),
                        tags$span("ROIs file missing required column: MainModelVariableName",
                                  class = "roi-error-msg"))))
       
-      res_list <- results(); if (!length(res_list)) return(NULL)
+      res_list <- results()
+      if (!length(res_list)) return(NULL)
+      
+      has_geo_col <- "Geography" %in% names(roi_df)
+      has_ch_col  <- "Channel"   %in% names(roi_df)
+      
+      normalize_mv <- function(x)
+        trimws(stringr::str_remove(as.character(x),
+                                   stringr::regex("(_Total)+$", ignore_case = TRUE)))
+      
+      roi_num_cols <- setdiff(names(roi_df)[sapply(roi_df, is.numeric)],
+                              c("MainModelVariableName"))
       
       all_mvs <- dplyr::bind_rows(lapply(names(res_list), function(nm) {
         cfg <- channels()[[nm]]; mv <- cfg$model_variable %||% ""
         if (!nzchar(mv)) return(NULL)
-        tibble::tibble(Channel = nm, MainModelVariableName = mv)
+        tibble::tibble(Channel = nm, MainModelVariableName = mv,
+                       mv_norm = normalize_mv(mv))
       }))
       if (!nrow(all_mvs)) return(NULL)
       
-      normalize_mv <- function(x)
-        trimws(stringr::str_remove(x, stringr::regex("(_Total)+$",
-                                                     ignore_case = TRUE)))
-      roi_names_norm <- normalize_mv(roi_df$MainModelVariableName)
-      checked <- all_mvs %>%
-        dplyr::mutate(.has_roi =
-                        normalize_mv(MainModelVariableName) %in% roi_names_norm)
+      roi_norm <- roi_df %>%
+        dplyr::mutate(
+          mv_norm = normalize_mv(MainModelVariableName),
+          geo_val = if (has_geo_col)
+            trimws(as.character(Geography %||% "")) else "")
       
-      n_total   <- nrow(all_mvs)
-      n_matched <- sum(checked$.has_roi)
-      n_missing <- n_total - n_matched
-      
-      if (n_missing == 0) {
-        div(class = "roi-box-ok",
-            div(class = "card-header-inner",
-                icon("circle-check", class = "icon-ch-ok"),
-                tags$span(paste0("All ", n_total, " channel(s) matched with ROI values."),
-                          class = "roi-ok-msg")))
-      } else {
-        missing_rows <- checked %>%
-          dplyr::filter(!.has_roi) %>%
-          dplyr::mutate(label = paste0(Channel, " \u2192 ", MainModelVariableName)) %>%
-          dplyr::pull(label)
+      if (has_geo_col) {
+        # ── NEW FORMAT: Geography column present ─────────────────────────────
         
-        div(class = "roi-box-warn",
-            div(class = "card-header-between mb-2",
-                div(class = "card-header-inner",
-                    icon("triangle-exclamation", class = "icon-ch-warn"),
-                    tags$strong(paste0(n_missing, " of ", n_total,
-                                       " channel(s) have no ROI"),
-                                class = "roi-warn-title")),
-                tags$span(paste0(n_matched, "/", n_total, " matched"),
-                          class = "badge-roi-count")),
-            div(class = "roi-warn-list",
-                tagList(lapply(seq_along(head(missing_rows, 6)), function(i)
-                  div(class = "roi-warn-row",
-                      div(class = "roi-warn-dot"),
-                      tags$span(missing_rows[[i]], class = "roi-warn-name")))),
-                if (length(missing_rows) > 6)
-                  tags$p(paste0("... and ", length(missing_rows) - 6, " more"),
-                         class = "roi-warn-more")))
+        n_warn <- 0L
+        
+        ch_blocks <- lapply(seq_len(nrow(all_mvs)), function(i) {
+          nm      <- all_mvs$Channel[i]
+          mv_n    <- all_mvs$mv_norm[i]
+          r       <- res_list[[nm]]
+          gcfg    <- config()
+          geo_col <- (r$cross_cols %||% gcfg$cross_cols %||% "Geography")[1]
+          
+          rag_geos <- if (!is.null(r) && !is.null(r$rag))
+            sort(unique(as.data.frame(r$rag)[[geo_col]])) else character(0)
+          
+          ch_roi     <- roi_norm[roi_norm$mv_norm == mv_n, , drop = FALSE]
+          geo_entries <- ch_roi[nzchar(ch_roi$geo_val), , drop = FALSE]
+          nat_entry   <- ch_roi[!nzchar(ch_roi$geo_val), , drop = FALSE]
+          
+          if (nrow(geo_entries) > 0) {
+            # Geo-specific ROIs
+            matched_geos <- trimws(geo_entries$geo_val)
+            missing_geos <- setdiff(rag_geos, matched_geos)
+            if (length(missing_geos) > 0) n_warn <<- n_warn + 1L
+            
+            geo_rows <- lapply(seq_len(nrow(geo_entries)), function(j) {
+              geo     <- trimws(geo_entries$geo_val[j])
+              roi_val <- if (length(roi_num_cols))
+                geo_entries[[roi_num_cols[1]]][j] else NA_real_
+              div(class = "roi-geo-row",
+                  tags$span(geo, class = "roi-geo-name"),
+                  if (!is.na(roi_val))
+                    tags$span(paste0("ROI ", round(roi_val, 2)),
+                              class = "roi-geo-val"))
+            })
+            
+            miss_rows <- lapply(head(missing_geos, 3), function(geo)
+              div(class = "roi-geo-row",
+                  tags$span(geo, class = "roi-geo-name text-muted"),
+                  tags$span("missing", class = "roi-geo-miss-label")))
+            
+            badge <- if (!length(missing_geos))
+              tags$span(paste0(length(matched_geos), " geos"), class = "badge-roi-ok")
+            else
+              tags$span(paste0(length(matched_geos), "/",
+                               length(rag_geos), " geos"),
+                        class = "badge-roi-warn")
+            
+            div(class = "roi-ch-block",
+                div(class = "roi-ch-header",
+                    tags$span(nm, class = "roi-ch-name"), badge),
+                div(class = "roi-geo-list", geo_rows, miss_rows,
+                    if (length(missing_geos) > 3)
+                      tags$p(paste0("... and ", length(missing_geos) - 3,
+                                    " more missing"),
+                             class = "roi-warn-more")))
+            
+          } else if (nrow(nat_entry) > 0) {
+            # National ROI (no geo)
+            roi_val <- if (length(roi_num_cols)) nat_entry[[roi_num_cols[1]]][1]
+            else NA_real_
+            div(class = "roi-ch-block",
+                div(class = "roi-ch-header",
+                    tags$span(nm, class = "roi-ch-name"),
+                    if (!is.na(roi_val))
+                      tags$span(paste0("ROI ", round(roi_val, 2)),
+                                class = "badge-roi-ok")
+                    else tags$span("matched", class = "badge-roi-ok")))
+            
+          } else {
+            # No ROI
+            n_warn <<- n_warn + 1L
+            div(class = "roi-ch-block",
+                div(class = "roi-ch-header",
+                    tags$span(nm, class = "roi-ch-name"),
+                    tags$span("no ROI", class = "badge-roi-miss")))
+          }
+        })
+        
+        summary_bar <- if (n_warn == 0)
+          div(class = "roi-box-ok mb-2",
+              div(class = "card-header-inner",
+                  tags$span(paste0("All ", nrow(all_mvs),
+                                   " channel(s) have ROI coverage."),
+                            class = "roi-ok-msg")))
+        else
+          div(class = "roi-box-warn mb-2",
+              div(class = "card-header-between",
+                  div(class = "card-header-inner",
+                      tags$strong(paste0(n_warn, " channel(s) with incomplete ROI"),
+                                  class = "roi-warn-title")),
+                  tags$span(paste0(nrow(all_mvs) - n_warn, "/",
+                                   nrow(all_mvs), " complete"),
+                            class = "badge-roi-count")))
+        
+        div(summary_bar, div(class = "roi-ch-list", ch_blocks))
+        
+      } else {
+        # ── LEGACY FORMAT: no Geography column ───────────────────────────────
+        roi_norms <- unique(roi_norm$mv_norm)
+        checked   <- all_mvs %>%
+          dplyr::mutate(.has_roi = mv_norm %in% roi_norms)
+        n_total   <- nrow(checked)
+        n_matched <- sum(checked$.has_roi)
+        n_missing <- n_total - n_matched
+        
+        if (n_missing == 0) {
+          div(class = "roi-box-ok",
+              div(class = "card-header-inner",
+                  tags$span(paste0("All ", n_total,
+                                   " channel(s) matched with ROI values."),
+                            class = "roi-ok-msg")))
+        } else {
+          missing_rows <- checked %>%
+            dplyr::filter(!.has_roi) %>%
+            dplyr::mutate(label = paste0(Channel, " -> ", MainModelVariableName)) %>%
+            dplyr::pull(label)
+          div(class = "roi-box-warn",
+              div(class = "card-header-between mb-2",
+                  div(class = "card-header-inner",
+                      tags$strong(paste0(n_missing, " of ", n_total,
+                                         " channel(s) have no ROI"),
+                                  class = "roi-warn-title")),
+                  tags$span(paste0(n_matched, "/", n_total, " matched"),
+                            class = "badge-roi-count")),
+              div(class = "roi-warn-list",
+                  tagList(lapply(seq_along(head(missing_rows, 6)), function(i)
+                    div(class = "roi-warn-row",
+                        div(class = "roi-warn-dot"),
+                        tags$span(missing_rows[[i]], class = "roi-warn-name")))),
+                  if (length(missing_rows) > 6)
+                    tags$p(paste0("... and ", length(missing_rows) - 6, " more"),
+                           class = "roi-warn-more")))
+        }
       }
     })
     
@@ -531,6 +641,7 @@ mod_export_server <- function(id, results, data, config, channels,
     
     # ── 3. Activity, spend and ROIs ───────────────────────────────────────
     build_activity_rois <- function(d, res_list, channels_list, gcfg) {
+      
       rows <- Filter(Negate(is.null), lapply(names(res_list), function(nm) {
         r   <- res_list[[nm]]
         cfg <- channels_list[[nm]]
@@ -548,12 +659,13 @@ mod_export_server <- function(id, results, data, config, channels,
                                   id_in_rag)
         act_cols  <- grep(act_kw,   all_split_cols, ignore.case = TRUE, value = TRUE)
         cost_cols <- grep(spend_kw, all_split_cols, ignore.case = TRUE, value = TRUE)
-        
         act_cols  <- act_cols[!grepl("Before", act_cols,  fixed = TRUE)]
         cost_cols <- cost_cols[!grepl("Before", cost_cols, fixed = TRUE)]
         if (!length(act_cols)) return(NULL)
         
         all_dedup_cols <- union(act_cols, cost_cols)
+        
+        # ── Dedup by geo x Period ────────────────────────────────────────────
         cs_period <- if (geo_col %in% names(rag_df)) {
           rag_df %>%
             dplyr::group_by(dplyr::across(dplyr::all_of(c(geo_col, "Period")))) %>%
@@ -567,50 +679,102 @@ mod_export_server <- function(id, results, data, config, channels,
         uniq_p   <- sort(unique(periods))
         test_p   <- head(uniq_p, 5)
         
-        get_total <- function(col) {
-          vals <- cs_period[[col]]
-          if (all(is.na(vals) | vals == 0)) return(0)
-          is_local <- any(vapply(test_p, function(p) {
-            nz <- vals[periods == p]; nz <- nz[!is.na(nz) & nz > 0]
-            length(nz) >= 2 && diff(range(nz)) / max(nz) > 0.01
-          }, logical(1)))
-          if (is_local) sum(vals, na.rm = TRUE)
-          else sum(tapply(vals, periods, function(x) {
-            nz <- x[!is.na(x) & x > 0]; if (length(nz)) max(nz) else 0
-          }), na.rm = TRUE)
+        # ── Detect if ROI file has Geography column (new format) ─────────────
+        has_geo_roi_col <- !is.null(d$channels_rois) &&
+          "Geography" %in% names(d$channels_rois)
+        
+        if (has_geo_roi_col && geo_col %in% names(cs_period)) {
+          # ── GEO-LEVEL output: one row per Geography x Split ──────────────
+          geo_vals <- sort(unique(cs_period[[geo_col]]))
+          
+          geo_rows <- lapply(geo_vals, function(geo) {
+            cs_geo <- cs_period[cs_period[[geo_col]] == geo, , drop = FALSE]
+            
+            get_geo_total <- function(col) {
+              vals <- cs_geo[[col]]
+              if (all(is.na(vals) | vals == 0)) return(0)
+              sum(vals, na.rm = TRUE)
+            }
+            
+            act_totals  <- sapply(act_cols, get_geo_total)
+            cost_totals <- if (length(cost_cols)) sapply(cost_cols, get_geo_total)
+            else numeric(0)
+            
+            act_df_g <- tibble::tibble(
+              VariableSplit  = act_cols,
+              Geography      = geo,
+              total_activity = unname(act_totals),
+              key = stringr::str_remove_all(
+                act_cols, stringr::regex(act_kw, ignore_case = TRUE)))
+            
+            cost_df_g <- if (length(cost_totals))
+              tibble::tibble(
+                total_spend = unname(cost_totals),
+                key = stringr::str_remove_all(
+                  cost_cols, stringr::regex(spend_kw, ignore_case = TRUE)))
+            else tibble::tibble(total_spend = numeric(0), key = character(0))
+            
+            act_df_g %>%
+              dplyr::left_join(cost_df_g, by = "key") %>%
+              dplyr::select(-key) %>%
+              dplyr::filter(total_activity > 0) %>%
+              dplyr::mutate(Channel               = nm,
+                            MainModelVariableName = cfg$model_variable %||% NA_character_)
+          })
+          
+          result <- dplyr::bind_rows(geo_rows)
+          
+        } else {
+          # ── STANDARD output: aggregate across geos ───────────────────────
+          get_total <- function(col) {
+            vals <- cs_period[[col]]
+            if (all(is.na(vals) | vals == 0)) return(0)
+            is_local <- any(vapply(test_p, function(p) {
+              nz <- vals[periods == p]; nz <- nz[!is.na(nz) & nz > 0]
+              length(nz) >= 2 && diff(range(nz)) / max(nz) > 0.01
+            }, logical(1)))
+            if (is_local) sum(vals, na.rm = TRUE)
+            else sum(tapply(vals, periods, function(x) {
+              nz <- x[!is.na(x) & x > 0]; if (length(nz)) max(nz) else 0
+            }), na.rm = TRUE)
+          }
+          
+          act_totals  <- sapply(act_cols, get_total)
+          cost_totals <- if (length(cost_cols)) sapply(cost_cols, get_total)
+          else numeric(0)
+          
+          act_df_s <- tibble::tibble(
+            VariableSplit  = act_cols,
+            Geography      = NA_character_,
+            total_activity = unname(act_totals),
+            key = stringr::str_remove_all(
+              act_cols, stringr::regex(act_kw, ignore_case = TRUE)))
+          
+          cost_df_s <- if (length(cost_totals))
+            tibble::tibble(
+              total_spend = unname(cost_totals),
+              key = stringr::str_remove_all(
+                cost_cols, stringr::regex(spend_kw, ignore_case = TRUE)))
+          else tibble::tibble(total_spend = numeric(0), key = character(0))
+          
+          result <- act_df_s %>%
+            dplyr::left_join(cost_df_s, by = "key") %>%
+            dplyr::select(-key) %>%
+            dplyr::filter(total_activity > 0) %>%
+            dplyr::mutate(Channel               = nm,
+                          MainModelVariableName = cfg$model_variable %||% NA_character_)
         }
         
-        act_totals  <- sapply(act_cols, get_total)
-        cost_totals <- if (length(cost_cols)) sapply(cost_cols, get_total)
-        else numeric(0)
-        
-        act_df <- tibble::tibble(
-          VariableSplit  = act_cols,
-          total_activity = unname(act_totals),
-          key = stringr::str_remove_all(act_cols,
-                                        stringr::regex(act_kw, ignore_case = TRUE)))
-        cost_df <- if (length(cost_totals))
-          tibble::tibble(
-            total_spend = unname(cost_totals),
-            key = stringr::str_remove_all(cost_cols,
-                                          stringr::regex(spend_kw, ignore_case = TRUE)))
-        else tibble::tibble(total_spend = numeric(0), key = character(0))
-        
-        result <- act_df %>%
-          dplyr::left_join(cost_df, by = "key") %>%
-          dplyr::select(-key) %>%
-          dplyr::filter(total_activity > 0) %>%
-          dplyr::mutate(Channel = nm,
-                        MainModelVariableName = cfg$model_variable %||% NA_character_)
-        
         if (!nrow(result)) return(NULL)
-        result %>% dplyr::select(VariableSplit, total_activity, total_spend,
-                                 Channel, MainModelVariableName)
+        result %>% dplyr::select(
+          VariableSplit, Geography, total_activity, total_spend,
+          Channel, MainModelVariableName)
       }))
       
       if (!length(rows)) return(NULL)
       act_df <- dplyr::bind_rows(rows)
       
+      # ── ROI join — Geography-aware ─────────────────────────────────────────
       if (!is.null(d$channels_rois) && nrow(d$channels_rois) > 0) {
         tryCatch({
           roi_df <- d$channels_rois
@@ -624,82 +788,93 @@ mod_export_server <- function(id, results, data, config, channels,
             trimws(stringr::str_remove(as.character(x),
                                        stringr::regex("(_Total)+$",
                                                       ignore_case = TRUE)))
-          src_col_name   <- "Sourced VariableName"
-          has_source_col <- src_col_name %in% names(roi_df) &&
-            any(!is.na(roi_df[[src_col_name]]) &
-                  nzchar(trimws(as.character(roi_df[[src_col_name]]))),
-                na.rm = TRUE)
           
-          if (has_source_col) {
-            roi_sourced <- roi_df %>%
-              dplyr::mutate(
-                mv_join  = normalize_mv(MainModelVariableName),
-                sv_clean = trimws(as.character(
-                  dplyr::coalesce(.data[[src_col_name]], "")))) %>%
-              dplyr::filter(nzchar(sv_clean)) %>%
-              dplyr::select(mv_join, sv_clean, dplyr::all_of(roi_num_cols))
-            
-            roi_fallback <- roi_df %>%
-              dplyr::mutate(mv_join = normalize_mv(MainModelVariableName)) %>%
-              dplyr::filter(is.na(.data[[src_col_name]]) |
-                              !nzchar(trimws(as.character(
-                                .data[[src_col_name]])))) %>%
-              dplyr::distinct(mv_join, .keep_all = TRUE) %>%
-              dplyr::select(mv_join, dplyr::all_of(roi_num_cols))
-            
-            empty_roi     <- setNames(as.list(rep(NA_real_, length(roi_num_cols))),
-                                      roi_num_cols)
-            matched_rois  <- lapply(seq_len(nrow(act_df)), function(i) {
-              vs      <- trimws(as.character(act_df$VariableSplit[i]))
-              mv_norm <- normalize_mv(act_df$MainModelVariableName[i] %||% "")
-              cands   <- roi_sourced[roi_sourced$mv_join == mv_norm, , drop = FALSE]
-              if (nrow(cands) > 0) {
-                pm    <- startsWith(vs, cands$sv_clean)
-                cands <- cands[pm, , drop = FALSE]
-              }
-              if (nrow(cands) > 0) {
-                best <- which.max(nchar(cands$sv_clean))
-                return(as.list(cands[best, roi_num_cols, drop = FALSE]))
-              }
-              fb <- roi_fallback[roi_fallback$mv_join == mv_norm, , drop = FALSE]
-              if (nrow(fb) > 0) return(as.list(fb[1, roi_num_cols, drop = FALSE]))
-              empty_roi
-            })
-            act_df <- dplyr::bind_cols(act_df, dplyr::bind_rows(matched_rois))
-          } else {
-            roi_clean <- roi_df %>%
-              dplyr::select(MainModelVariableName, dplyr::all_of(roi_num_cols)) %>%
-              dplyr::distinct(MainModelVariableName, .keep_all = TRUE) %>%
-              dplyr::mutate(mv_join = normalize_mv(MainModelVariableName))
-            act_df <- act_df %>%
-              dplyr::mutate(mv_join = normalize_mv(MainModelVariableName)) %>%
-              dplyr::left_join(
-                roi_clean %>% dplyr::select(mv_join, dplyr::all_of(roi_num_cols)),
-                by = "mv_join") %>%
-              dplyr::select(-mv_join)
-          }
+          has_geo_col <- "Geography" %in% names(roi_df)
+          src_col     <- "Sourced VariableName"
+          has_src_col <- src_col %in% names(roi_df) &&
+            any(!is.na(roi_df[[src_col]]) &
+                  nzchar(trimws(as.character(roi_df[[src_col]]))), na.rm = TRUE)
           
+          empty_roi <- setNames(as.list(rep(NA_real_, length(roi_num_cols))),
+                                roi_num_cols)
+          
+          roi_norm <- roi_df %>%
+            dplyr::mutate(
+              mv_norm = normalize_mv(MainModelVariableName),
+              geo_val = if (has_geo_col)
+                trimws(as.character(Geography %||% ""))
+              else "",
+              sv_val  = if (has_src_col)
+                trimws(as.character(.data[[src_col]] %||% ""))
+              else "")
+          
+          matched_rois <- lapply(seq_len(nrow(act_df)), function(i) {
+            mv_norm  <- normalize_mv(act_df$MainModelVariableName[i] %||% "")
+            geo_val  <- trimws(as.character(act_df$Geography[i] %||% ""))
+            vs       <- trimws(as.character(act_df$VariableSplit[i]))
+            
+            # Candidates for this channel
+            cands <- roi_norm[roi_norm$mv_norm == mv_norm, , drop = FALSE]
+            if (!nrow(cands)) return(empty_roi)
+            
+            # ── Priority 1: Geography exact match ─────────────────────────
+            if (nzchar(geo_val)) {
+              m1 <- cands[cands$geo_val == geo_val, , drop = FALSE]
+              if (nrow(m1) > 0)
+                return(as.list(m1[1, roi_num_cols, drop = FALSE]))
+            }
+            
+            # ── Priority 2: Sourced VariableName prefix match ─────────────
+            if (has_src_col) {
+              sv_cands <- cands[nzchar(cands$sv_val), , drop = FALSE]
+              if (nrow(sv_cands) > 0) {
+                pm <- startsWith(vs, sv_cands$sv_val)
+                if (any(pm)) {
+                  best <- sv_cands[pm, , drop = FALSE]
+                  best <- best[which.max(nchar(best$sv_val)), , drop = FALSE]
+                  return(as.list(best[1, roi_num_cols, drop = FALSE]))
+                }
+              }
+            }
+            
+            # ── Priority 3: National fallback (Geography empty) ───────────
+            m3 <- cands[!nzchar(cands$geo_val) & !nzchar(cands$sv_val), ,
+                        drop = FALSE]
+            if (nrow(m3) > 0)
+              return(as.list(m3[1, roi_num_cols, drop = FALSE]))
+            
+            empty_roi
+          })
+          
+          act_df <- dplyr::bind_cols(act_df, dplyr::bind_rows(matched_rois))
+          
+          # Warn unmatched
           unmatched <- act_df %>%
             dplyr::filter(dplyr::if_any(dplyr::all_of(roi_num_cols), is.na)) %>%
-            dplyr::distinct(Channel, MainModelVariableName) %>%
-            dplyr::arrange(Channel)
+            dplyr::distinct(Channel, MainModelVariableName, Geography) %>%
+            dplyr::arrange(Channel, Geography)
+          
           if (nrow(unmatched) > 0) {
-            msg_lines <- paste0(unmatched$Channel, " \u2192 ",
-                                unmatched$MainModelVariableName)
+            msg_lines <- paste0(unmatched$Channel,
+                                if ("Geography" %in% names(unmatched) &&
+                                    any(nzchar(unmatched$Geography %||% "")))
+                                  paste0(" / ", unmatched$Geography) else "",
+                                " -> ", unmatched$MainModelVariableName)
             showNotification(
-              tagList(icon("triangle-exclamation", class = "icon-ch-warn me-1"),
-                      tags$strong(paste0(nrow(unmatched), " ROI(s) not matched:")),
-                      tags$ul(class = "mt-1 ps-3 small",
-                              lapply(head(msg_lines, 5), tags$li),
-                              if (nrow(unmatched) > 5)
-                                tags$li(paste0("... and ", nrow(unmatched) - 5,
-                                               " more")))),
+              tagList(
+                tags$strong(paste0(nrow(unmatched), " ROI(s) not matched:")),
+                tags$ul(class = "mt-1 ps-3 small",
+                        lapply(head(msg_lines, 5), tags$li),
+                        if (nrow(unmatched) > 5)
+                          tags$li(paste0("... and ", nrow(unmatched) - 5, " more")))),
               type = "warning", duration = 15)
           }
+          
         }, error = function(e)
           showNotification(paste("ROI join error:", e$message),
                            type = "warning", duration = 6))
       }
+      
       act_df
     }
     

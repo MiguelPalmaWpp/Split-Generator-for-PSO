@@ -186,10 +186,14 @@ mod_channels_server <- function(id, data, media_index) {
     
     observeEvent(input$btn_enable_breaks, { breaks_enabled(TRUE) })
     
-    # ── Save All ──────────────────────────────────────────────────────────
+    # ── Save All — also persists current channel split order ──────────────
     observeEvent(input$btn_save_all, {
       if (!length(rv$channels)) {
         showNotification("No channels to save.", type = "warning"); return()
+      }
+      if (!is.null(rv$selected) && rv$selected %in% names(rv$channels)) {
+        rv$channels[[rv$selected]]$split_columns <-
+          input$splits_selected %||% c("VariableName")
       }
       for (nm in names(rv$channels)) dirty_channels[[nm]] <- FALSE
       showNotification(
@@ -362,6 +366,17 @@ mod_channels_server <- function(id, data, media_index) {
         )
       }
       
+      # Look up Channel from ROI file
+      rois   <- tryCatch(data()$channels_rois, error = \(e) NULL)
+      roi_ch <- if (!is.null(rois) &&
+                    all(c("MainModelVariableName", "Channel") %in% names(rois))) {
+        mv   <- cfg$model_variable %||% rv$selected %||% ""
+        rows <- rois[trimws(rois$MainModelVariableName) == trimws(mv),
+                     "Channel", drop = TRUE]
+        rows <- rows[!is.na(rows) & nzchar(trimws(rows))]
+        if (length(rows)) trimws(rows[1]) else NA_character_
+      } else NA_character_
+      
       info_title <- switch(cfg$source %||% "vof",
                            vof              = "Auto-configured from VOF",
                            keyword_fallback = "From MFF (keyword match)",
@@ -380,8 +395,8 @@ mod_channels_server <- function(id, data, media_index) {
               icon("circle-info", class = info_icon),
               tags$strong(info_title, class = "info-box-title"),
               tags$span("(read-only)", class = "section-subtitle")),
-          if (nzchar(cfg$media_channel %||% ""))
-            mk_info_row("Media Channel", cfg$media_channel),
+          if (!is.na(roi_ch))
+            mk_info_row("Channel", roi_ch),
           if (nzchar(cfg$sub_channel %||% ""))
             mk_info_row("Sub Channel", cfg$sub_channel),
           if (nzchar(cfg$effect %||% ""))

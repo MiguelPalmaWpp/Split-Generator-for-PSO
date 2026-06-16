@@ -1052,6 +1052,16 @@ flex-wrap: wrap;
 .stat-label  { font-size: 11px; color: #94a3b8; display: block; margin-top: 3px; }
 .stat-type   { font-size: 13px; font-weight: 600; color: #475569; display: block; }
 
+.badge-error {
+  background: #fdecea;
+  color: #842029;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 10px;
+}
+
+
 /*
 ═══════════════════════════════════════════════════════════════════════
 MOD_CHANNELS — UI Panel
@@ -1610,6 +1620,84 @@ border-radius: 8px !important; width: 100% !important; max-width: 400px !importa
 .icon-stat-blue  { color: #5B9BD5  !important; font-size: 11px !important; }
 .icon-stat-muted { color: #94a3b8 !important; font-size: 11px !important; }
 
+
+**CSS a agregar al final de `www/styles.css`:**```css
+/*
+═══════════════════════════════════════════════════════════════════════
+MODE TOGGLE — Segmented Control
+═══════════════════════════════════════════════════════════════════════
+*/
+.seg-ctrl-wrap {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 1.25rem;
+}
+
+.seg-ctrl {
+  position: relative;
+  display: inline-flex !important;
+  background: #f1f5f9 !important;
+  border-radius: 10px !important;
+  padding: 4px !important;
+  border: 1px solid #e2e8f0 !important;
+  min-width: 300px;
+  box-shadow: none !important;
+}
+
+.seg-pill {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 4px;
+  width: calc(50% - 4px);
+  background: #ffffff !important;
+  border-radius: 7px !important;
+  box-shadow: 0 1px 5px rgba(91, 155, 213, 0.20) !important;
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: none;
+  display: block;
+}
+
+.seg-ctrl.seg-update .seg-pill {
+  transform: translateX(100%);
+}
+
+.seg-btn {
+  position: relative !important;
+  z-index: 1;
+  flex: 1;
+  padding: 9px 20px !important;
+  border: none !important;
+  background: transparent !important;
+  cursor: pointer;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  color: #94a3b8 !important;
+  transition: color 0.2s ease;
+  white-space: nowrap;
+  text-align: center;
+  outline: none !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+  letter-spacing: 0.01em;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.seg-btn:hover {
+  color: #64748b !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.seg-btn-active {
+  color: #5B9BD5 !important;
+  font-weight: 600 !important;
+}
+
+.seg-btn-active:hover {
+  color: #5B9BD5 !important;
+}
 
 /*
 ═══════════════════════════════════════════════════════════════════════

@@ -83,11 +83,13 @@ mod_setup_ui <- function(id) {
         layout_columns(
           col_widths = c(4, 4, 4), class = "mb-3",
           mk_file_card("A", "Past Analytical Splits", ".csv .RData",
-                       fileInput(ns("file_past_analytical"),  NULL, accept = c(".csv", ".RData"))),
+                       fileInput(ns("file_past_analytical"),  NULL,
+                                 accept = c(".csv", ".RData"))),
           mk_file_card("B", "Past Side Model Mapping", ".csv",
                        fileInput(ns("file_past_side_mapping"), NULL, accept = ".csv")),
           mk_file_card("C", "MainVars Mapping",        ".xlsx .xls",
-                       fileInput(ns("file_mainvars_mapping"),  NULL, accept = c(".xlsx", ".xls")))
+                       fileInput(ns("file_mainvars_mapping"),  NULL,
+                                 accept = c(".xlsx", ".xls")))
         ),
         layout_columns(
           col_widths = c(4, 4, 4),
@@ -107,9 +109,6 @@ mod_setup_ui <- function(id) {
       card(
         card_header("Global Parameters"),
         uiOutput(ns("update_label_ui")),
-        
-        # Reporting Period — shown only in Model Build
-        # Hidden in Model Update (pills kept in DOM so input$period_preset is readable)
         conditionalPanel(
           condition = sprintf("input['%s'] != 'update'", ns("app_mode")),
           div(class = "mb-2",
@@ -120,8 +119,6 @@ mod_setup_ui <- function(id) {
                                             "All Period" = "all", "Custom" = "custom"),
                                selected = "last52", inline = TRUE)))
         ),
-        
-        # Model Update: Reporting Period is always All Period
         conditionalPanel(
           condition = sprintf("input['%s'] == 'update'", ns("app_mode")),
           div(class = "alert alert-info alert-sm p-2 mb-2",
@@ -130,7 +127,6 @@ mod_setup_ui <- function(id) {
               " All data in Main Data File is treated as focus period.",
               " Past data already carries the Before label from processing.")
         ),
-        
         uiOutput(ns("custom_dates_ui")),
         hr(),
         uiOutput(ns("cross_section_info")),
@@ -202,7 +198,6 @@ mod_setup_server <- function(id) {
       session$sendCustomMessage("setTabsDisabled", list(disabled = !all_ready))
     })
     
-    # ── Reset on mode change + force All Period in Update ──────────────
     observeEvent(input$app_mode, {
       rv$analytical_combined   <- NULL
       rv$side_mapping_nonfocus <- NULL
@@ -262,10 +257,12 @@ mod_setup_server <- function(id) {
           rv$analytical_rag <- rv$analytical %>%
             dplyr::distinct(dplyr::across(dplyr::any_of(c(rv$cross_cols, "Period"))))
         }, error = \(e) {
-          showNotification(paste("Schema inference warning:", e$message), type = "warning", duration = 6)
+          showNotification(paste("Schema inference warning:", e$message),
+                           type = "warning", duration = 6)
           rv$cross_cols <- auto_detect_cross_cols(rv$analytical)
         })
-        rv$analytical_combined <- NULL; rv$side_mapping_nonfocus <- NULL; rv$update_status <- "pending"
+        rv$analytical_combined <- NULL; rv$side_mapping_nonfocus <- NULL
+        rv$update_status       <- "pending"
         rm(df); gc(verbose = FALSE, full = TRUE)
         schema_msg <- if (!is.null(rv$schema_metadata))
           paste0(" | xs: ", paste(rv$schema_metadata$xs_dims, collapse = ", "),
@@ -273,9 +270,11 @@ mod_setup_server <- function(id) {
                    paste0(" | key: ", paste(rv$schema_metadata$useful_long, collapse = ", ")) else "")
         else ""
         showNotification(paste0("Analytical loaded - ",
-                                format(nrow(rv$analytical), big.mark = ","), " rows", schema_msg),
+                                format(nrow(rv$analytical), big.mark = ","),
+                                " rows", schema_msg),
                          type = "message", duration = 5)
-      }, error = \(e) showNotification(paste("Analytical error:", e$message), type = "error", duration = 15))
+      }, error = \(e) showNotification(paste("Analytical error:", e$message),
+                                       type = "error", duration = 15))
     })
     
     # ── Load VOF Metadata ──────────────────────────────────────────────
@@ -283,21 +282,27 @@ mod_setup_server <- function(id) {
       req(input$file_vof)
       tryCatch({
         vof_raw <- as.data.frame(data.table::fread(input$file_vof$datapath,
-                                                   data.table = FALSE, stringsAsFactors = FALSE,
+                                                   data.table = FALSE,
+                                                   stringsAsFactors = FALSE,
                                                    showProgress = FALSE))
-        req_fixed <- c("AnalyticalVariableName", "MainModelVariableName", "MinPeriod", "MaxPeriod")
-        miss_vof  <- setdiff(req_fixed, names(vof_raw))
+        req_fixed <- c("AnalyticalVariableName", "MainModelVariableName",
+                       "MinPeriod", "MaxPeriod")
+        miss_vof <- setdiff(req_fixed, names(vof_raw))
         if (!any(c("Geography", "Geographies") %in% names(vof_raw)))
           miss_vof <- c(miss_vof, "Geography (or Geographies)")
         if (length(miss_vof) > 0) {
-          showNotification(paste0("VOF missing required columns: ", paste(miss_vof, collapse = ", ")),
+          showNotification(paste0("VOF missing required columns: ",
+                                  paste(miss_vof, collapse = ", ")),
                            type = "error", duration = 15); return()
         }
         rv$vof_data <- vof_raw
-        showNotification(paste0("VOF loaded - ", format(nrow(vof_raw), big.mark = ","), " rows, ",
-                                dplyr::n_distinct(vof_raw$MainModelVariableName), " model variables"),
+        showNotification(paste0("VOF loaded - ", format(nrow(vof_raw), big.mark = ","),
+                                " rows, ",
+                                dplyr::n_distinct(vof_raw$MainModelVariableName),
+                                " model variables"),
                          type = "message", duration = 4)
-      }, error = \(e) showNotification(paste("VOF error:", e$message), type = "error", duration = 10))
+      }, error = \(e) showNotification(paste("VOF error:", e$message),
+                                       type = "error", duration = 10))
     })
     
     # ── Load ModelDetails ──────────────────────────────────────────────
@@ -345,32 +350,25 @@ mod_setup_server <- function(id) {
             data.table::fread(input$file_past_analytical$datapath,
                               data.table = FALSE, showProgress = FALSE)
           }
-          
-          # Parse Period only if it is not already a Date object
           if ("Period" %in% names(df) && !inherits(df[["Period"]], "Date")) {
-            df <- df %>%
-              dplyr::mutate(Period = tryCatch(
-                parse_period_robust(Period),
-                error = function(e) as.Date(as.character(Period))
-              ))
+            df <- df %>% dplyr::mutate(Period = tryCatch(
+              parse_period_robust(Period),
+              error = function(e) as.Date(as.character(Period))))
           }
-          
           rv$past_analytical_splits <- df
           rv$analytical_combined    <- NULL
           rv$side_mapping_nonfocus  <- NULL
           rv$update_status          <- "pending"
           rm(df); gc(verbose = FALSE, full = TRUE)
         })
-        showNotification(
-          paste0("Past Analytical Splits loaded - ",
-                 format(nrow(rv$past_analytical_splits), big.mark = ","),
-                 " rows, ",
-                 format(ncol(rv$past_analytical_splits), big.mark = ","),
-                 " columns"),
-          type = "message", duration = 4)
-      }, error = \(e) showNotification(
-        paste("Past Analytical error:", e$message),
-        type = "error", duration = 10))
+        showNotification(paste0("Past Analytical Splits loaded - ",
+                                format(nrow(rv$past_analytical_splits), big.mark = ","),
+                                " rows, ",
+                                format(ncol(rv$past_analytical_splits), big.mark = ","),
+                                " columns"),
+                         type = "message", duration = 4)
+      }, error = \(e) showNotification(paste("Past Analytical error:", e$message),
+                                       type = "error", duration = 10))
     })
     
     # ── Load Past Side Model Mapping ───────────────────────────────────
@@ -394,7 +392,7 @@ mod_setup_server <- function(id) {
                                        type = "error", duration = 10))
     })
     
-    # ── Load MainVars Mapping ──────────────────────────────────────────
+    # ── Load MainVars Mapping — auto-populate Update IDs (#1) ─────────
     observeEvent(input$file_mainvars_mapping, {
       req(input$file_mainvars_mapping)
       tryCatch({
@@ -403,10 +401,22 @@ mod_setup_server <- function(id) {
         rv$analytical_combined   <- NULL
         rv$side_mapping_nonfocus <- NULL
         rv$update_status         <- "pending"
-        showNotification(paste0("MainVars Mapping loaded - ",
-                                format(nrow(df), big.mark = ","), " rows, ",
-                                ncol(df), " columns: ", paste(names(df), collapse = ", ")),
-                         type = "message", duration = 5)
+        
+        # Auto-populate Update IDs from column names (#1)
+        col_names <- names(df)
+        if (length(col_names) >= 2) {
+          updateTextInput(session, "past_update_id",    value = col_names[1])
+          updateTextInput(session, "current_update_id", value = col_names[2])
+          showNotification(paste0("MainVars Mapping loaded — Update IDs auto-detected: ",
+                                  col_names[1], " (past) / ", col_names[2], " (current). ",
+                                  "Verify and adjust if needed."),
+                           type = "message", duration = 6)
+        } else {
+          showNotification(paste0("MainVars Mapping loaded - ",
+                                  format(nrow(df), big.mark = ","), " rows, ",
+                                  ncol(df), " columns: ", paste(col_names, collapse = ", ")),
+                           type = "message", duration = 5)
+        }
       }, error = \(e) showNotification(paste("MainVars Mapping error:", e$message),
                                        type = "error", duration = 10))
     })
@@ -455,6 +465,7 @@ mod_setup_server <- function(id) {
         }
         
         withProgress(message = "Processing Model Update...", value = 0, {
+          
           incProgress(0.15, detail = "Joining side mappings...")
           side_mapping_joined <- rv$past_side_mapping %>%
             dplyr::mutate(
@@ -476,7 +487,9 @@ mod_setup_server <- function(id) {
             rv$update_status <- "error"; upd_processing(FALSE); return()
           }
           
-          incProgress(0.15, detail = "Preparing ID columns...")
+          n_matched <- nrow(side_mapping_joined)
+          incProgress(0.15, detail = paste0("Found ", n_matched, " variables to rename..."))
+          
           cross_id <- c(rv$cross_cols %||% "Geography", "Period")
           id_cols  <- intersect(cross_id, names(rv$past_analytical_splits))
           if (!length(id_cols)) {
@@ -485,7 +498,6 @@ mod_setup_server <- function(id) {
             rv$update_status <- "error"; upd_processing(FALSE); return()
           }
           
-          incProgress(0.25, detail = "Renaming past splits...")
           splits_available <- intersect(side_mapping_joined$VariableSplit,
                                         names(rv$past_analytical_splits))
           if (!length(splits_available)) {
@@ -494,7 +506,24 @@ mod_setup_server <- function(id) {
             rv$update_status <- "error"; upd_processing(FALSE); return()
           }
           
-          # _Before [past] and _[past] both sum into _Before [current]
+          # Validation: check for duplicate split names with existing analytical (#2)
+          existing_split_cols <- setdiff(names(rv$analytical), id_cols)
+          new_split_names     <- unique(side_mapping_joined$NewSplitName)
+          split_conflicts     <- intersect(new_split_names, existing_split_cols)
+          if (length(split_conflicts) > 0) {
+            showNotification(
+              paste0(length(split_conflicts), " past split name(s) conflict with ",
+                     "existing analytical columns: ",
+                     paste(head(split_conflicts, 3), collapse = ", "),
+                     if (length(split_conflicts) > 3)
+                       paste0(" ... +", length(split_conflicts) - 3) else ""),
+              type = "warning", duration = 12)
+          }
+          
+          incProgress(0.25, detail = paste0("Renaming ", length(splits_available),
+                                            " past splits to Before ", current_lbl, "..."))
+          
+          # _Before [past] and _[past] sum into _Before [current]
           analytical_nonfocus <- rv$past_analytical_splits %>%
             dplyr::select(dplyr::all_of(c(id_cols, splits_available))) %>%
             tidyr::pivot_longer(cols = -dplyr::all_of(id_cols),
@@ -507,8 +536,28 @@ mod_setup_server <- function(id) {
                                values_from = Value,
                                values_fn   = sum)
           
-          incProgress(0.25, detail = "Joining with current analytical...")
-          id_cols_an <- intersect(id_cols, names(rv$analytical))
+          # Detect and resolve column conflicts before join (#4)
+          id_cols_an    <- intersect(id_cols, names(rv$analytical))
+          incoming_cols <- setdiff(names(analytical_nonfocus), id_cols_an)
+          col_conflicts <- intersect(setdiff(names(rv$analytical), id_cols_an), incoming_cols)
+          if (length(col_conflicts) > 0) {
+            showNotification(
+              paste0(length(col_conflicts), " column(s) already exist in Analytical ",
+                     "and will be skipped from past splits: ",
+                     paste(head(col_conflicts, 3), collapse = ", "),
+                     if (length(col_conflicts) > 3)
+                       paste0(" ... +", length(col_conflicts) - 3) else ""),
+              type = "warning", duration = 12)
+            # Current analytical takes priority — remove conflicting columns from nonfocus
+            analytical_nonfocus <- analytical_nonfocus %>%
+              dplyr::select(-dplyr::any_of(col_conflicts))
+          }
+          
+          n_nonfocus_cols <- ncol(analytical_nonfocus) - length(id_cols_an)
+          incProgress(0.25, detail = paste0("Joining ", nrow(analytical_nonfocus),
+                                            " rows x ", n_nonfocus_cols,
+                                            " non-focus columns..."))
+          
           rv$analytical_combined <- rv$analytical %>%
             dplyr::left_join(analytical_nonfocus, by = id_cols_an)
           
@@ -522,16 +571,20 @@ mod_setup_server <- function(id) {
           
           incProgress(0.05, detail = "Done!")
           rv$update_status <- "done"
-          showNotification(paste0("Model Update processed: ",
-                                  nrow(rv$side_mapping_nonfocus), " non-focus splits added (",
-                                  ncol(rv$analytical_combined) - ncol(rv$analytical), " new columns)."),
-                           type = "message", duration = 6)
+          showNotification(
+            paste0("Model Update processed: ",
+                   nrow(rv$side_mapping_nonfocus), " non-focus splits added (",
+                   ncol(rv$analytical_combined) - ncol(rv$analytical),
+                   " new columns)."),
+            type = "message", duration = 6)
         })
+        
       }, error = function(e) {
         rv$analytical_combined   <- NULL
         rv$side_mapping_nonfocus <- NULL
         rv$update_status         <- "error"
-        showNotification(paste("Model Update error:", e$message), type = "error", duration = 12)
+        showNotification(paste("Model Update error:", e$message),
+                         type = "error", duration = 12)
       })
       upd_processing(FALSE)
     })
@@ -562,10 +615,11 @@ mod_setup_server <- function(id) {
         return(div(class = "alert alert-success alert-sm p-2 mt-2",
                    div(class = "d-flex gap-3",
                        tags$span(icon("circle-check"),
-                                 paste0(" ", nrow(rv$side_mapping_nonfocus), " non-focus splits")),
+                                 paste0(" ", nrow(rv$side_mapping_nonfocus),
+                                        " non-focus splits")),
                        tags$span(icon("table-columns"),
-                                 paste0(" ", ncol(rv$analytical_combined) - ncol(rv$analytical),
-                                        " columns added")))))
+                                 paste0(" ", ncol(rv$analytical_combined) -
+                                          ncol(rv$analytical), " columns added")))))
       NULL
     })
     
@@ -589,7 +643,8 @@ mod_setup_server <- function(id) {
                                   mi$summary$from_fallback, " keyword)"),
                            type = "message", duration = 5)
         else
-          showNotification("Media Index built but 0 channels found.", type = "warning", duration = 8)
+          showNotification("Media Index built but 0 channels found.",
+                           type = "warning", duration = 8)
       }, error = function(e) {
         rv$media_index <- NULL
         showNotification(paste("Media Index error:", e$message), type = "error", duration = 10)
@@ -656,16 +711,13 @@ mod_setup_server <- function(id) {
     output$update_label_ui <- renderUI({
       mode   <- input$app_mode %||% "build"
       preset <- input$period_preset %||% "last52"
-      
       if (mode == "update") {
         textInput(ns("update_label"), "Update Label",
                   value       = isolate(input$update_label %||% ""),
                   placeholder = "e.g. Q22025")
       } else {
         if (preset == "all") return(NULL)
-        val <- switch(preset,
-                      last52 = "Last52w",
-                      last13 = "Last13w",
+        val <- switch(preset, last52 = "Last52w", last13 = "Last13w",
                       custom = isolate(input$update_label %||% "Last52w"))
         textInput(ns("update_label"), "Update Label", value = val)
       }
@@ -681,8 +733,10 @@ mod_setup_server <- function(id) {
       default_end <- if (!is.null(rv$dates_df)) max(rv$dates_df$Period) else Sys.Date()
       div(class = "mt-2",
           layout_columns(col_widths = c(6, 6),
-                         dateInput(ns("start_report_date"), "Start Date", value = default_start),
-                         dateInput(ns("end_report_date"),   "End Date",   value = default_end)))
+                         dateInput(ns("start_report_date"), "Start Date",
+                                   value = default_start),
+                         dateInput(ns("end_report_date"),   "End Date",
+                                   value = default_end)))
     })
     
     period_dates <- reactive({
@@ -726,7 +780,8 @@ mod_setup_server <- function(id) {
         checks[[key]] <- list(label = col, n_an = length(an_vals), n_main = length(mn_vals),
                               n_miss = length(missing), n_extra = length(extra),
                               sample_miss = head(missing, 3), sample_extra = head(extra, 3),
-                              status = if (length(missing) > 0) "red" else if (length(extra) > 0) "yellow" else "green")
+                              status = if (length(missing) > 0) "red"
+                              else if (length(extra) > 0) "yellow" else "green")
       }
       
       an_min <- min(df_an$Period, na.rm = TRUE); an_max <- max(df_an$Period, na.rm = TRUE)
@@ -774,7 +829,8 @@ mod_setup_server <- function(id) {
         an_sample = paste(format(head(an_periods, 3)), collapse = ", "),
         mn_sample = if (length(mn_in_range) > 0)
           paste(format(head(mn_in_range, 3)), collapse = ", ")
-        else if (length(mn_periods) > 0) paste(format(head(mn_periods, 3)), collapse = ", ")
+        else if (length(mn_periods) > 0)
+          paste(format(head(mn_periods, 3)), collapse = ", ")
         else "\u2014",
         status = pa_st, mode = mode)
       
@@ -792,7 +848,7 @@ mod_setup_server <- function(id) {
         list(status = if (an_day == mn_day) "green" else "red", an_day = an_day, mn_day = mn_day)
       })
       
-      vv <- df_main$VariableValue; na_vv <- sum(is.na(vv))
+      vv    <- df_main$VariableValue; na_vv <- sum(is.na(vv))
       checks$variable_value <- list(n_na = na_vv, n_total = length(vv),
                                     status = if (na_vv > 0) "red" else "green")
       
@@ -817,6 +873,7 @@ mod_setup_server <- function(id) {
       else if (all(all_s %in% c("green","na","pending"))) "green" else "pending"
       
       list(checks = checks, overall = overall, mode = mode)
+      
     }) %>% bindCache(
       nrow(rv$main_data)  %||% 0L,
       nrow(rv$analytical) %||% 0L,
@@ -838,14 +895,12 @@ mod_setup_server <- function(id) {
                   lapply(rv$cross_cols, function(col) tags$span(col, class = "badge-blue"))))
     })
     
-    # ── Suffix preview — mode-aware ────────────────────────────────────
     output$suffix_preview <- renderUI({
       mode   <- input$app_mode %||% "build"
       preset <- input$period_preset %||% "last52"
       lbl    <- input$update_label %||% "Last52w"
       
       if (mode == "update") {
-        # Model Update: no date split — all new data gets focus label
         tagList(
           tags$p(class = "text-muted small mb-2", "Column names based on Update Label:"),
           div(class = "suffix-box",
@@ -871,8 +926,10 @@ mod_setup_server <- function(id) {
                   tags$code(class = "code-tag-blue", paste0("_", lbl))),
               hr(class = "hr-sm"),
               div(tags$span("Time-break (auto-detected from VOF):", class = "preview-label"),
-                  tags$code(class = "code-tag d-block mb-1", paste0("_Before ", lbl, "|FirstTimeBreak")),
-                  tags$code(class = "code-tag d-block", paste0("_Before ", lbl, "|SecondTimeBreak")),
+                  tags$code(class = "code-tag d-block mb-1",
+                            paste0("_Before ", lbl, "|FirstTimeBreak")),
+                  tags$code(class = "code-tag d-block",
+                            paste0("_Before ", lbl, "|SecondTimeBreak")),
                   tags$p(class = "hint-text",
                          "Applied automatically when VOF has multiple entries."))))
       }
@@ -885,19 +942,25 @@ mod_setup_server <- function(id) {
       start <- dates$start; end <- dates$end
       d <- rv$dates_df; min_d <- min(d$Period); max_d <- max(d$Period)
       alerts <- list()
-      if (start <= min_d) alerts <- c(alerts, list(div(class = "alert alert-warning alert-sm p-2 mb-1",
-                                                       "Start Date is at or before model scope start.")))
-      if (start > max_d)  alerts <- c(alerts, list(div(class = "alert alert-danger alert-sm p-2 mb-1",
-                                                       "Start Date is outside the date spine.")))
-      if (end > max_d)    alerts <- c(alerts, list(div(class = "alert alert-warning alert-sm p-2 mb-1",
-                                                       paste0("End Date (", end, ") exceeds last period (", max_d, ")."))))
-      if (end < start)    alerts <- c(alerts, list(div(class = "alert alert-danger alert-sm p-2 mb-1",
-                                                       "End Date is before Start Date.")))
+      if (start <= min_d) alerts <- c(alerts, list(div(
+        class = "alert alert-warning alert-sm p-2 mb-1",
+        "Start Date is at or before model scope start.")))
+      if (start > max_d) alerts <- c(alerts, list(div(
+        class = "alert alert-danger alert-sm p-2 mb-1",
+        "Start Date is outside the date spine.")))
+      if (end > max_d) alerts <- c(alerts, list(div(
+        class = "alert alert-warning alert-sm p-2 mb-1",
+        paste0("End Date (", end, ") exceeds last period (", max_d, ")."))))
+      if (end < start) alerts <- c(alerts, list(div(
+        class = "alert alert-danger alert-sm p-2 mb-1",
+        "End Date is before Start Date.")))
       focus_n <- d %>% dplyr::filter(dplyr::between(Period, start, end)) %>% nrow()
       if (focus_n < 4 && focus_n > 0)
         alerts <- c(alerts, list(div(class = "alert alert-warning alert-sm p-2 mb-1",
-                                     paste0("Focus period has only ", focus_n, " week(s). Minimum: 4."))))
-      if (!length(alerts)) div(class = "alert alert-success alert-sm p-2", "Date parameters look good.")
+                                     paste0("Focus period has only ", focus_n,
+                                            " week(s). Minimum: 4."))))
+      if (!length(alerts)) div(class = "alert alert-success alert-sm p-2",
+                               "Date parameters look good.")
       else tagList(alerts)
     })
     
@@ -924,20 +987,18 @@ mod_setup_server <- function(id) {
         if ("red" %in% s) "red" else if ("yellow" %in% s) "yellow"
         else if ("green" %in% s) "green" else "na"
       }
-      
       mk_badge <- function(status, text = NULL) {
         label <- switch(status, green = "OK", yellow = "Warning", red = "Blocked",
                         pending = "Pending", "N/A")
         tags$td(text %||% label, class = paste("badge-td", paste0("badge-td-", status)))
       }
-      
       mk_pill <- function(n, type) {
         if (n == 0) return(NULL)
-        tags$span(switch(type, ok = paste(n, "passed"), warn = paste(n, "warning"), paste(n, "failed")),
+        tags$span(switch(type, ok = paste(n, "passed"), warn = paste(n, "warning"),
+                         paste(n, "failed")),
                   class = paste("val-pill", switch(type, ok = "val-pill-ok",
                                                    warn = "val-pill-warn", "val-pill-err")))
       }
-      
       mk_sep <- function(title, subtitle, pills = NULL) {
         tags$tr(class = "val-sep-row",
                 tags$td(colspan = "5",
@@ -962,7 +1023,8 @@ mod_setup_server <- function(id) {
                               green  = if (pa$n_common == 0)
                                 "No overlapping periods — Main Data File covers new focus period only. Expected in Model Update."
                               else paste0(pa$n_common, " overlapping period(s) found with Analytical."),
-                              yellow = paste0("Small period offset (+/- ", pa$max_offset, " days). Total Check will auto-align."),
+                              yellow = paste0("Small period offset (+/- ", pa$max_offset,
+                                              " days). Total Check will auto-align."),
                               red    = "No valid focus periods found. Verify Main Data File date range.", NULL)
           impl_cls <- switch(ts_status, green = "impl-text impl-ok",
                              yellow = "impl-text impl-warn", red = "impl-text impl-err", "impl-text")
@@ -976,15 +1038,18 @@ mod_setup_server <- function(id) {
                                red    = "Data File is missing periods required by the model.", NULL)
           period_msg <- switch(pa$status,
                                green  = if (pa$n_mn_extra > 0)
-                                 paste0(format(pa$n_mn_extra, big.mark = ","), " extra Data File periods become non-focus splits.")
+                                 paste0(format(pa$n_mn_extra, big.mark = ","),
+                                        " extra Data File periods become non-focus splits.")
                                else "All periods match exactly.",
-                               yellow = paste0("Small offset (+/-", pa$max_offset, " days) - Total Check will auto-align."),
+                               yellow = paste0("Small offset (+/-", pa$max_offset,
+                                               " days) - Total Check will auto-align."),
                                red    = paste0("Only ", pa$n_common, "/", pa$n_an,
                                                " periods found - activity splits will be empty."), NULL)
           weekday_msg <- if (!is.null(wd) && wd$status == "red")
             tags$div(class = "text-danger fw-semibold mt-1",
                      paste0("Day-of-week mismatch: Analytical uses ", wd$an_day,
-                            ", Data File uses ", wd$mn_day, " - period alignment will be unreliable."))
+                            ", Data File uses ", wd$mn_day,
+                            " - period alignment will be unreliable."))
           else NULL
           impl_cls <- switch(ts_status, green = "impl-text impl-ok",
                              yellow = "impl-text impl-warn", red = "impl-text impl-err", "impl-text")
@@ -1032,7 +1097,8 @@ mod_setup_server <- function(id) {
         res_a <- if (chk$status == "green")
           tags$span(if (critical) "No NAs" else "No empty", class = "text-success")
         else
-          tags$span(paste0(format(chk$n_na, big.mark = ","), if (critical) " NAs" else " empty"),
+          tags$span(paste0(format(chk$n_na, big.mark = ","),
+                           if (critical) " NAs" else " empty"),
                     class = if (critical) "text-danger fw-semibold" else "text-warning fw-semibold")
         res_b <- if (chk$n_na == 0)
           tags$span(paste0("All ", format(chk$n_total, big.mark = ","), " rows filled"),
@@ -1052,7 +1118,8 @@ mod_setup_server <- function(id) {
         tags$tr(tags$td(label, class = "td-val-bold"),
                 tags$td(res_a, class = "td-val"), tags$td(res_b, class = "td-val"),
                 tags$td(impl, class = "td-val"),
-                mk_badge(chk$status, if (chk$n_na == 0) "OK" else if (critical) "Blocked" else "Review"))
+                mk_badge(chk$status, if (chk$n_na == 0) "OK"
+                         else if (critical) "Blocked" else "Review"))
       }
       
       banner_conf <- if (mode == "update") {
@@ -1141,14 +1208,13 @@ mod_setup_server <- function(id) {
         preset <- input$period_preset %||% "last52"
         mode   <- input$app_mode %||% "build"
         dates  <- tryCatch(period_dates(), error = \(e) NULL)
-        list(
-          update_label      = if (preset == "all" && mode != "update") ""
-          else (input$update_label %||% "Last52w"),
-          start_report_date = if (!is.null(dates)) dates$start else NULL,
-          end_report_date   = if (!is.null(dates)) dates$end   else NULL,
-          cross_cols        = rv$cross_cols,
-          period_preset     = preset,
-          app_mode          = mode)
+        list(update_label      = if (preset == "all" && mode != "update") ""
+             else (input$update_label %||% "Last52w"),
+             start_report_date = if (!is.null(dates)) dates$start else NULL,
+             end_report_date   = if (!is.null(dates)) dates$end   else NULL,
+             cross_cols        = rv$cross_cols,
+             period_preset     = preset,
+             app_mode          = mode)
       }),
       media_index       = reactive(rv$media_index),
       schema_metadata   = reactive(rv$schema_metadata),

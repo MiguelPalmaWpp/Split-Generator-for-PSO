@@ -24,10 +24,12 @@ The Split Generator for PSO transforms raw media data files into structured acti
 ## Application Flow
 
 ```
-mermaid
-flowchart LR
-S([1 Setup]):::tab --> C([2 Channels]):::tab --> P([3 Process]):::tab --> E([4 Export]):::tab
-classDef tab fill:#5B9BD5,color:white,stroke:#4a87c0,rx:6
+┌─────────┐     ┌──────────┐     ┌─────────┐     ┌────────┐
+│ 1 Setup │────▶│2 Channels│────▶│3 Process│────▶│4 Export│
+└─────────┘     └──────────┘     └─────────┘     └────────┘
+Load files     Configure         Run             Download
+Validate       split order       channels        ZIP package
+Media Index    breaks/merges     Total Check     6 files
 ```
 
 ---
@@ -35,41 +37,24 @@ classDef tab fill:#5B9BD5,color:white,stroke:#4a87c0,rx:6
 ## Module Architecture
 
 ```
-mermaid
-flowchart TD
-subgraph SETUP["① Setup"]
-    direction TB
-    F1[Main Data File] --> MI[Media Index]
-    F2[Analytical Dataset] --> MI
-    F3[VOF Metadata] --> MI
-    F4[ModelDetails] --> MI
-    F5[ROIs by Channel] --> MI
-    MI --> DATA[(data)]
-    MI --> CFG[(config)]
-end
-
-subgraph CHANNELS["② Channels"]
-    direction TB
-    CH[Channel Editor\nSplit Order · Dimension Breaks\nMerge Config]
-end
-
-subgraph PROCESS["③ Process"]
-    direction TB
-    PC[process_channel\nActivity · Spend\nTotal Check · Merges]
-end
-
-subgraph EXPORT["④ Export"]
-    direction TB
-    EX[Build Export Package\n6 files → ZIP]
-end
-
-DATA --> CHANNELS
-DATA --> PROCESS
-CFG  --> PROCESS
-CHANNELS --> PROCESS
-PROCESS --> EXPORT
-DATA --> EXPORT
-CHANNELS --> EXPORT
+┌─────────────────────────────────────┐
+                       │              ① Setup                │
+Main Data File ────────┤                                     │
+Analytical Dataset ────┤──▶  Media Index ──▶  data()        │
+VOF Metadata ──────────┤                  └──▶  config()    │
+ModelDetails ──────────┤                                     │
+ROIs by Channel ────── ┘                                     │
+                       └──────────────┬──────────────────────┘
+                                      │ data() + config()
+            ┌─────────────────────────┼──────────────────────┐
+            ▼                         ▼                       ▼
+ ┌──────────────────┐    ┌─────────────────────┐   ┌────────────────┐
+ │   ② Channels     │    │     ③ Process        │   │   ④ Export     │
+ │                  │    │                     │   │                │
+ │  Split Order     │───▶│  process_channel()  │──▶│  Build ZIP     │
+ │  Breaks          │    │  Activity / Spend   │   │  6 output files│
+ │  Merges          │    │  Total Check        │   │                │
+ └──────────────────┘    └─────────────────────┘   └────────────────┘
 ```
 
 ---
@@ -77,25 +62,30 @@ CHANNELS --> EXPORT
 ## Model Build vs Model Update
 
 ```
-mermaid
-flowchart LR
-subgraph BUILD["Model Build"]
-    direction TB
-    b1[Main Data File] --> bp[process_channel]
-    b2[Analytical Dataset] --> bp
-    bp --> bR[_Label\n_Before Label]
-end
-
-subgraph UPDATE["Model Update"]
-    direction TB
-    u1[Past Analytical Splits] --> uc[Rename past splits\n_Before Q1 → _Before Q2\n_Q1 → _Before Q2]
-    u2[Past Side Mapping] --> uc
-    u3[MainVars Mapping] --> uc
-    uc --> ua[analytical_combined]
-    u4[Current Analytical] --> ua
-    ua --> up[process_channel\nfocus period only]
-    up --> uR[_Q2 new splits\n_Before Q2 past splits]
-end
+MODEL BUILD                          MODEL UPDATE
+───────────────────────────          ────────────────────────────────────────
+Main Data File                       Past Analytical Splits (.csv / .RData)
+Analytical Dataset         +         Past Side Model Mapping (.csv)
+VOF + ModelDetails + ROIs            MainVars Mapping (.xlsx)
+       │                                        │
+       ▼                                        ▼
+process_channel()               Rename past splits:
+       │                          _Before Q12025  ──▶  _Before Q22025
+       ▼                          _Q12025         ──▶  _Before Q22025
+Splits named:                   Sum duplicates into single _Before column
+  _Last52w     (focus)                    │
+  _Before Last52w (non-focus)             ▼
+                                analytical_combined
+                                  = current analytical
+                                  + past renamed splits
+                                          │
+                                          ▼
+                                process_channel() (focus period only)
+                                          │
+                                          ▼
+                                Splits named:
+                                  _Q22025         (new focus)
+                                  _Before Q22025  (past history)
 ```
 
 ---
@@ -103,21 +93,17 @@ end
 ## Export Package
 
 ```
-mermaid
-flowchart LR
-ZIP([ZIP Archive]) --> A
-ZIP --> B
-ZIP --> C
-ZIP --> D
-ZIP --> E
-ZIP --> F
-
-A["📄 analytical_splits_extended.csv\nIN/FIXED vars + all split columns"]
-B["💾 analytical_splits_extended.RData\nSame — AnalyticalDataset object\nfor next Model Update"]
-C["📊 side_model_mapping.csv\nSplit-to-model mapping\nwith PSO weight structure"]
-D["📈 seed_for_indices.csv\nActivity, spend and ROI\nwith SplitOrder per split"]
-E["🔗 split_composition.csv\nSplit lineage: components\nactivity and spend per period"]
-F["⚙️ channel_config.csv\nSplit order, merges,\nbreaks and segment overrides"]
+ZIP Archive
+├── 📄 analytical_splits_extended.csv   ← IN/FIXED vars + all split columns
+│                                          (same content as RData below)
+├── 💾 analytical_splits_extended.RData ← AnalyticalDataset object
+│                                          load as input for next Model Update
+├── 📊 side_model_mapping.csv           ← Split → model var mapping + PSO weights
+│                                          includes past non-focus splits in Update mode
+├── 📈 seed_for_indices.csv             ← Activity, spend, ROI, Channel, SplitOrder
+├── 🔗 split_composition.csv            ← Merged split lineage with activity %
+└── ⚙️  channel_config.csv              ← Channel config: SplitOrder, MediaChannel,
+                                           MinPeriod, MaxPeriod, Merges, Breaks
 ```
 
 ---
@@ -172,30 +158,26 @@ Split-Generator-for-PSO/
 | B | Past Side Model Mapping | `.csv` | `side_model_mapping` from previous update |
 | C | MainVars Mapping | `.xlsx` | Column names = Update IDs (e.g. Update14, Update15) |
 
-> The **Update IDs** are auto-detected from the column names of the MainVars Mapping file.
+> **Note:** Update IDs are auto-detected from the column names of the MainVars Mapping file.
 
 ---
 
 ## Column Naming Convention
 
-| Period | Column suffix |
-|---|---|
-| Non-focus (historical) | `_Before Last52w` |
-| Focus (reporting window) | `_Last52w` |
-| Model Update — past | `_Before Q22025` |
-| Model Update — new focus | `_Q22025` |
+| Mode | Period | Column suffix example |
+|---|---|---|
+| Model Build | Non-focus (historical) | `_Before Last52w` |
+| Model Build | Focus (reporting window) | `_Last52w` |
+| Model Update | Past history (all renamed) | `_Before Q22025` |
+| Model Update | New focus period | `_Q22025` |
 
 ```
-mermaid
-flowchart LR
-subgraph BUILD["Model Build"]
-    NF["_Before Label\n(non-focus)"]
-    F["_Label\n(focus)"]
-end
-subgraph UPDATE["Model Update"]
-    P["_Before NewLabel\n(past + renamed focus)"]
-    N["_NewLabel\n(new focus only)"]
-end
+Model Build                    Model Update
+─────────────────────────      ──────────────────────────────
+History  │  Focus              Past (renamed)  │  New Focus
+──────────┼──────────           ────────────────┼────────────
+_Before   │  _Label             _Before         │  _NewLabel
+Label    │                      NewLabel        │
 ```
 
 ---
@@ -205,19 +187,30 @@ end
 Each channel stores the following metadata:
 
 ```
-mermaid
-flowchart TD
-CH[Channel Config] --> A[model_variable]
-CH --> B[varname_include]
-CH --> C[activity_keyword\nspend_keyword]
-CH --> D[split_columns\nSplit Order]
-CH --> E[dimension_breaks\nCampaign · Outlet · Creative]
-CH --> F[saved_merges\nMerge history]
-CH --> G[min_period\nmax_period]
-CH --> H[segment_overrides\nGeo exclusions]
+Channel Config
+├── model_variable          → MainModelVariableName in analytical
+├── varname_include         → VarName filter (e.g. "Paid Social")
+├── activity_keyword        → e.g. "Impressions"
+├── spend_keyword           → e.g. "Spend"
+├── split_columns           → Ordered list: [VariableName, Campaign, Outlet]
+├── dimension_breaks        → Break Campaign by "_" into Campaign_A, Campaign_B
+├── saved_merges            → Merge history (auto-applied on re-process)
+├── min_period / max_period → Channel date scope
+└── segment_overrides       → Geography exclusions per segment
 ```
 
-The `channel_config.csv` export includes: `Channel`, `MediaChannel`, `Type`, `SplitOrder`, `MinPeriod`, `MaxPeriod`, `Name`, `Splits`.
+The `channel_config.csv` export columns:
+
+| Column | Description |
+|---|---|
+| `Channel` | Model variable name (key) |
+| `MediaChannel` | Channel category from ROIs file |
+| `Type` | Config / Merge / Break |
+| `SplitOrder` | Pipe-separated split dimensions |
+| `MinPeriod` | Channel start date |
+| `MaxPeriod` | Channel end date |
+| `Name` | Merge / Break name |
+| `Splits` | Merge components or break parts |
 
 ---
 
@@ -264,43 +257,43 @@ library(zip)
 ### Model Build — Quick Start
 
 ```
-mermaid
-sequenceDiagram
-actor User
-participant Setup
-participant Channels
-participant Process
-participant Export
+1. Setup     → Upload 5 required files
+Auto-build Media Index (VOF + Analytical + ModelDetails + ROIs)
 
-User->>Setup: Upload 5 required files
-Setup->>Setup: Auto-build Media Index
-User->>Channels: Configure split order per channel
-User->>Channels: Add dimension breaks / merges
-User->>Process: Process Selected or Process All
-Process->>Process: Total Check validation
-User->>Export: Download ZIP
+2. Channels  → For each channel:
+  • Set Split Order (drag-and-drop dimensions)
+  • Add Dimension Breaks if needed (Campaign, Outlet, Creative)
+  • Save Split Order
+
+3. Process   → Click "Process All"
+Review Activity / Spend / Total Check per channel
+Merge small splits if needed
+
+4. Export    → Click "Download All (ZIP)"
+Retrieve 6 output files
 ```
 
 ### Model Update — Quick Start
 
 ```
-mermaid
-sequenceDiagram
-actor User
-participant Setup
-participant Process
-participant Export
+1. Setup     → Toggle to "Model Update"
+Upload 5 base files (same as Model Build)
+Upload: Past Analytical Splits + Past Side Mapping + MainVars Mapping
+Update IDs are auto-detected from MainVars column names
+Set Past Label (e.g. Q12025) — Current Label from Update Label field
 
-User->>Setup: Upload 5 base files
-User->>Setup: Upload Past Analytical + Past Side Mapping + MainVars Mapping
-Setup->>Setup: Auto-detect Update IDs from MainVars columns
-User->>Setup: Set Past Label (e.g. Q12025)
-Setup->>Setup: Rename _Q12025 → _Before Q22025
-Setup->>Setup: Rename _Before Q12025 → _Before Q22025
-Setup->>Setup: Sum duplicates → single Before column
-Setup->>Setup: analytical_combined ready
-User->>Process: Process new focus period channels
-User->>Export: Download ZIP (includes past + new splits)
+Processing runs automatically:
+  _Q12025         → _Before Q22025  (focus becomes non-focus)
+  _Before Q12025  → _Before Q22025  (non-focus stays non-focus)
+  Duplicates      → summed into single _Before column
+
+2. Channels  → Configure split order for new focus channels
+
+3. Process   → Process new focus period channels only
+
+4. Export    → Download ZIP
+analytical_splits_extended includes both past and new splits
+analytical_splits_extended.RData ready for next Model Update
 ```
 
 ---
@@ -309,21 +302,22 @@ User->>Export: Download ZIP (includes past + new splits)
 
 | File | Content | Used for |
 |---|---|---|
-| `analytical_splits_extended.csv` | IN/FIXED model vars + all split columns | Next Model Update input (CSV) |
-| `analytical_splits_extended.RData` | `AnalyticalDataset` object | Next Model Update input (RData) |
-| `side_model_mapping.csv` | Split → MainModelVariableName mapping with PSO weights | PSO engine input |
-| `seed_for_indices.csv` | Activity, spend, ROI, Channel, SplitOrder | Index seeding |
-| `split_composition.csv` | Merged split lineage with activity % | QA and documentation |
-| `channel_config.csv` | Full channel configuration | Config reload / audit |
+| `analytical_splits_extended.csv` | IN/FIXED model vars + all split columns (past + new) | Next Model Update input |
+| `analytical_splits_extended.RData` | `AnalyticalDataset` object — same content as CSV | Next Model Update input |
+| `side_model_mapping.csv` | Split → MainModelVariableName + PSO weights (past + new) | PSO engine input |
+| `seed_for_indices.csv` | Activity, spend, ROI, Channel, SplitOrder per split | Index seeding |
+| `split_composition.csv` | Merge lineage: components, activity %, spend per period | QA and documentation |
+| `channel_config.csv` | Full channel config: splits, merges, breaks, dates | Config reload / audit |
 
 ---
 
 ## Architecture Notes
 
-- **Tab gating**: Tabs 2–4 are locked until all 5 required files are uploaded. In Model Update mode, tabs remain locked until `analytical_combined` is successfully generated.
-- **Reactivity**: `channel_summary` in Export is cached by `names(channels())` + `names(results())` to detect newly added unprocessed channels.
-- **Performance**: Batch processing (`Process All`) suppresses intermediate UI triggers and runs a single GC at the end.
-- **Model Update processing**: Uses `tidyr::pivot_wider(values_fn = sum)` to correctly collapse `_Before Q12025` and `_Q12025` into a single `_Before Q22025` column.
+- **Tab gating**: Tabs 2–4 locked until all 5 required files uploaded. In Model Update mode, also locked until `analytical_combined` is generated.
+- **Cache invalidation**: `channel_summary` keyed on both `names(channels())` and `names(results())` — newly added channels trigger re-evaluation immediately.
+- **Batch performance**: `Process All` suppresses intermediate UI triggers and runs a single GC at completion.
+- **Model Update merge logic**: `tidyr::pivot_wider(values_fn = sum)` collapses `_Before Q12025` and `_Q12025` into a single `_Before Q22025` column automatically.
+- **ROI file formats**: Supports both national (no Geography column) and geo-specific (Geography column) ROI files. Lookup priority: geo match → sourced variable prefix → national fallback.
 
 ---
 
@@ -333,4 +327,3 @@ User->>Export: Download ZIP (includes past + new splits)
 
 Maintained by [@MiguelPalmaWpp](https://github.com/MiguelPalmaWpp)
 ```
-`

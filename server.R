@@ -30,10 +30,10 @@ server <- function(input, output, session) {
     clean_results = process_module$clean_results,
     data          = setup_module$data,
     config        = setup_module$config,
-    channels      = channels_module$channels
+    channels      = channels_module$channels,
+    process_qa    = process_module$qa_status
   )
-  
-  
+
   # ── App ready notification ────────────────────────────────────────────
   session$onFlushed(function() {
     showNotification(

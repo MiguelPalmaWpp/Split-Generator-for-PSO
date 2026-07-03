@@ -166,16 +166,44 @@ apply_single_merge <- function(res, merge_entry, cfg) {
   view_filter     <- merge_entry$view %||% "focus"
   act_kw          <- cfg$activity_keyword %||% "Impressions"
   spend_kw        <- cfg$spend_keyword    %||% "Spend"
+
+  normalize_cost_diagnoses <- function(df) {
+    needed <- list(
+      VariableSplit = character(),
+      total_spend = numeric(),
+      pct_total_spend = numeric(),
+      max_index = numeric(),
+      max = numeric(),
+      max_no_outlier = numeric(),
+      num_weeks_spend = numeric(),
+      min_consecutive_weeks = numeric(),
+      sd = numeric(),
+      min = numeric(),
+      quartile_1 = numeric(),
+      median = numeric(),
+      quartile_3 = numeric(),
+      period = character(),
+      seg = integer(),
+      model_var = character()
+    )
+    if (is.null(df)) df <- tibble::tibble()
+    df <- tibble::as_tibble(df)
+    n <- nrow(df)
+    for (nm in names(needed)) {
+      if (!nm %in% names(df)) {
+        prototype <- needed[[nm]]
+        df[[nm]] <- if (n == 0) prototype else rep(NA, n)
+      }
+    }
+    df
+  }
   
   # Guard: ensure diagnostic tibbles have VariableSplit column
   if (is.null(res$act_diagnoses) ||
       !"VariableSplit" %in% names(res$act_diagnoses))
     res$act_diagnoses <- tibble::tibble(
       VariableSplit = character(), period = character())
-  if (is.null(res$cost_diagnoses) ||
-      !"VariableSplit" %in% names(res$cost_diagnoses))
-    res$cost_diagnoses <- tibble::tibble(
-      VariableSplit = character(), period = character())
+  res$cost_diagnoses <- normalize_cost_diagnoses(res$cost_diagnoses)
   if (is.null(res$activity_spend) ||
       !"VariableSplit" %in% names(res$activity_spend))
     res$activity_spend <- tibble::tibble(
@@ -364,6 +392,7 @@ apply_single_merge <- function(res, merge_entry, cfg) {
       }
     }
   }, error = \(e) res$cost_diagnoses)
+  new_cost_diag <- normalize_cost_diagnoses(new_cost_diag)
   
   list(rag            = new_rag,
        cross_cols     = res$cross_cols,

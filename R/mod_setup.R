@@ -5,13 +5,15 @@
 mod_setup_ui <- function(id) {
   ns <- NS(id)
   
-  mk_file_card <- function(num, title, formats, input_ui) {
+  mk_file_card <- function(num, title, formats, input_ui, kind = NULL) {
     div(class = "file-card",
         div(class = "file-card-header",
             tags$span(num,   class = "file-card-num"),
             tags$span(title, class = "file-card-title")),
         tags$span(formats, class = "file-card-formats"),
-        div(class = "mt-auto", input_ui))
+        div(class = "mt-auto",
+            input_ui,
+            if (!is.null(kind)) uiOutput(ns(paste0(kind, "_file_status")))))
   }
   
   tagList(
@@ -50,21 +52,38 @@ mod_setup_ui <- function(id) {
     card(
       class = "setup-files-card", fill = FALSE,
       card_header("Data Files"),
+      div(
+        class = "batch-file-card-wrap mb-3",
+        mk_file_card("All", "Base Files", ".csv .zip .RData .xlsx .xls",
+                     div(class = "batch-file-input",
+                         fileInput(
+                           ns("file_base_bundle"),
+                           NULL,
+                           accept = c(".csv", ".zip", ".RData", ".xlsx", ".xls"),
+                           multiple = TRUE,
+                           placeholder = "Select files"
+                         )))
+      ),
       layout_columns(
         col_widths = c(4, 4, 4), class = "mb-3",
         mk_file_card("1", "Main Data File",    ".csv .zip",
-                     fileInput(ns("file_main"),       NULL, accept = c(".csv", ".zip"))),
+                     fileInput(ns("file_main"),       NULL, accept = c(".csv", ".zip")),
+                     kind = "main"),
         mk_file_card("2", "Analytical Dataset", ".RData",
-                     fileInput(ns("file_analytical"), NULL, accept = ".RData")),
+                     fileInput(ns("file_analytical"), NULL, accept = ".RData"),
+                     kind = "analytical"),
         mk_file_card("3", "VOF Metadata",       ".csv",
-                     fileInput(ns("file_vof"),        NULL, accept = ".csv"))
+                     fileInput(ns("file_vof"),        NULL, accept = ".csv"),
+                     kind = "vof")
       ),
       layout_columns(
         col_widths = c(4, 4, 4),
         mk_file_card("4", "ModelDetails",    ".csv",
-                     fileInput(ns("file_details"), NULL, accept = ".csv")),
+                     fileInput(ns("file_details"), NULL, accept = ".csv"),
+                     kind = "details"),
         mk_file_card("5", "ROIs by Channel", ".csv .xlsx",
-                     fileInput(ns("file_rois"),    NULL, accept = c(".csv", ".xlsx"))),
+                     fileInput(ns("file_rois"),    NULL, accept = c(".csv", ".xlsx")),
+                     kind = "rois"),
         div()
       )
     ),
@@ -142,6 +161,7 @@ mod_setup_ui <- function(id) {
     
     card(class = "setup-comparison-card", full_screen = TRUE,
          card_header("File Validation"),
+         uiOutput(ns("validation_summary")),
          uiOutput(ns("file_comparison")))
   )
 }
@@ -169,11 +189,13 @@ mod_setup_server <- function(id) {
       mainvars_mapping       = NULL,
       analytical_combined    = NULL,
       side_mapping_nonfocus  = NULL,
-      update_status          = "pending"
+      update_status          = "pending",
+      file_meta              = list()
     )
     
     mi_building    <- reactiveVal(FALSE)
     upd_processing <- reactiveVal(FALSE)
+    build_period_preset <- reactiveVal("last52")
     
     validate_required_cols <- function(df, label) {
       missing <- setdiff(REQUIRED_COLS, names(df))
@@ -184,6 +206,296 @@ mod_setup_server <- function(id) {
         return(FALSE)
       }
       TRUE
+    }
+
+    read_csv_header <- function(path, nrows = 5) {
+      data.table::fread(path, nrows = nrows, data.table = FALSE,
+                        stringsAsFactors = FALSE, showProgress = FALSE)
+    }
+
+    read_first_rdata_object <- function(path) {
+      e <- new.env()
+      load(path, envir = e)
+      get(ls(e)[1], envir = e)
+    }
+
+    reset_update_outputs <- function() {
+      rv$analytical_combined   <- NULL
+      rv$side_mapping_nonfocus <- NULL
+      rv$update_status         <- "pending"
+    }
+
+    base_file_kinds <- c("main", "analytical", "vof", "details", "rois")
+
+    base_file_input_ids <- c(
+      main       = "file_main",
+      analytical = "file_analytical",
+      vof        = "file_vof",
+      details    = "file_details",
+      rois       = "file_rois"
+    )
+
+    format_file_size <- function(bytes) {
+      if (is.null(bytes) || is.na(bytes)) return("size unknown")
+      if (bytes >= 1024^2)
+        return(paste0(round(bytes / 1024^2, 1), " MB"))
+      if (bytes >= 1024)
+        return(paste0(round(bytes / 1024, 1), " KB"))
+      paste0(bytes, " B")
+    }
+
+    set_file_meta <- function(kind, file_row, rows = NULL, cols = NULL,
+                              source = "manual") {
+      rv$media_index       <- NULL
+      rv$validation_status <- "pending"
+      rv$file_meta[[kind]] <- list(
+        name      = file_row$name,
+        size      = file_row$size,
+        rows      = rows,
+        cols      = cols,
+        loaded_at = format(Sys.time(), "%Y-%m-%d %H:%M"),
+        source    = source
+      )
+    }
+
+    clear_file_meta <- function(kind) {
+      meta <- rv$file_meta
+      meta[[kind]] <- NULL
+      rv$file_meta <- meta
+    }
+
+    render_loaded_file_status <- function(kind) {
+      meta <- rv$file_meta[[kind]]
+      if (is.null(meta)) {
+        return(div(class = "file-card-empty", "No file loaded"))
+      }
+
+      dims <- c(
+        if (!is.null(meta$rows)) paste0(format(meta$rows, big.mark = ","), " rows"),
+        if (!is.null(meta$cols)) paste0(format(meta$cols, big.mark = ","), " cols")
+      )
+      detail <- paste(c(
+        format_file_size(meta$size),
+        dims,
+        paste0("via ", meta$source),
+        meta$loaded_at
+      ), collapse = " | ")
+
+      div(
+        class = "file-card-loaded",
+        icon("circle-check", class = "file-card-loaded-icon"),
+        div(
+          class = "file-card-file-text",
+          div(class = "file-card-file-name", title = meta$name, meta$name),
+          div(class = "file-card-file-meta", detail)
+        ),
+        tags$button(
+          type = "button",
+          class = "file-card-remove",
+          title = "Remove file",
+          onclick = sprintf(
+            "Shiny.setInputValue('%s','%s',{priority:'event'});",
+            ns("remove_base_file"), kind
+          ),
+          icon("xmark")
+        )
+      )
+    }
+
+    reset_file_input <- function(input_id) {
+      session$sendCustomMessage("resetFileInput", list(id = ns(input_id)))
+    }
+
+    clear_base_file <- function(kind) {
+      switch(kind,
+             main = {
+               rv$main_data <- NULL
+             },
+             analytical = {
+               rv$analytical       <- NULL
+               rv$dates_df         <- NULL
+               rv$analytical_rag   <- NULL
+               rv$cross_cols       <- NULL
+               rv$schema_metadata  <- NULL
+             },
+             vof = {
+               rv$vof_data <- NULL
+             },
+             details = {
+               rv$details <- NULL
+             },
+             rois = {
+               rv$channels_rois <- NULL
+             },
+             return(FALSE)
+      )
+
+      rv$media_index       <- NULL
+      rv$validation_status <- "pending"
+      reset_update_outputs()
+      clear_file_meta(kind)
+      reset_file_input(base_file_input_ids[[kind]])
+      reset_file_input("file_base_bundle")
+      TRUE
+    }
+
+    load_main_base <- function(file_row, preloaded = NULL, source = "manual") {
+      ext <- tools::file_ext(file_row$name)
+      df <- preloaded %||% read_main_data(file_row$datapath, ext)
+      if (!validate_required_cols(df, "Main data file")) return(FALSE)
+      rv$main_data <- df
+      set_file_meta("main", file_row, nrow(rv$main_data), ncol(rv$main_data), source)
+      showNotification(paste0("Main Data File loaded - ",
+                              format(nrow(rv$main_data), big.mark = ","),
+                              " rows"),
+                       type = "message", duration = 4)
+      TRUE
+    }
+
+    load_analytical_base <- function(file_row, preloaded = NULL, source = "manual") {
+      df <- preloaded %||% read_first_rdata_object(file_row$datapath)
+      df <- df[, !duplicated(names(df), fromLast = TRUE)]
+      if ("Period" %in% names(df))
+        df <- df %>% dplyr::mutate(Period = parse_period_robust(Period))
+      rv$analytical <- tibble::as_tibble(df) %>% dplyr::ungroup()
+      rv$dates_df   <- rv$analytical %>% dplyr::distinct(Period) %>% dplyr::arrange(Period)
+      tryCatch({
+        sch                <- infer_schema(rv$analytical)
+        rv$schema_metadata <- build_schema_metadata(rv$analytical, sch)
+        rv$cross_cols <- if (length(rv$schema_metadata$xs_dims) > 0)
+          rv$schema_metadata$xs_dims else auto_detect_cross_cols(rv$analytical)
+        rv$analytical_rag <- rv$analytical %>%
+          dplyr::distinct(dplyr::across(dplyr::any_of(c(rv$cross_cols, "Period"))))
+      }, error = \(e) {
+        showNotification(paste("Schema inference warning:", e$message),
+                         type = "warning", duration = 6)
+        rv$cross_cols <- auto_detect_cross_cols(rv$analytical)
+      })
+      reset_update_outputs()
+      set_file_meta("analytical", file_row, nrow(rv$analytical), ncol(rv$analytical), source)
+      showNotification(paste0("Analytical loaded - ",
+                              format(nrow(rv$analytical), big.mark = ","),
+                              " rows"),
+                       type = "message", duration = 5)
+      TRUE
+    }
+
+    load_vof_base <- function(file_row, preloaded = NULL, source = "manual") {
+      vof_raw <- preloaded %||%
+        as.data.frame(data.table::fread(file_row$datapath, data.table = FALSE,
+                                        stringsAsFactors = FALSE,
+                                        showProgress = FALSE))
+      req_fixed <- c("AnalyticalVariableName", "MainModelVariableName",
+                     "MinPeriod", "MaxPeriod")
+      miss_vof <- setdiff(req_fixed, names(vof_raw))
+      if (!any(c("Geography", "Geographies") %in% names(vof_raw)))
+        miss_vof <- c(miss_vof, "Geography (or Geographies)")
+      if (length(miss_vof) > 0) {
+        showNotification(paste0("VOF missing required columns: ",
+                                paste(miss_vof, collapse = ", ")),
+                         type = "error", duration = 15)
+        return(FALSE)
+      }
+      rv$vof_data <- vof_raw
+      set_file_meta("vof", file_row, nrow(rv$vof_data), ncol(rv$vof_data), source)
+      showNotification(paste0("VOF loaded - ", format(nrow(vof_raw), big.mark = ","),
+                              " rows"),
+                       type = "message", duration = 4)
+      TRUE
+    }
+
+    load_details_base <- function(file_row, preloaded = NULL, source = "manual") {
+      details_raw <- preloaded %||%
+        data.table::fread(file_row$datapath, data.table = FALSE,
+                          showProgress = FALSE)
+      if (!all(c("Type", "VariableName") %in% names(details_raw))) {
+        showNotification("ModelDetails missing Type or VariableName.",
+                         type = "error", duration = 10)
+        return(FALSE)
+      }
+      rv$details <- details_raw %>%
+        dplyr::filter(!stringr::str_detect(stringr::str_to_lower(trimws(Type)), "none"))
+      set_file_meta("details", file_row, nrow(rv$details), ncol(rv$details), source)
+      n_in <- sum(stringr::str_detect(stringr::str_to_lower(trimws(rv$details$Type)),
+                                      "\\b(in|fixed)\\b"), na.rm = TRUE)
+      showNotification(paste0("ModelDetails loaded - ", n_in,
+                              " Type='IN'/'FIXED' variables"),
+                       type = "message", duration = 4)
+      TRUE
+    }
+
+    load_rois_base <- function(file_row, preloaded = NULL, source = "manual") {
+      ext <- tolower(tools::file_ext(file_row$name))
+      rv$channels_rois <- preloaded %||% {
+        if (ext %in% c("xlsx", "xls"))
+          readxl::read_excel(file_row$datapath)
+        else
+          data.table::fread(file_row$datapath, data.table = FALSE, showProgress = FALSE)
+      }
+      set_file_meta("rois", file_row, nrow(rv$channels_rois), ncol(rv$channels_rois), source)
+      showNotification(paste0("ROIs loaded - ", nrow(rv$channels_rois), " rows"),
+                       type = "message", duration = 4)
+      TRUE
+    }
+
+    detect_base_file <- function(file_row) {
+      ext <- tolower(tools::file_ext(file_row$name))
+      nm  <- stringr::str_to_lower(file_row$name)
+
+      if (ext == "zip") {
+        df <- read_main_data(file_row$datapath, ext)
+        return(list(kind = "main", data = df))
+      }
+
+      if (ext == "rdata") {
+        obj <- read_first_rdata_object(file_row$datapath)
+        if (is.data.frame(obj) && "Period" %in% names(obj))
+          return(list(kind = "analytical", data = obj))
+        return(list(kind = NA_character_, data = NULL))
+      }
+
+      if (ext %in% c("xlsx", "xls")) {
+        df <- readxl::read_excel(file_row$datapath, n_max = 5)
+        if ("MainModelVariableName" %in% names(df))
+          return(list(kind = "rois", data = NULL))
+        return(list(kind = NA_character_, data = NULL))
+      }
+
+      if (ext == "csv") {
+        hdr <- read_csv_header(file_row$datapath, nrows = 5)
+        cols <- names(hdr)
+        if (all(REQUIRED_COLS %in% cols))
+          return(list(kind = "main", data = NULL))
+        if (all(c("AnalyticalVariableName", "MainModelVariableName",
+                  "MinPeriod", "MaxPeriod") %in% cols) &&
+            any(c("Geography", "Geographies") %in% cols))
+          return(list(kind = "vof", data = NULL))
+        if (all(c("Type", "VariableName") %in% cols) ||
+            stringr::str_detect(nm, "model.?details"))
+          return(list(kind = "details", data = NULL))
+        if ("MainModelVariableName" %in% cols ||
+            stringr::str_detect(nm, "roi"))
+          return(list(kind = "rois", data = NULL))
+      }
+
+      list(kind = NA_character_, data = NULL)
+    }
+
+    load_base_by_kind <- function(kind, file_row, preloaded = NULL, source = "manual") {
+      switch(kind,
+             main       = load_main_base(file_row, preloaded, source),
+             analytical = load_analytical_base(file_row, preloaded, source),
+             vof        = load_vof_base(file_row, preloaded, source),
+             details    = load_details_base(file_row, preloaded, source),
+             rois       = load_rois_base(file_row, preloaded, source),
+             FALSE)
+    }
+
+    for (kind in base_file_kinds) {
+      local({
+        k <- kind
+        output[[paste0(k, "_file_status")]] <- renderUI(render_loaded_file_status(k))
+      })
     }
     
     # ── Tab gating ─────────────────────────────────────────────────────
@@ -198,13 +510,96 @@ mod_setup_server <- function(id) {
       session$sendCustomMessage("setTabsDisabled", list(disabled = !all_ready))
     })
     
+    observeEvent(input$period_preset, {
+      if (!isTRUE((input$app_mode %||% "build") == "update")) {
+        build_period_preset(input$period_preset %||% "last52")
+      }
+    }, ignoreNULL = TRUE)
+
     observeEvent(input$app_mode, {
       rv$analytical_combined   <- NULL
       rv$side_mapping_nonfocus <- NULL
       rv$update_status         <- "pending"
-      if (isTRUE(input$app_mode == "update"))
+
+      if (isTRUE(input$app_mode == "update")) {
+        build_period_preset(input$period_preset %||% build_period_preset())
         updateRadioButtons(session, "period_preset", selected = "all")
+      } else {
+        updateRadioButtons(session, "period_preset", selected = build_period_preset())
+      }
     }, ignoreNULL = TRUE)
+
+    observeEvent(input$file_base_bundle, {
+      req(input$file_base_bundle)
+      files <- input$file_base_bundle
+      expected <- c("main", "analytical", "vof", "details", "rois")
+      labels <- c(main = "Main Data File", analytical = "Analytical Dataset",
+                  vof = "VOF Metadata", details = "ModelDetails",
+                  rois = "ROIs by Channel")
+      detected <- list()
+      skipped <- character(0)
+
+      withProgress(message = "Detecting base files...", value = 0, {
+        for (i in seq_len(nrow(files))) {
+          file_row <- files[i, , drop = FALSE]
+          incProgress(0.05, detail = paste("Inspecting", file_row$name))
+          det <- tryCatch(detect_base_file(file_row), error = function(e) {
+            skipped <<- c(skipped, paste0(file_row$name, " (", e$message, ")"))
+            list(kind = NA_character_, data = NULL)
+          })
+
+          if (is.na(det$kind) || !det$kind %in% expected) {
+            skipped <- c(skipped, paste0(file_row$name, " (not recognized)"))
+            next
+          }
+          if (!is.null(detected[[det$kind]])) {
+            skipped <- c(skipped, paste0(file_row$name, " (duplicate ",
+                                         labels[[det$kind]], ")"))
+            next
+          }
+          detected[[det$kind]] <- list(file = file_row, data = det$data)
+        }
+
+        loaded <- character(0)
+        for (kind in expected) {
+          item <- detected[[kind]]
+          if (is.null(item)) next
+          incProgress(0.10, detail = paste("Loading", labels[[kind]]))
+          ok <- tryCatch(load_base_by_kind(kind, item$file, item$data, source = "batch"),
+                         error = function(e) {
+                           showNotification(paste(labels[[kind]], "error:", e$message),
+                                            type = "error", duration = 10)
+                           FALSE
+                         })
+          if (isTRUE(ok)) loaded <- c(loaded, labels[[kind]])
+        }
+
+        missing <- labels[setdiff(expected, names(detected))]
+        if (length(loaded) > 0) {
+          showNotification(paste0("Batch upload loaded: ",
+                                  paste(loaded, collapse = ", ")),
+                           type = "message", duration = 6)
+        }
+        if (length(missing) > 0) {
+          showNotification(paste0("Batch upload missing: ",
+                                  paste(unname(missing), collapse = ", ")),
+                           type = "warning", duration = 8)
+        }
+        if (length(skipped) > 0) {
+          showNotification(paste0("Skipped: ", paste(skipped, collapse = "; ")),
+                           type = "warning", duration = 10)
+        }
+      })
+    }, ignoreInit = TRUE)
+
+    observeEvent(input$remove_base_file, {
+      kind <- input$remove_base_file
+      req(kind %in% base_file_kinds)
+      if (isTRUE(clear_base_file(kind))) {
+        showNotification("File removed. Upload it again to replace it.",
+                         type = "message", duration = 3)
+      }
+    }, ignoreInit = TRUE)
     
     # ── Load Main Data File ────────────────────────────────────────────
     observeEvent(input$file_main, {
@@ -214,19 +609,27 @@ mod_setup_server <- function(id) {
       withProgress(message = paste0("Loading Main Data File (", size, " MB)..."), value = 0, {
         incProgress(0.05, detail = "Checking columns...")
         tryCatch({
-          header_check <- data.table::fread(input$file_main$datapath, nrows = 5,
-                                            data.table = FALSE, showProgress = FALSE)
+          df_zip <- NULL
+          header_check <- if (tolower(ext) == "zip") {
+            df_zip <- read_main_data(input$file_main$datapath, ext)
+            utils::head(df_zip, 5)
+          } else {
+            data.table::fread(input$file_main$datapath, nrows = 5,
+                              data.table = FALSE, showProgress = FALSE)
+          }
           missing <- setdiff(REQUIRED_COLS, names(header_check))
           if (length(missing) > 0) {
             showNotification(paste0("Missing columns: ", paste(missing, collapse = ", ")),
                              type = "error", duration = 15); return()
           }
           incProgress(0.10, detail = "Reading file...")
-          df <- read_main_data(input$file_main$datapath, ext)
+          df <- df_zip %||% read_main_data(input$file_main$datapath, ext)
           incProgress(0.70, detail = "Validating...")
           if (!validate_required_cols(df, "Main data file")) return()
           incProgress(0.10, detail = "Storing...")
           rv$main_data <- df
+          set_file_meta("main", input$file_main,
+                        nrow(rv$main_data), ncol(rv$main_data), "manual")
           rm(df); gc(verbose = FALSE, full = TRUE)
           incProgress(0.05, detail = "Done!")
           showNotification(paste0("Main Data File loaded - ",
@@ -263,6 +666,8 @@ mod_setup_server <- function(id) {
         })
         rv$analytical_combined <- NULL; rv$side_mapping_nonfocus <- NULL
         rv$update_status       <- "pending"
+        set_file_meta("analytical", input$file_analytical,
+                      nrow(rv$analytical), ncol(rv$analytical), "manual")
         rm(df); gc(verbose = FALSE, full = TRUE)
         schema_msg <- if (!is.null(rv$schema_metadata))
           paste0(" | xs: ", paste(rv$schema_metadata$xs_dims, collapse = ", "),
@@ -296,6 +701,8 @@ mod_setup_server <- function(id) {
                            type = "error", duration = 15); return()
         }
         rv$vof_data <- vof_raw
+        set_file_meta("vof", input$file_vof,
+                      nrow(rv$vof_data), ncol(rv$vof_data), "manual")
         showNotification(paste0("VOF loaded - ", format(nrow(vof_raw), big.mark = ","),
                                 " rows, ",
                                 dplyr::n_distinct(vof_raw$MainModelVariableName),
@@ -312,6 +719,8 @@ mod_setup_server <- function(id) {
         rv$details <- data.table::fread(input$file_details$datapath, data.table = FALSE,
                                         showProgress = FALSE) %>%
           dplyr::filter(!stringr::str_detect(stringr::str_to_lower(trimws(Type)), "none"))
+        set_file_meta("details", input$file_details,
+                      nrow(rv$details), ncol(rv$details), "manual")
         gc(verbose = FALSE)
         n_in <- sum(stringr::str_detect(stringr::str_to_lower(trimws(rv$details$Type)),
                                         "\\b(in|fixed)\\b"), na.rm = TRUE)
@@ -329,6 +738,8 @@ mod_setup_server <- function(id) {
           readxl::read_excel(input$file_rois$datapath)
         else
           data.table::fread(input$file_rois$datapath, data.table = FALSE, showProgress = FALSE)
+        set_file_meta("rois", input$file_rois,
+                      nrow(rv$channels_rois), ncol(rv$channels_rois), "manual")
         gc(verbose = FALSE)
         showNotification(paste0("ROIs loaded - ", nrow(rv$channels_rois), " rows"),
                          type = "message", duration = 4)
@@ -965,6 +1376,44 @@ mod_setup_server <- function(id) {
     })
     
     # ── File Validation — mode-aware ──────────────────────────────────
+    output$validation_summary <- renderUI({
+      loaded <- vapply(base_file_kinds, \(k) !is.null(rv$file_meta[[k]]), logical(1))
+      n_loaded <- sum(loaded)
+      base_ready <- !is.null(rv$main_data) && !is.null(rv$analytical) &&
+        !is.null(rv$vof_data) && !is.null(rv$details) && !is.null(rv$channels_rois)
+      status <- rv$validation_status %||% "pending"
+      severity <- if (!base_ready) "blocker" else if (identical(status, "red")) "blocker"
+      else if (identical(status, "yellow")) "warning"
+      else if (identical(status, "green")) "ok" else "pending"
+      message <- if (!base_ready) {
+        missing <- c(main = "Main", analytical = "Analytical", vof = "VOF",
+                     details = "ModelDetails", rois = "ROIs")[!loaded]
+        paste0("Missing: ", paste(unname(missing), collapse = ", "))
+      } else if (identical(severity, "ok")) {
+        "Files validated. Channels and processing can continue."
+      } else if (identical(severity, "warning")) {
+        "Validation has warnings. Review the table below before processing."
+      } else if (identical(severity, "blocker")) {
+        "Validation has blockers. Fix the rows marked in red before continuing."
+      } else {
+        "Validation pending. The comparison will update automatically."
+      }
+      div(
+        class = paste("qa-summary", paste0("qa-summary-", severity)),
+        div(class = "qa-summary-main",
+            icon(if (severity == "ok") "circle-check"
+                 else if (severity == "warning") "triangle-exclamation"
+                 else if (severity == "blocker") "circle-xmark" else "clock",
+                 class = "qa-summary-icon"),
+            div(tags$strong(if (severity == "ok") "Validation OK"
+                            else if (severity == "warning") "Warnings found"
+                            else if (severity == "blocker") "Action needed"
+                            else "Pending validation"),
+                tags$span(message, class = "qa-summary-text"))),
+        tags$span(paste0(n_loaded, "/5 files"), class = "qa-summary-count")
+      )
+    })
+
     output$file_comparison <- renderUI({
       if (is.null(rv$main_data) || is.null(rv$analytical)) {
         msg <- if (is.null(rv$analytical) && is.null(rv$main_data))
@@ -990,7 +1439,11 @@ mod_setup_server <- function(id) {
       mk_badge <- function(status, text = NULL) {
         label <- switch(status, green = "OK", yellow = "Warning", red = "Blocked",
                         pending = "Pending", "N/A")
-        tags$td(text %||% label, class = paste("badge-td", paste0("badge-td-", status)))
+        tags$td(
+          class = "val-status-cell",
+          tags$span(text %||% label,
+                    class = paste("val-status-pill", paste0("val-status-", status)))
+        )
       }
       mk_pill <- function(n, type) {
         if (n == 0) return(NULL)
@@ -1095,7 +1548,7 @@ mod_setup_server <- function(id) {
       
       mk_dq_row <- function(chk, label, critical = FALSE) {
         res_a <- if (chk$status == "green")
-          tags$span(if (critical) "No NAs" else "No empty", class = "text-success")
+          tags$span(if (critical) "No NAs" else "No empty", class = "val-cell-ok-muted")
         else
           tags$span(paste0(format(chk$n_na, big.mark = ","),
                            if (critical) " NAs" else " empty"),
@@ -1184,7 +1637,7 @@ mod_setup_server <- function(id) {
                                     mk_dq_row(checks$outlet,   "Outlet"),
                                     mk_dq_row(checks$creative, "Creative"))))
       
-      tagList(banner, update_info, the_table)
+      tagList(update_info, the_table)
     })
     
     # ── Return ─────────────────────────────────────────────────────────
@@ -1218,7 +1671,22 @@ mod_setup_server <- function(id) {
       }),
       media_index       = reactive(rv$media_index),
       schema_metadata   = reactive(rv$schema_metadata),
-      validation_status = reactive(rv$validation_status)
+      validation_status = reactive(rv$validation_status),
+      qa_status = reactive({
+        loaded <- vapply(base_file_kinds, \(k) !is.null(rv$file_meta[[k]]), logical(1))
+        base_ready <- !is.null(rv$main_data) && !is.null(rv$analytical) &&
+          !is.null(rv$vof_data) && !is.null(rv$details) && !is.null(rv$channels_rois)
+        missing <- c(main = "Main", analytical = "Analytical", vof = "VOF",
+                     details = "ModelDetails", rois = "ROIs")[!loaded]
+        list(
+          files_loaded      = sum(loaded),
+          files_total       = length(base_file_kinds),
+          files_ready       = base_ready,
+          missing_files     = unname(missing),
+          validation_status = rv$validation_status %||% "pending",
+          media_ready       = !is.null(rv$media_index)
+        )
+      })
     )
   })
 }

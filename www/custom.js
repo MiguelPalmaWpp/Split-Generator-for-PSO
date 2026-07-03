@@ -134,3 +134,41 @@ $('<style id="mff-badge-style">').html(
   '.icon-mff-sm { color: #16a34a !important; font-size: 13px !important; }'
 ).appendTo('head');
 });
+
+Shiny.addCustomMessageHandler('resetFileInput', function(msg) {
+if (!msg || !msg.id) return;
+
+var input = document.getElementById(msg.id);
+if (!input) return;
+
+input.value = '';
+
+var container = input.closest('.shiny-input-container, .form-group');
+if (!container) return;
+
+var textInput = container.querySelector('input[type="text"], .form-control[readonly]');
+if (textInput) textInput.value = '';
+
+var label = container.querySelector('.custom-file-label');
+if (label) label.textContent = 'No file selected';
+});
+
+function adjustVisibleDataTables() {
+if (!$.fn || !$.fn.dataTable) return;
+
+setTimeout(function () {
+  $.fn.dataTable
+    .tables({ visible: true, api: true })
+    .columns.adjust();
+
+  $.fn.dataTable.tables({ visible: true, api: true }).every(function () {
+    var api = this;
+    if (api.scroller && typeof api.scroller.measure === 'function') {
+      api.scroller.measure();
+    }
+  });
+}, 80);
+}
+
+$(document).on('shown.bs.tab', 'a[data-bs-toggle="tab"], button[data-bs-toggle="tab"]', adjustVisibleDataTables);
+$(document).on('shiny:value shiny:bound', adjustVisibleDataTables);

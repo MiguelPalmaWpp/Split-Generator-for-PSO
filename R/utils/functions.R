@@ -792,7 +792,9 @@ build_timeline_html <- function(an_range, main_range) {
   }, error = \(e) NULL)
 }
 
-process_channel <- function(all_rags,
+# Legacy implementation retained for reference. The active implementation lives
+# in R/utils/processing.R and accepts schema_metadata.
+process_channel_legacy <- function(all_rags,
                             analytical,
                             dates_df,
                             cfg,

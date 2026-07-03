@@ -37,6 +37,7 @@ mod_channels_ui <- function(id) {
       actionButton(ns("btn_save_all"),
                    tagList(icon("floppy-disk"), " Save All Split Orders"),
                    class = "btn-outline-secondary btn-sm w-100 mb-10"),
+      textInput(ns("ch_search"), NULL, placeholder = "Search channels...", width = "100%"),
       div(class = "ch-list-scroll", uiOutput(ns("ch_list")))
     ),
     
@@ -72,6 +73,7 @@ mod_channels_server <- function(id, data, media_index) {
     dirty_channels <- reactiveValues()
     pending_delete <- reactiveVal(NULL)
     breaks_enabled <- reactiveVal(FALSE)
+    config_import_pending <- reactiveVal(NULL)
     
     effective_split_choices <- function(breaks = list(), cross_cols = character(0)) {
       base_choices <- setdiff(SPLIT_CHOICES, cross_cols)
@@ -96,6 +98,48 @@ mod_channels_server <- function(id, data, media_index) {
       div(class = "info-row",
           tags$span(label, class = "info-row-label"),
           div(class = "info-row-value", value))
+    }
+
+    normalize_model_var <- function(x) {
+      trimws(stringr::str_remove(as.character(x),
+                                 stringr::regex("(_Total)+$", ignore_case = TRUE)))
+    }
+
+    lookup_roi <- function(model_var, fallback = NULL) {
+      rois <- tryCatch(data()$channels_rois, error = \(e) NULL)
+      if (is.null(rois) || !"MainModelVariableName" %in% names(rois)) {
+        return(list(value = NA_real_, channel = NA_character_))
+      }
+
+      candidates <- unique(normalize_model_var(c(model_var, fallback)))
+      candidates <- candidates[!is.na(candidates) & nzchar(candidates)]
+      if (!length(candidates)) return(list(value = NA_real_, channel = NA_character_))
+
+      roi_norm <- rois
+      roi_norm$.mv_norm <- normalize_model_var(roi_norm$MainModelVariableName)
+      rows <- roi_norm[roi_norm$.mv_norm %in% candidates, , drop = FALSE]
+      if (!nrow(rows)) return(list(value = NA_real_, channel = NA_character_))
+
+      roi_num <- setdiff(names(rows)[sapply(rows, is.numeric)], "MainModelVariableName")
+      roi_val <- if (length(roi_num)) {
+        vals <- rows[[roi_num[1]]]
+        vals <- vals[!is.na(vals)]
+        if (length(vals)) mean(vals) else NA_real_
+      } else NA_real_
+
+      roi_channel <- if ("Channel" %in% names(rows)) {
+        vals <- trimws(as.character(rows$Channel))
+        vals <- vals[!is.na(vals) & nzchar(vals)]
+        if (length(vals)) vals[1] else NA_character_
+      } else NA_character_
+
+      list(value = roi_val, channel = roi_channel)
+    }
+
+    effective_roi <- function(cfg, fallback = NULL) {
+      stored <- cfg$roi %||% NA_real_
+      if (!is.na(stored)) return(stored)
+      lookup_roi(cfg$model_variable %||% fallback, fallback)$value
     }
     
     get_varname_include_fallback <- function(nm) {
@@ -182,8 +226,13 @@ mod_channels_server <- function(id, data, media_index) {
       is_dirty <- isTRUE(dirty_channels[[nm]])
       is_vof   <- identical(cfg$source %||% "vof", "vof")
       is_kw    <- identical(cfg$source %||% "", "keyword_fallback")
-      has_roi  <- !is.na(cfg$roi %||% NA_real_)
+      roi_val  <- effective_roi(cfg, nm)
+      has_roi  <- !is.na(roi_val)
       n_brk    <- length(cfg$dimension_breaks %||% list())
+      n_merges <- sum(vapply(cfg$saved_merges %||% list(), \(m) isTRUE(m$active), logical(1)))
+      has_dates <- !is.na(cfg$min_period %||% NA) && !is.na(cfg$max_period %||% NA)
+      configured <- length(cfg$split_columns %||% character(0)) > 0 &&
+        nzchar(cfg$model_variable %||% "")
       
       src_label <- if (is_vof) "VOF" else if (is_kw) "KW" else "MFF"
       src_class <- if (is_vof) "ch-badge-vof" else if (is_kw) "ch-badge-kw" else "ch-badge-mff"
@@ -201,8 +250,12 @@ mod_channels_server <- function(id, data, media_index) {
               tags$span(nm, class = "ch-card-name"),
               if (is_dirty) tags$span("\u25CF", class = "ch-card-dirty",
                                       title = "Unsaved changes"),
-              if (has_roi) tags$span(paste0("ROI ", round(cfg$roi, 1)),
+              if (has_roi) tags$span(paste0("ROI ", round(roi_val, 1)),
                                      class = "ch-card-roi"),
+              if (!has_roi) tags$span("No ROI", class = "ch-badge-warn"),
+              if (configured) tags$span("Configured", class = "ch-badge-ok"),
+              if (n_merges > 0) tags$span(paste0(n_merges, " merges"), class = "ch-badge-info"),
+              if (has_dates) tags$span("Date limited", class = "ch-badge-muted"),
               tags$span(src_label, class = src_class)),
           div(class = "ch-card-meta",
               if (is_vof) {
@@ -236,6 +289,14 @@ mod_channels_server <- function(id, data, media_index) {
                    tags$p("No channels loaded.", class = "ch-empty-msg"),
                    tags$p(tagList("Click ", tags$strong("Import / Manage Channels"),
                                   " to get started."), class = "ch-empty-hint")))
+      search_term <- trimws(input$ch_search %||% "")
+      if (nzchar(search_term)) {
+        nms <- nms[stringr::str_detect(nms, stringr::regex(search_term, ignore_case = TRUE))]
+      }
+      if (!length(nms))
+        return(div(class = "ch-empty-state",
+                   icon("magnifying-glass", class = "icon-empty-lg"),
+                   tags$p("No channels match your search.", class = "ch-empty-msg")))
       tagList(lapply(nms, function(nm)
         render_channel_card(nm, rv$channels[[nm]], identical(rv$selected, nm))))
     })
@@ -305,16 +366,9 @@ mod_channels_server <- function(id, data, media_index) {
             tags$span(paste0(" +", n - 5, " more"), class = "text-muted small")))
       }
       
-      # Look up Channel from ROI file
-      rois   <- tryCatch(data()$channels_rois, error = \(e) NULL)
-      roi_ch <- if (!is.null(rois) &&
-                    all(c("MainModelVariableName", "Channel") %in% names(rois))) {
-        mv   <- cfg$model_variable %||% rv$selected %||% ""
-        rows <- rois[trimws(rois$MainModelVariableName) == trimws(mv),
-                     "Channel", drop = TRUE]
-        rows <- rows[!is.na(rows) & nzchar(trimws(rows))]
-        if (length(rows)) trimws(rows[1]) else NA_character_
-      } else NA_character_
+      roi_info <- lookup_roi(cfg$model_variable %||% rv$selected, rv$selected)
+      roi_ch <- roi_info$channel
+      roi_val <- effective_roi(cfg, rv$selected)
       
       info_title <- switch(cfg$source %||% "vof",
                            vof              = "Auto-configured from VOF",
@@ -346,8 +400,8 @@ mod_channels_server <- function(id, data, media_index) {
                                  format(cfg$max_period, "%Y-%m-%d"))
                         else "Full range"),
             mk_info_row("Geo overrides", geo_display),
-            if (!is.na(cfg$roi %||% NA_real_))
-              mk_info_row("ROI", format(round(cfg$roi, 2), big.mark = ",")),
+            if (!is.na(roi_val))
+              mk_info_row("ROI", format(round(roi_val, 2), big.mark = ",")),
             if (!is.null(cfg$time_break_label) && nzchar(cfg$time_break_label %||% ""))
               mk_info_row("Time segment",
                           tags$span(cfg$time_break_label, class = "badge-blue"))),
@@ -791,6 +845,7 @@ mod_channels_server <- function(id, data, media_index) {
             else { pm <- an_num[startsWith(an_num, v)]; if (length(pm)) pm[1] else v }
           }
         } else v
+        roi_info <- lookup_roi(actual_mv, v)
         rv$channels[[v]] <- list(
           channel_name = v, model_variable = actual_mv,
           varname_include = varname_include, analytical_varkeys = actual_mv,
@@ -799,8 +854,9 @@ mod_channels_server <- function(id, data, media_index) {
           segment_overrides = list(), activity_keyword = act_kw,
           spend_keyword = spend_kw, split_columns = c("VariableName"),
           saved_merges = list(), dimension_breaks = list(),
-          roi = NA_real_, source = "manual",
-          media_channel = "", sub_channel = "", effect = "")
+          roi = roi_info$value, source = "manual",
+          media_channel = if (!is.na(roi_info$channel)) roi_info$channel else "",
+          sub_channel = "", effect = "")
       }
       if (is.null(rv$selected)) rv$selected <- v
       showNotification(paste0("'", v, "' added"), type = "message", duration = 2)
@@ -853,11 +909,8 @@ mod_channels_server <- function(id, data, media_index) {
                 
                 # MediaChannel from ROI file
                 if (has_roi_ch) {
-                  mv       <- ch_cfg$model_variable %||% ch_nm
-                  rows_roi <- rois[trimws(rois$MainModelVariableName) == trimws(mv),
-                                   "Channel", drop = TRUE]
-                  rows_roi <- rows_roi[!is.na(rows_roi) & nzchar(trimws(rows_roi))]
-                  if (length(rows_roi)) df$MediaChannel[i] <- trimws(rows_roi[1])
+                  roi_info <- lookup_roi(ch_cfg$model_variable %||% ch_nm, ch_nm)
+                  if (!is.na(roi_info$channel)) df$MediaChannel[i] <- roi_info$channel
                 }
               }
             }
@@ -867,10 +920,10 @@ mod_channels_server <- function(id, data, media_index) {
       }
     )
     
-    observeEvent(input$config_csv_content, {
-      req(input$config_csv_content)
+    apply_config_import <- function(config_text) {
+      req(config_text)
       tryCatch({
-        con <- textConnection(input$config_csv_content)
+        con <- textConnection(config_text)
         on.exit(close(con))
         df  <- read.csv(con, stringsAsFactors = FALSE, check.names = FALSE)
         
@@ -923,6 +976,45 @@ mod_channels_server <- function(id, data, media_index) {
             max_p = if (!is.na(saved_max)) saved_max else
               if (!is.null(an)) max(an$Period, na.rm = TRUE) else NULL)
         }
+
+        build_channel_from_config_row <- function(nm, row_idx, splits) {
+          dates <- recover_dates(nm, row_idx)
+          if (nm %in% names(rv$available_channels)) {
+            cfg <- rv$available_channels[[nm]]
+            cfg$split_columns    <- splits
+            cfg$dimension_breaks <- list()
+            cfg$saved_merges     <- list()
+            cfg$min_period       <- dates$min_p
+            cfg$max_period       <- dates$max_p
+            return(cfg)
+          }
+
+          varname_include <- get_varname_include_fallback(nm)
+          act_kw <- detect_activity_keyword(trimws(stringr::str_remove(
+            stringr::str_remove(nm, "_Total(_Total)*$"), "\\s*--[pgPG]\\s+.*$")))
+          spend_kw <- detect_spend_keyword(data()$all_rags, varname_include)
+          actual_mv <- if (!is.null(an)) {
+            an_num <- names(an)[sapply(an, is.numeric)]
+            if (nm %in% an_num) nm
+            else {
+              cand <- paste0(nm, "_Total_Total_Total")
+              if (cand %in% an_num) cand
+              else { pm <- an_num[startsWith(an_num, nm)]; if (length(pm)) pm[1] else nm }
+            }
+          } else nm
+
+          roi_info <- lookup_roi(actual_mv, nm)
+          list(
+            channel_name = nm, model_variable = actual_mv,
+            varname_include = varname_include, analytical_varkeys = actual_mv,
+            min_period = dates$min_p, max_period = dates$max_p,
+            segment_overrides = list(), activity_keyword = act_kw,
+            spend_keyword = spend_kw, split_columns = splits,
+            saved_merges = list(), dimension_breaks = list(),
+            roi = roi_info$value, source = "manual",
+            media_channel = if (!is.na(roi_info$channel)) roi_info$channel else "",
+            sub_channel = "", effect = "")
+        }
         
         for (i in seq_len(nrow(config_rows))) {
           nm     <- config_rows$Channel[i]
@@ -930,36 +1022,13 @@ mod_channels_server <- function(id, data, media_index) {
           if (!length(splits)) splits <- c("VariableName")
           
           if (nm %in% names(rv$channels)) {
-            rv$channels[[nm]]$split_columns <- splits
+            rv$channels[[nm]] <- build_channel_from_config_row(nm, i, splits)
             dirty_channels[[nm]] <- FALSE; n_restored <- n_restored + 1L
           } else if (nm %in% names(rv$available_channels)) {
-            rv$channels[[nm]] <- rv$available_channels[[nm]]
-            rv$channels[[nm]]$split_columns <- splits
+            rv$channels[[nm]] <- build_channel_from_config_row(nm, i, splits)
             dirty_channels[[nm]] <- FALSE; n_imported <- n_imported + 1L
           } else {
-            varname_include <- get_varname_include_fallback(nm)
-            act_kw   <- detect_activity_keyword(trimws(stringr::str_remove(
-              stringr::str_remove(nm, "_Total(_Total)*$"), "\\s*--[pgPG]\\s+.*$")))
-            spend_kw  <- detect_spend_keyword(data()$all_rags, varname_include)
-            actual_mv <- if (!is.null(an)) {
-              an_num <- names(an)[sapply(an, is.numeric)]
-              if (nm %in% an_num) nm
-              else {
-                cand <- paste0(nm, "_Total_Total_Total")
-                if (cand %in% an_num) cand
-                else { pm <- an_num[startsWith(an_num, nm)]; if (length(pm)) pm[1] else nm }
-              }
-            } else nm
-            dates <- recover_dates(nm, i)
-            rv$channels[[nm]] <- list(
-              channel_name = nm, model_variable = actual_mv,
-              varname_include = varname_include, analytical_varkeys = actual_mv,
-              min_period = dates$min_p, max_period = dates$max_p,
-              segment_overrides = list(), activity_keyword = act_kw,
-              spend_keyword = spend_kw, split_columns = splits,
-              saved_merges = list(), dimension_breaks = list(),
-              roi = NA_real_, source = "manual",
-              media_channel = "", sub_channel = "", effect = "")
+            rv$channels[[nm]] <- build_channel_from_config_row(nm, i, splits)
             dirty_channels[[nm]] <- FALSE; n_built <- n_built + 1L
           }
         }
@@ -984,7 +1053,8 @@ mod_channels_server <- function(id, data, media_index) {
               part_names <- if (length(break_info) > 2) break_info[3:length(break_info)]
               else paste0(col, "_", LETTERS[seq_len(n_parts)])
             }
-            if (!length(part_names) || any(!nzchar(part_names))) next
+            if (is.na(n_parts) || n_parts < 1L) next
+            if (length(part_names) != n_parts || any(!nzchar(part_names))) next
             existing <- rv$channels[[nm]]$dimension_breaks %||% list()
             if (any(sapply(existing, \(b) b$column == col))) next
             rv$channels[[nm]]$dimension_breaks <- c(existing, list(list(
@@ -1037,10 +1107,105 @@ mod_channels_server <- function(id, data, media_index) {
                          type = "message", duration = 5)
       }, error = \(e)
       showNotification(paste("Error:", e$message), type = "error", duration = 8))
+    }
+
+    preview_config_import <- function(config_text) {
+      con <- textConnection(config_text)
+      on.exit(close(con))
+      df <- read.csv(con, stringsAsFactors = FALSE, check.names = FALSE)
+      if (!all(c("Channel", "Type") %in% names(df))) {
+        stop("Config file missing Channel or Type columns.")
+      }
+      config_rows <- df[trimws(df$Type) == "Config", , drop = FALSE]
+      merge_rows  <- df[trimws(df$Type) == "Merge",  , drop = FALSE]
+      break_rows  <- df[trimws(df$Type) == "Break",  , drop = FALSE]
+      ch_names <- config_rows$Channel
+      ch_names <- ch_names[!is.na(ch_names) & nzchar(trimws(ch_names))]
+      list(
+        updated  = sum(ch_names %in% names(rv$channels)),
+        imported = sum(!ch_names %in% names(rv$channels) &
+                         ch_names %in% names(rv$available_channels)),
+        rebuilt  = sum(!ch_names %in% names(rv$channels) &
+                         !ch_names %in% names(rv$available_channels)),
+        breaks   = nrow(break_rows),
+        merges   = nrow(merge_rows),
+        skipped  = sum(is.na(config_rows$Channel) | !nzchar(trimws(config_rows$Channel %||% ""))),
+        total    = length(ch_names)
+      )
+    }
+
+    observeEvent(input$config_csv_content, {
+      req(input$config_csv_content)
+      tryCatch({
+        preview <- preview_config_import(input$config_csv_content)
+        config_import_pending(input$config_csv_content)
+        showModal(modalDialog(
+          title = tagList(icon("file-import"), " Preview Config Import"),
+          div(class = "import-preview-box",
+              div(class = "import-preview-grid",
+                  div(class = "import-preview-stat",
+                      tags$strong(preview$updated), tags$span("overwritten")),
+                  div(class = "import-preview-stat",
+                      tags$strong(preview$imported), tags$span("imported")),
+                  div(class = "import-preview-stat",
+                      tags$strong(preview$rebuilt), tags$span("rebuilt")),
+                  div(class = "import-preview-stat",
+                      tags$strong(preview$breaks), tags$span("breaks")),
+                  div(class = "import-preview-stat",
+                      tags$strong(preview$merges), tags$span("merges")),
+                  div(class = "import-preview-stat",
+                      tags$strong(preview$skipped), tags$span("skipped"))),
+              tags$p(class = "text-muted small mb-0",
+                     paste0(preview$total, " channel config row(s) detected. ",
+                            "Review counts before applying."))),
+          footer = tagList(
+            actionButton(ns("btn_apply_config_import"),
+                         tagList(icon("check"), " Apply Import"),
+                         class = "btn-primary"),
+            modalButton("Cancel")
+          ),
+          easyClose = TRUE, size = "m"))
+      }, error = \(e) {
+        config_import_pending(NULL)
+        showNotification(paste("Config preview error:", e$message),
+                         type = "error", duration = 8)
+      })
+    }, ignoreInit = TRUE)
+
+    observeEvent(input$btn_apply_config_import, {
+      req(config_import_pending())
+      apply_config_import(config_import_pending())
+      config_import_pending(NULL)
+      removeModal()
     })
     
     list(
       channels      = reactive(rv$channels),
+      qa_status = reactive({
+        ch <- rv$channels
+        n_total <- length(ch)
+        dirty <- names(ch)[vapply(names(ch), \(nm) isTRUE(dirty_channels[[nm]]), logical(1))]
+        configured <- names(ch)[vapply(ch, \(cfg)
+          length(cfg$split_columns %||% character(0)) > 0 &&
+            nzchar(cfg$model_variable %||% ""), logical(1))]
+        missing_roi <- names(ch)[vapply(names(ch), \(nm) {
+          is.na(effective_roi(ch[[nm]], nm))
+        }, logical(1))]
+        with_breaks <- names(ch)[vapply(ch, \(cfg)
+          length(cfg$dimension_breaks %||% list()) > 0, logical(1))]
+        with_merges <- names(ch)[vapply(ch, \(cfg)
+          sum(vapply(cfg$saved_merges %||% list(), \(m) isTRUE(m$active), logical(1))) > 0,
+          logical(1))]
+        list(
+          total       = n_total,
+          configured  = length(configured),
+          dirty       = length(dirty),
+          dirty_names = dirty,
+          missing_roi = length(missing_roi),
+          with_breaks = length(with_breaks),
+          with_merges = length(with_merges)
+        )
+      }),
       update_merges = function(nm, merges) {
         rv$channels[[nm]]$saved_merges <- merges
       }

@@ -15,7 +15,13 @@ mod_process_ui <- function(id) {
                      class = "btn-success btn-sm w-100 mb-2"),
         actionButton(ns("btn_all"), "Process All",
                      class = "btn-warning btn-sm w-100"),
+        actionButton(ns("btn_failed"), "Reprocess Failed Only",
+                     class = "btn-outline-danger btn-sm w-100 mt-2"),
+        actionButton(ns("btn_changed"), "Reprocess Changed",
+                     class = "btn-outline-secondary btn-sm w-100 mt-2"),
         hr(class = "hr-sm"),
+        uiOutput(ns("batch_summary")),
+        uiOutput(ns("error_summary")),
         uiOutput(ns("status")),
         hr(class = "hr-sm"),
         downloadButton(ns("dl_config_process"),
@@ -62,8 +68,11 @@ mod_process_server <- function(id, data, config, channels,
     merge_log_store     <- reactiveValues()
     history_store       <- reactiveValues()
     clean_store         <- reactiveValues()
+    process_errors      <- reactiveValues()
+    result_signatures   <- reactiveValues()
     results_trigger     <- reactiveVal(0L)
     is_batch_processing <- reactiveVal(FALSE)
+    batch_summary_state <- reactiveVal(NULL)
     
     get_res  <- function(nm) results_store[[nm]]
     set_res  <- function(nm, val) {
@@ -77,9 +86,74 @@ mod_process_server <- function(id, data, config, channels,
     set_log  <- function(nm, val) { merge_log_store[[nm]] <- val }
     get_hist <- function(nm) history_store[[nm]] %||% list()
     set_hist <- function(nm, val) { history_store[[nm]] <- val }
+    set_error <- function(nm, msg = NULL) {
+      process_errors[[nm]] <- msg
+      results_trigger(isolate(results_trigger()) + 1L)
+    }
     
     valid_nm <- function(nm)
       !is.null(nm) && length(nm) == 1 && !is.na(nm) && nzchar(nm)
+
+    empty_spend_diag <- function() {
+      tibble::tibble(
+        VariableSplit = character(),
+        total_spend = numeric(),
+        pct_total_spend = numeric(),
+        max_index = numeric(),
+        max = numeric(),
+        max_no_outlier = numeric(),
+        num_weeks_spend = numeric(),
+        min_consecutive_weeks = numeric(),
+        sd = numeric(),
+        min = numeric(),
+        quartile_1 = numeric(),
+        median = numeric(),
+        quartile_3 = numeric()
+      )
+    }
+
+    info_table <- function(message, tone = c("info", "warning", "error")) {
+      tone <- match.arg(tone)
+      color <- switch(tone, info = "#2f75b5", warning = "#856404", error = "#721c24")
+      bg <- switch(tone, info = "#EBF3FB", warning = "#fff3cd", error = "#f8d7da")
+      DT::datatable(
+        data.frame(Info = message),
+        options = list(initComplete = dt_blue_callback, dom = "t"),
+        rownames = FALSE
+      ) %>% DT::formatStyle("Info", color = color, backgroundColor = bg,
+                            fontWeight = "600")
+    }
+
+    channel_signature <- function(cfg) {
+      if (is.null(cfg)) return("")
+      paste(c(
+        cfg$model_variable %||% "",
+        paste(cfg$varname_include %||% character(0), collapse = "|"),
+        cfg$activity_keyword %||% "",
+        cfg$spend_keyword %||% "",
+        paste(cfg$split_columns %||% character(0), collapse = "|"),
+        paste(vapply(cfg$dimension_breaks %||% list(), function(b)
+          paste(b$column %||% "", b$separator %||% "",
+                b$n_parts %||% "", paste(b$names %||% character(0), collapse = "~"),
+                sep = ":"), character(1)), collapse = "|"),
+        paste(vapply(cfg$saved_merges %||% list(), function(m)
+          paste(m$new_name %||% "", isTRUE(m$active),
+                paste(unlist(m$merged %||% list()), collapse = "~"),
+                sep = ":"), character(1)), collapse = "|"),
+        as.character(cfg$min_period %||% ""),
+        as.character(cfg$max_period %||% "")
+      ), collapse = "||")
+    }
+
+    stale_names <- reactive({
+      results_trigger()
+      ch <- channels()
+      sigs <- reactiveValuesToList(result_signatures)
+      res <- reactiveValuesToList(results_store)
+      names(ch)[vapply(names(ch), function(nm) {
+        !is.null(res[[nm]]) && !identical(sigs[[nm]], channel_signature(ch[[nm]]))
+      }, logical(1))]
+    })
     
     make_export_buttons <- function(prefix, nm) {
       fname <- paste0(prefix, "_", nm, "_",
@@ -209,6 +283,8 @@ mod_process_server <- function(id, data, config, channels,
         return(tags$p(class = "text-muted small mt-2", "No channels configured."))
       tagList(lapply(ch_names, function(nm) {
         processed <- !is.null(results_store[[nm]])
+        stale     <- nm %in% stale_names()
+        failed    <- !is.null(process_errors[[nm]])
         n_merges  <- length(get_log(nm))
         is_sel    <- identical(input$channel_select, nm)
         saved_m   <- channels()[[nm]]$saved_merges %||% list()
@@ -221,6 +297,12 @@ mod_process_server <- function(id, data, config, channels,
           else           icon("circle",        class = "icon-empty-status"),
           tags$span(nm, class = "status-item-name"),
           div(class = "status-badges",
+              if (failed)
+                tags$span("Failed", class = "badge-error"),
+              if (stale)
+                tags$span("Needs reprocess", class = "badge-stale"),
+              if (processed && !stale && !failed)
+                tags$span("Processed", class = "badge-ready"),
               if (processed && n_merges > 0)
                 tags$span(paste0(n_merges, "m"), class = "badge-merge-count"),
               if (n_saved > 0)
@@ -233,6 +315,11 @@ mod_process_server <- function(id, data, config, channels,
     observeEvent(input$ch_click, {
       req(nzchar(input$ch_click %||% ""))
       updateSelectInput(session, "channel_select", selected = input$ch_click)
+    }, ignoreInit = TRUE)
+
+    observeEvent(input$channel_select, {
+      tryCatch(DT::dataTableProxy(session$ns("diag_act")) %>% DT::selectRows(NULL),
+               error = \(e) NULL)
     }, ignoreInit = TRUE)
     
     # ── Download config CSV — same format as mod_channels ─────────────────
@@ -343,6 +430,7 @@ mod_process_server <- function(id, data, config, channels,
       })
       
       if (!is.null(err_stored)) {
+        set_error(nm, err_stored)
         showNotification(paste(nm, "error:", err_stored),
                          type = "error", duration = 12)
         gc(verbose = FALSE, full = FALSE); return()
@@ -374,6 +462,8 @@ mod_process_server <- function(id, data, config, channels,
         
         set_res(nm, res_stored); set_orig(nm, res_stored)
         set_log(nm, list());     set_hist(nm, list())
+        set_error(nm, NULL)
+        result_signatures[[nm]] <- channel_signature(cfg)
         
         msg <- paste0(nm, " processed",
                       if (n_applied > 0)
@@ -391,9 +481,40 @@ mod_process_server <- function(id, data, config, channels,
     observeEvent(input$btn_one, {
       nm <- req(input$channel_select); req(valid_nm(nm)); run_one(nm)
     })
+
+    output$batch_summary <- renderUI({
+      batch <- batch_summary_state()
+      if (is.null(batch)) return(NULL)
+      div(class = "process-batch-summary",
+          tags$span(icon("list-check"), class = "process-batch-icon"),
+          tags$span(paste0(batch$processed, " processed"), class = "badge-ready"),
+          if (batch$already_done > 0)
+            tags$span(paste0(batch$already_done, " already done"), class = "badge-count-neutral"),
+          if (batch$skipped > 0)
+            tags$span(paste0(batch$skipped, " skipped"), class = "badge-not-ready"),
+          if (batch$failed > 0)
+            tags$span(paste0(batch$failed, " failed"), class = "badge-error"),
+          tags$span(paste0(batch$elapsed, "s"), class = "process-batch-time"))
+    })
+
+    output$error_summary <- renderUI({
+      errs <- reactiveValuesToList(process_errors)
+      errs <- errs[!vapply(errs, is.null, logical(1))]
+      if (!length(errs)) return(NULL)
+      div(class = "process-error-box",
+          div(class = "process-error-title",
+              icon("triangle-exclamation"), tags$strong("Processing errors")),
+          tagList(lapply(names(errs), function(nm)
+            div(class = "process-error-row",
+                tags$span(nm, class = "process-error-name"),
+                tags$span(errs[[nm]], class = "process-error-message")))))
+    })
     
     # ── Process All — optimized ────────────────────────────────────────────
     observeEvent(input$btn_all, {
+      if (isTRUE(is_batch_processing())) {
+        showNotification("Processing is already running.", type = "warning"); return()
+      }
       nms <- names(channels())
       if (!length(nms)) {
         showNotification("No channels configured.", type = "warning"); return()
@@ -415,7 +536,9 @@ mod_process_server <- function(id, data, config, channels,
                          type = "error"); return()
       }
       
-      to_process   <- nms[vapply(nms, \(nm) is.null(results_store[[nm]]), logical(1))]
+      stale <- stale_names()
+      to_process   <- nms[vapply(nms, \(nm) is.null(results_store[[nm]]) || nm %in% stale,
+                                 logical(1))]
       already_done <- length(nms) - length(to_process)
       
       if (!length(to_process)) {
@@ -453,7 +576,9 @@ mod_process_server <- function(id, data, config, channels,
                        
                        if (!is.null(skip_reason)) {
                          n_skipped <- n_skipped + 1L
-                         err_msgs  <- c(err_msgs, paste0(nm, ": ", skip_reason)); next
+                         err_msgs  <- c(err_msgs, paste0(nm, ": ", skip_reason))
+                         process_errors[[nm]] <- skip_reason
+                         next
                        }
                        
                        vi <- cfg$varname_include[nzchar(cfg$varname_include %||% "")]
@@ -489,7 +614,9 @@ mod_process_server <- function(id, data, config, channels,
                        
                        if (!is.null(err_msg)) {
                          n_err    <- n_err + 1L
-                         err_msgs <- c(err_msgs, paste0(nm, ": ", err_msg)); next
+                         err_msgs <- c(err_msgs, paste0(nm, ": ", err_msg))
+                         process_errors[[nm]] <- err_msg
+                         next
                        }
                        
                        if (!is.null(res_stored)) {
@@ -514,6 +641,8 @@ mod_process_server <- function(id, data, config, channels,
                          original_store[[nm]]  <- res_stored
                          merge_log_store[[nm]] <- list()
                          history_store[[nm]]   <- list()
+                         process_errors[[nm]]  <- NULL
+                         result_signatures[[nm]] <- channel_signature(cfg)
                          n_ok <- n_ok + 1L; rm(res_stored)
                        }
                      }
@@ -523,6 +652,9 @@ mod_process_server <- function(id, data, config, channels,
                    })
       
       elapsed  <- round((proc.time() - t_start)[["elapsed"]], 1)
+      batch_summary_state(list(processed = n_ok, already_done = already_done,
+                               skipped = n_skipped, failed = n_err,
+                               elapsed = elapsed))
       all_msgs <- c(err_msgs, info_msgs)
       parts    <- c(
         if (n_ok         > 0) paste0(n_ok,         " processed"),
@@ -540,6 +672,69 @@ mod_process_server <- function(id, data, config, channels,
                      tagList(lapply(all_msgs, tags$div))))),
         type     = if (n_err > 0) "error" else if (n_skipped > 0) "warning" else "message",
         duration = if (length(all_msgs) > 0) 15 else 5)
+    })
+
+    observeEvent(input$btn_failed, {
+      errs <- reactiveValuesToList(process_errors)
+      failed <- names(errs)[!vapply(errs, is.null, logical(1))]
+      failed <- failed[failed %in% names(channels())]
+      if (!length(failed)) {
+        showNotification("No failed channels to reprocess.", type = "message"); return()
+      }
+      if (isTRUE(is_batch_processing())) {
+        showNotification("Processing is already running.", type = "warning"); return()
+      }
+      is_batch_processing(TRUE)
+      on.exit({
+        is_batch_processing(FALSE)
+        results_trigger(isolate(results_trigger()) + 1L)
+      }, add = TRUE)
+      n_ok <- 0L; n_err <- 0L; t_start <- proc.time()
+      withProgress(message = paste0("Reprocessing ", length(failed), " failed channel(s)..."),
+                   value = 0, {
+                     for (i in seq_along(failed)) {
+                       setProgress((i - 1) / length(failed),
+                                   message = paste0("(", i, "/", length(failed), ") ", failed[[i]]))
+                       before_err <- process_errors[[failed[[i]]]]
+                       run_one(failed[[i]])
+                       after_err <- process_errors[[failed[[i]]]]
+                       if (is.null(after_err)) n_ok <- n_ok + 1L
+                       else if (!identical(before_err, after_err) || !is.null(after_err)) n_err <- n_err + 1L
+                     }
+                   })
+      elapsed <- round((proc.time() - t_start)[["elapsed"]], 1)
+      batch_summary_state(list(processed = n_ok, already_done = 0L,
+                               skipped = 0L, failed = n_err, elapsed = elapsed))
+    })
+
+    observeEvent(input$btn_changed, {
+      changed <- stale_names()
+      changed <- changed[changed %in% names(channels())]
+      if (!length(changed)) {
+        showNotification("No changed channels to reprocess.", type = "message"); return()
+      }
+      if (isTRUE(is_batch_processing())) {
+        showNotification("Processing is already running.", type = "warning"); return()
+      }
+      is_batch_processing(TRUE)
+      on.exit({
+        is_batch_processing(FALSE)
+        results_trigger(isolate(results_trigger()) + 1L)
+      }, add = TRUE)
+      n_ok <- 0L; n_err <- 0L; t_start <- proc.time()
+      withProgress(message = paste0("Reprocessing ", length(changed), " changed channel(s)..."),
+                   value = 0, {
+                     for (i in seq_along(changed)) {
+                       setProgress((i - 1) / length(changed),
+                                   message = paste0("(", i, "/", length(changed), ") ", changed[[i]]))
+                       run_one(changed[[i]])
+                       if (changed[[i]] %in% stale_names()) n_err <- n_err + 1L
+                       else n_ok <- n_ok + 1L
+                     }
+                   })
+      elapsed <- round((proc.time() - t_start)[["elapsed"]], 1)
+      batch_summary_state(list(processed = n_ok, already_done = 0L,
+                               skipped = 0L, failed = n_err, elapsed = elapsed))
     })
     
     # ── Period filter UI ───────────────────────────────────────────────────
@@ -636,9 +831,13 @@ mod_process_server <- function(id, data, config, channels,
       nm  <- req(input$channel_select)
       res <- req(results_store[[nm]])
       cost_df <- res$cost_diagnoses
-      if (is.null(cost_df) || nrow(cost_df) == 0) return(NULL)
+      if (is.null(cost_df) || nrow(cost_df) == 0 ||
+          !"VariableSplit" %in% names(cost_df) ||
+          !"total_spend" %in% names(cost_df)) {
+        return(empty_spend_diag())
+      }
       cost_df %>%
-        filter(total_spend > 0) %>%
+        filter(!is.na(total_spend) & total_spend > 0) %>%
         select(-any_of(c("seg", "period", "model_var"))) %>%
         mutate(across(where(is.numeric), \(x) round(x, 4)))
     }) %>% bindCache(input$channel_select, results_trigger())
@@ -846,6 +1045,10 @@ mod_process_server <- function(id, data, config, channels,
                       icon("hand-pointer"), " Select rows in the table to merge splits."))
       
       df             <- current_act_data()
+      selected       <- selected[selected <= nrow(df)]
+      if (length(selected) < 2)
+        return(tags$p(class = "text-muted small mb-2",
+                      icon("hand-pointer"), " Select at least 2 current rows to merge."))
       selected_names <- df$VariableSplit[selected]
       display_names  <- strip_common_prefix(selected_names)
       parts          <- get_merge_name_parts(selected_names)
@@ -1110,40 +1313,47 @@ mod_process_server <- function(id, data, config, channels,
     # ── Spend table ────────────────────────────────────────────────────────
     output$diag_cost <- DT::renderDT({
       results_trigger()
-      nm <- req(input$channel_select); req(results_store[[nm]])
-      cost_df <- current_spend_data()
+      nm <- input$channel_select
+      if (!valid_nm(nm))
+        return(info_table("Select a channel to review spend.", "info"))
+      if (is.null(results_store[[nm]]))
+        return(info_table("Process this channel first to review spend.", "info"))
+
+      cfg <- channels()[[nm]]
+      cost_df <- tryCatch(current_spend_data(), error = \(e) empty_spend_diag())
       if (is.null(cost_df) || nrow(cost_df) == 0) {
-        cfg <- channels()[[nm]]
-        return(datatable(
-          data.frame(Info = paste0("No spend data. Check keyword: '",
-                                   cfg$spend_keyword %||% "Spend", "'")),
-          options  = list(initComplete = dt_blue_callback), rownames = FALSE))
+        msg <- paste0("No spend data available. Check keyword: '",
+                      cfg$spend_keyword %||% "Spend", "'.")
+        return(info_table(msg, "warning"))
       }
       df_display <- cost_df %>%
         mutate(Split = strip_common_prefix(VariableSplit)) %>%
         select(Split, everything(), -VariableSplit)
       num_fmt <- intersect(c("sd", "min", "quartile_1", "median",
                              "quartile_3", "max_no_outlier", "max"), names(df_display))
+      col_defs <- list(list(className = "dt-left", targets = 0))
+      spend_target <- which(names(df_display) == "total_spend") - 1
+      if (length(spend_target) == 1 && !is.na(spend_target)) {
+        col_defs <- c(col_defs, list(
+          list(targets = spend_target,
+               render = JS("function(d,t){if(t!=='display')return d;",
+                           "var n=parseFloat(d);",
+                           "if(n>=1e9)return(n/1e9).toFixed(1)+'B';",
+                           "if(n>=1e6)return(n/1e6).toFixed(1)+'M';",
+                           "if(n>=1e3)return(n/1e3).toFixed(0)+'K';",
+                           "return n.toLocaleString();}"))))
+      }
       dt <- df_display %>%
         datatable(
           options = list(
             scrollX = TRUE, scrollY = "420px", paging = FALSE, dom = "frt",
             deferRender = TRUE, scroller = TRUE, autoWidth = FALSE,
-            initComplete = dt_blue_callback,
-            columnDefs = list(
-              list(className = "dt-left", targets = 0),
-              list(targets = which(names(df_display) == "total_spend") - 1,
-                   render = JS("function(d,t){if(t!=='display')return d;",
-                               "var n=parseFloat(d);",
-                               "if(n>=1e9)return(n/1e9).toFixed(1)+'B';",
-                               "if(n>=1e6)return(n/1e6).toFixed(1)+'M';",
-                               "if(n>=1e3)return(n/1e3).toFixed(0)+'K';",
-                               "return n.toLocaleString();")))),
+            initComplete = dt_blue_callback, columnDefs = col_defs),
           rownames = FALSE)
       if (length(num_fmt) > 0)
         dt <- dt %>% formatCurrency(num_fmt, currency = "", digits = 0, mark = ",")
       dt
-    })
+    }, server = TRUE)
     
     # ── Total Check ────────────────────────────────────────────────────────
     total_check_data <- reactive({
@@ -1383,7 +1593,26 @@ mod_process_server <- function(id, data, config, channels,
     # ── Return ─────────────────────────────────────────────────────────────
     list(
       results       = reactive(reactiveValuesToList(results_store)),
-      clean_results = reactive(reactiveValuesToList(clean_store))
+      clean_results = reactive(reactiveValuesToList(clean_store)),
+      qa_status = reactive({
+        ch_names <- names(channels())
+        res <- reactiveValuesToList(results_store)
+        errs <- reactiveValuesToList(process_errors)
+        failed <- names(errs)[!vapply(errs, is.null, logical(1))]
+        processed <- ch_names[ch_names %in% names(res)]
+        stale <- stale_names()
+        list(
+          total           = length(ch_names),
+          processed       = length(processed),
+          pending         = length(setdiff(ch_names, processed)),
+          failed          = length(intersect(ch_names, failed)),
+          failed_names    = intersect(ch_names, failed),
+          stale           = length(intersect(ch_names, stale)),
+          stale_names     = intersect(ch_names, stale),
+          batch_running   = isTRUE(is_batch_processing()),
+          last_batch      = batch_summary_state()
+        )
+      })
     )
   })
 }

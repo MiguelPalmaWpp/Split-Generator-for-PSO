@@ -474,7 +474,7 @@ mod_channels_server <- function(id, data, media_index) {
       md <- main_data()
       if (is.null(md))
         return(div(class = "preview-empty", icon("circle-info", class = "icon-preview-empty"),
-                   tags$p("Upload main data file to see preview.", class = "preview-empty-msg")))
+                   tags$p("Upload RAE Datafile to see preview.", class = "preview-empty-msg")))
       
       cfg_p <- if (!is.null(rv$selected) && rv$selected %in% names(rv$channels))
         rv$channels[[rv$selected]] else NULL
@@ -596,7 +596,7 @@ mod_channels_server <- function(id, data, media_index) {
       req(rv$selected, rv$selected %in% names(rv$channels))
       md <- main_data()
       if (is.null(md)) {
-        showNotification("Upload the main data file first.", type = "warning"); return()
+        showNotification("Upload RAE Datafile first.", type = "warning"); return()
       }
       already_broken <- sapply(rv$channels[[rv$selected]]$dimension_breaks %||% list(),
                                \(b) b$column)
@@ -727,25 +727,66 @@ mod_channels_server <- function(id, data, media_index) {
             uiOutput(ns("ch_mgr_list"))),
         footer = modalButton("Close")))
     })
+
+    manager_model_vars <- function() {
+      an <- data()$analytical
+      md <- data()$details
+      if (!is.null(md) && all(c("Type", "VariableName") %in% names(md))) {
+        return(md %>%
+                 dplyr::filter(!stringr::str_detect(stringr::str_to_lower(trimws(Type)), "\\bnone\\b")) %>%
+                 dplyr::pull(VariableName) %>%
+                 unique())
+      }
+      if (!is.null(an)) {
+        exclude_cols <- c("Geography", "Product", "BP_Year", "Period")
+        return(setdiff(names(an)[sapply(an, is.numeric)], exclude_cols))
+      }
+      character(0)
+    }
+
+    manager_channel_vars <- function() {
+      model_vars <- manager_model_vars()
+      candidates <- unique(c(names(rv$channels), names(rv$available_channels)))
+      candidates <- candidates[nzchar(candidates)]
+      if (!length(model_vars)) return(sort(candidates))
+
+      norm <- function(x) stringr::str_to_lower(normalize_model_var(x))
+      allowed_norm <- norm(model_vars)
+      candidate_matches <- vapply(candidates, function(nm) {
+        cfg <- rv$channels[[nm]] %||% rv$available_channels[[nm]]
+        cfg_names <- c(
+          nm,
+          cfg$channel_name %||% "",
+          cfg$model_variable %||% "",
+          cfg$analytical_varkeys %||% character(0)
+        )
+        any(norm(cfg_names) %in% allowed_norm)
+      }, logical(1))
+      matched_candidates <- candidates[candidate_matches]
+      represented_norm <- unique(norm(c(matched_candidates, unlist(lapply(matched_candidates, function(nm) {
+        cfg <- rv$channels[[nm]] %||% rv$available_channels[[nm]]
+        c(cfg$model_variable %||% "", cfg$analytical_varkeys %||% character(0))
+      }), use.names = FALSE))))
+      missing_model_vars <- model_vars[!norm(model_vars) %in% represented_norm]
+      sort(unique(c(matched_candidates, missing_model_vars)))
+    }
     
     output$ch_mgr_stats <- renderUI({
-      n_active <- length(rv$channels)
-      md       <- data()$details
-      all_in_vars <- if (!is.null(md) && all(c("Type", "VariableName") %in% names(md))) {
-        md %>%
-          dplyr::filter(!stringr::str_detect(stringr::str_to_lower(trimws(Type)), "none")) %>%
-          dplyr::pull(VariableName) %>% unique()
-      } else character(0)
-      n_total   <- length(all_in_vars)
-      n_pending <- sum(!all_in_vars %in% names(rv$channels))
-      n_vof     <- sum(vapply(rv$available_channels,
-                              \(c) identical(c$source %||% "", "vof"), logical(1)))
+      manager_vars <- manager_channel_vars()
+      n_active <- sum(manager_vars %in% names(rv$channels))
+      n_total   <- length(manager_vars)
+      n_pending <- sum(!manager_vars %in% names(rv$channels))
+      vof_pending <- names(rv$available_channels)[
+        vapply(rv$available_channels, \(c) identical(c$source %||% "", "vof"), logical(1)) &
+          !names(rv$available_channels) %in% names(rv$channels) &
+          names(rv$available_channels) %in% manager_vars
+      ]
       div(class = "ch-mgr-stats-row",
-          if (n_vof > 0)
+          if (length(vof_pending) > 0)
             actionButton(ns("btn_add_suggested"),
-                         tagList(icon("wand-magic-sparkles"),
-                                 paste0(" Add Suggested (", n_vof, " VOF)")),
-                         class = "btn-sm btn-add-suggested"),
+                          tagList(icon("wand-magic-sparkles"),
+                                  paste0(" Add Suggested (", length(vof_pending), " VOF)")),
+                          class = "btn-sm btn-add-suggested"),
           tags$span(paste0(n_active, " active"),    class = "badge-count-blue"),
           if (n_pending > 0)
             tags$span(paste0(n_pending, " not imported"), class = "badge-count-neutral"),
@@ -771,15 +812,7 @@ mod_channels_server <- function(id, data, media_index) {
     }, ignoreInit = TRUE)
     
     output$ch_mgr_list <- renderUI({
-      an <- data()$analytical; md <- data()$details
-      in_vars <- if (!is.null(md) && all(c("Type", "VariableName") %in% names(md))) {
-        md %>%
-          dplyr::filter(!stringr::str_detect(stringr::str_to_lower(trimws(Type)), "none")) %>%
-          dplyr::pull(VariableName) %>% unique() %>% sort()
-      } else if (!is.null(an)) {
-        exclude_cols <- c("Geography", "Product", "BP_Year", "Period")
-        sort(setdiff(names(an)[sapply(an, is.numeric)], exclude_cols))
-      } else character(0)
+      in_vars <- manager_channel_vars()
       
       if (!length(in_vars))
         return(div(class = "ch-mgr-empty", icon("clock", class = "icon-empty"),

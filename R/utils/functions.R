@@ -29,15 +29,24 @@ parse_period_robust <- function(x) {
 parse_vof_period <- function(x) {
   if (is.null(x) || length(x) == 0L) return(as.Date(character(0L)))
   
-  FMTS <- c(
-    "%Y-%m-%d",   # 2023-04-24
-    "%m/%d/%Y",   # 4/24/2023  ← VOF format
-    "%m/%d/%y",   # 4/24/23
-    "%Y/%m/%d",   # 2023/04/24
-    "%d-%b-%Y",   # 24-Apr-2023
-    "%d/%m/%Y"    # 24/04/2023
-  )
-  
+  raw_vals <- trimws(as.character(x))
+  slash_vals <- raw_vals[grepl("^\\d{1,2}/\\d{1,2}/\\d{2,4}$", raw_vals)]
+  slash_order <- "mdy"
+  if (length(slash_vals)) {
+    parts <- strsplit(slash_vals, "/", fixed = TRUE)
+    first <- suppressWarnings(as.integer(vapply(parts, `[`, character(1), 1L)))
+    second <- suppressWarnings(as.integer(vapply(parts, `[`, character(1), 2L)))
+    dmy_votes <- sum(first > 12, na.rm = TRUE)
+    mdy_votes <- sum(second > 12, na.rm = TRUE)
+    if (dmy_votes > mdy_votes) slash_order <- "dmy"
+  }
+
+  slash_fmts <- if (identical(slash_order, "dmy")) {
+    c("%d/%m/%Y", "%d/%m/%y", "%m/%d/%Y", "%m/%d/%y")
+  } else {
+    c("%m/%d/%Y", "%m/%d/%y", "%d/%m/%Y", "%d/%m/%y")
+  }
+
   out <- rep(as.Date(NA_character_), length(x))
   
   for (i in seq_along(x)) {
@@ -46,7 +55,19 @@ parse_vof_period <- function(x) {
     s <- trimws(as.character(v))
     if (!nzchar(s)) next
     
-    for (fmt in FMTS) {
+    fmts <- if (grepl("^\\d{4}-\\d{1,2}-\\d{1,2}$", s)) {
+      "%Y-%m-%d"
+    } else if (grepl("^\\d{4}/\\d{1,2}/\\d{1,2}$", s)) {
+      "%Y/%m/%d"
+    } else if (grepl("^\\d{1,2}/\\d{1,2}/\\d{2,4}$", s)) {
+      slash_fmts
+    } else if (grepl("^\\d{1,2}-[[:alpha:]]{3}-\\d{2,4}$", s)) {
+      c("%d-%b-%Y", "%d-%b-%y")
+    } else {
+      c("%Y-%m-%d", "%Y/%m/%d", "%d-%b-%Y", "%d-%b-%y", slash_fmts)
+    }
+
+    for (fmt in fmts) {
       d <- tryCatch(as.Date(s, format = fmt), error = \(e) as.Date(NA))
       if (!is.na(d)) { out[[i]] <- d; break }
     }
@@ -391,6 +412,12 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
   
   channels <- list()
   geo_col  <- cross_cols[1]
+  normalize_model_var <- function(x) {
+    out <- trimws(as.character(x))
+    out <- stringr::str_replace_all(out, "\\s+", " ")
+    out <- stringr::str_remove(out, stringr::regex("(_Total)+$", ignore_case = TRUE))
+    stringr::str_to_lower(out)
+  }
   
   an_geos <- if (!is.null(analytical) && geo_col %in% names(analytical))
     unique(as.character(analytical[[geo_col]])) else character(0)
@@ -429,8 +456,24 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
   has_geo <- any(c("Geography", "Geographies") %in% names(vof_df))
   if (!has_geo) stop("VOF missing Geography (or Geographies) column.")
   
+  vof_df <- vof_df %>%
+    dplyr::mutate(
+      MainModelVariableName = trimws(as.character(MainModelVariableName)),
+      AnalyticalVariableName = trimws(as.character(AnalyticalVariableName)),
+      .mv_norm = normalize_model_var(MainModelVariableName)
+    )
+  in_model_norm <- normalize_model_var(in_model_vars)
+  analytical_model_cols <- if (!is.null(analytical)) {
+    cross_id_cols <- c(cross_cols, "Period", "BP_Year")
+    setdiff(names(analytical)[sapply(analytical, is.numeric)], cross_id_cols)
+  } else character(0)
+  analytical_model_norm <- normalize_model_var(analytical_model_cols)
   vof_filtered <- vof_df %>%
-    dplyr::filter(MainModelVariableName %in% in_model_vars)
+    dplyr::filter(
+      .mv_norm %in% in_model_norm |
+        AnalyticalVariableName %in% analytical_model_cols |
+        normalize_model_var(AnalyticalVariableName) %in% analytical_model_norm
+    )
   if (!nrow(vof_filtered))
     stop("No VOF rows matched ModelDetails Type='IN'/'FIXED'.")
   
@@ -641,7 +684,16 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
     cross_id_cols <- c(cross_cols, "Period", "BP_Year")
     model_cols    <- setdiff(names(analytical)[sapply(analytical, is.numeric)],
                              cross_id_cols)
-    non_vof_cols  <- setdiff(model_cols, names(channels))
+    vof_claimed_cols <- unique(unlist(lapply(channels, function(ch) {
+      if (!identical(ch$source, "vof")) return(character(0))
+      c(ch$channel_name %||% "", ch$model_variable %||% "", ch$analytical_varkeys %||% character(0))
+    }), use.names = FALSE))
+    vof_claimed_cols <- vof_claimed_cols[nzchar(vof_claimed_cols)]
+    non_vof_cols <- setdiff(model_cols, names(channels))
+    non_vof_cols <- non_vof_cols[
+      !(non_vof_cols %in% vof_claimed_cols) &
+        !(normalize_model_var(non_vof_cols) %in% normalize_model_var(vof_claimed_cols))
+    ]
     
     for (col in non_vof_cols) {
       kw_match <- Filter(
@@ -706,14 +758,30 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
   
   for (sig in dup_sigs) {
     group_nms <- names(vof_sigs[vof_sigs == sig])
-    min_dates <- sapply(group_nms, function(nm) {
-      mp <- channels[[nm]]$min_period
-      if (!is.null(mp) && !is.na(mp)) as.numeric(as.Date(mp)) else 0
-    })
-    sorted_nms <- group_nms[order(min_dates)]
-    for (i in seq_along(sorted_nms))
-      channels[[sorted_nms[i]]]$time_break_label <-
-      paste0(ordinal_tag(i), "TimeBreak")
+    range_df <- data.frame(
+      nm = group_nms,
+      min_date = as.Date(vapply(group_nms, function(nm) {
+        mp <- channels[[nm]]$min_period
+        if (!is.null(mp) && !is.na(mp)) as.character(as.Date(mp)) else NA_character_
+      }, character(1))),
+      max_date = as.Date(vapply(group_nms, function(nm) {
+        mp <- channels[[nm]]$max_period
+        if (!is.null(mp) && !is.na(mp)) as.character(as.Date(mp)) else NA_character_
+      }, character(1))),
+      stringsAsFactors = FALSE
+    )
+    range_df$range_key <- paste(range_df$min_date, range_df$max_date, sep = "|")
+    unique_ranges <- range_df[!duplicated(range_df$range_key), , drop = FALSE]
+    unique_ranges <- unique_ranges[order(unique_ranges$min_date, unique_ranges$max_date), , drop = FALSE]
+    if (nrow(unique_ranges) <= 1) next
+    range_labels <- setNames(
+      paste0(vapply(seq_len(nrow(unique_ranges)), ordinal_tag, character(1)), "TimeBreak"),
+      unique_ranges$range_key
+    )
+    for (nm in group_nms) {
+      key <- range_df$range_key[range_df$nm == nm][1]
+      channels[[nm]]$time_break_label <- range_labels[[key]] %||% ""
+    }
   }
   
   n_vof      <- sum(sapply(channels, \(c) identical(c$source, "vof")))

@@ -66,7 +66,7 @@ mod_setup_ui <- function(id) {
       ),
       layout_columns(
         col_widths = c(4, 4, 4), class = "mb-3",
-        mk_file_card("1", "Main Data File",    ".csv .zip",
+        mk_file_card("1", "RAE Datafile",    ".csv .zip",
                      fileInput(ns("file_main"),       NULL, accept = c(".csv", ".zip")),
                      kind = "main"),
         mk_file_card("2", "Analytical Dataset", ".RData",
@@ -143,7 +143,7 @@ mod_setup_ui <- function(id) {
           div(class = "alert alert-info alert-sm p-2 mb-2",
               icon("circle-info"), " ",
               tags$strong("All Period — fixed in Model Update."),
-              " All data in Main Data File is treated as focus period.",
+              " All data in RAE Datafile is treated as focus period.",
               " Past data already carries the Before label from processing.")
         ),
         uiOutput(ns("custom_dates_ui")),
@@ -342,10 +342,10 @@ mod_setup_server <- function(id) {
     load_main_base <- function(file_row, preloaded = NULL, source = "manual") {
       ext <- tools::file_ext(file_row$name)
       df <- preloaded %||% read_main_data(file_row$datapath, ext)
-      if (!validate_required_cols(df, "Main data file")) return(FALSE)
+      if (!validate_required_cols(df, "RAE Datafile")) return(FALSE)
       rv$main_data <- df
       set_file_meta("main", file_row, nrow(rv$main_data), ncol(rv$main_data), source)
-      showNotification(paste0("Main Data File loaded - ",
+      showNotification(paste0("RAE Datafile loaded - ",
                               format(nrow(rv$main_data), big.mark = ","),
                               " rows"),
                        type = "message", duration = 4)
@@ -498,16 +498,9 @@ mod_setup_server <- function(id) {
       })
     }
     
-    # ── Tab gating ─────────────────────────────────────────────────────
+    # ── Navigation availability ────────────────────────────────────────
     observe({
-      mode <- input$app_mode %||% "build"
-      base_ready <- !is.null(rv$main_data)  && !is.null(rv$analytical) &&
-        !is.null(rv$vof_data) && !is.null(rv$details) && !is.null(rv$channels_rois)
-      all_ready <- if (mode == "update")
-        base_ready && !is.null(rv$analytical_combined)
-      else
-        base_ready
-      session$sendCustomMessage("setTabsDisabled", list(disabled = !all_ready))
+      session$sendCustomMessage("setTabsDisabled", list(disabled = FALSE))
     })
     
     observeEvent(input$period_preset, {
@@ -533,7 +526,7 @@ mod_setup_server <- function(id) {
       req(input$file_base_bundle)
       files <- input$file_base_bundle
       expected <- c("main", "analytical", "vof", "details", "rois")
-      labels <- c(main = "Main Data File", analytical = "Analytical Dataset",
+      labels <- c(main = "RAE Datafile", analytical = "Analytical Dataset",
                   vof = "VOF Metadata", details = "ModelDetails",
                   rois = "ROIs by Channel")
       detected <- list()
@@ -601,12 +594,12 @@ mod_setup_server <- function(id) {
       }
     }, ignoreInit = TRUE)
     
-    # ── Load Main Data File ────────────────────────────────────────────
+    # ── Load RAE Datafile ────────────────────────────────────────────
     observeEvent(input$file_main, {
       req(input$file_main)
       ext  <- tools::file_ext(input$file_main$name)
       size <- round(input$file_main$size / 1024^2, 1)
-      withProgress(message = paste0("Loading Main Data File (", size, " MB)..."), value = 0, {
+      withProgress(message = paste0("Loading RAE Datafile (", size, " MB)..."), value = 0, {
         incProgress(0.05, detail = "Checking columns...")
         tryCatch({
           df_zip <- NULL
@@ -625,14 +618,14 @@ mod_setup_server <- function(id) {
           incProgress(0.10, detail = "Reading file...")
           df <- df_zip %||% read_main_data(input$file_main$datapath, ext)
           incProgress(0.70, detail = "Validating...")
-          if (!validate_required_cols(df, "Main data file")) return()
+          if (!validate_required_cols(df, "RAE Datafile")) return()
           incProgress(0.10, detail = "Storing...")
           rv$main_data <- df
           set_file_meta("main", input$file_main,
                         nrow(rv$main_data), ncol(rv$main_data), "manual")
           rm(df); gc(verbose = FALSE, full = TRUE)
           incProgress(0.05, detail = "Done!")
-          showNotification(paste0("Main Data File loaded - ",
+          showNotification(paste0("RAE Datafile loaded - ",
                                   format(nrow(rv$main_data), big.mark = ","),
                                   " rows | ", size, " MB"),
                            type = "message", duration = 4)
@@ -1036,7 +1029,7 @@ mod_setup_server <- function(id) {
     
     # ── Media Index ────────────────────────────────────────────────────
     observe({
-      req(rv$main_data, rv$analytical, rv$vof_data, rv$details, rv$channels_rois)
+      req(rv$main_data, rv$analytical, rv$vof_data, rv$details)
       if (isolate(isTRUE(mi_building()))) return()
       mi_building(TRUE)
       tryCatch({
@@ -1322,7 +1315,7 @@ mod_setup_server <- function(id) {
               div(class = "mb-10",
                   tags$span("New (all focus)", class = "preview-label-focus"),
                   tags$code(class = "code-tag-blue", paste0("_", lbl)),
-                  tags$span(" all Main Data File splits", class = "text-muted small ms-2"))))
+                  tags$span(" all RAE Datafile splits", class = "text-muted small ms-2"))))
       } else if (preset == "all") {
         div(class = "text-muted small p-2", "No column suffix - All Period selected.")
       } else {
@@ -1417,9 +1410,9 @@ mod_setup_server <- function(id) {
     output$file_comparison <- renderUI({
       if (is.null(rv$main_data) || is.null(rv$analytical)) {
         msg <- if (is.null(rv$analytical) && is.null(rv$main_data))
-          "Upload Main Data File and Analytical Dataset to begin validation."
+          "Upload RAE Datafile and Analytical Dataset to begin validation."
         else if (is.null(rv$analytical)) "Upload the Analytical Dataset to complete validation."
-        else "Upload the Main Data File to complete validation."
+        else "Upload the RAE Datafile to complete validation."
         return(div(class = "text-center py-4 text-muted", tags$p(msg)))
       }
       result <- tryCatch(comparison_result(), error = \(e) NULL)
@@ -1469,16 +1462,16 @@ mod_setup_server <- function(id) {
         if (mode == "update") {
           scope_msg <- switch(ts$status,
                               green  = paste0("Focus period data only — expected in Model Update. ",
-                                              "Analytical contains full history; Main Data File covers the new focus period."),
-                              yellow = "Main Data File extends beyond Analytical. Check that the focus period is correct.",
-                              red    = "Main Data File appears older than Analytical. Verify files are correct.", NULL)
+                                              "Analytical contains full history; RAE Datafile covers the new focus period."),
+                              yellow = "RAE Datafile extends beyond Analytical. Check that the focus period is correct.",
+                              red    = "RAE Datafile appears older than Analytical. Verify files are correct.", NULL)
           align_msg <- switch(pa$status,
                               green  = if (pa$n_common == 0)
-                                "No overlapping periods — Main Data File covers new focus period only. Expected in Model Update."
+                                "No overlapping periods — RAE Datafile covers new focus period only. Expected in Model Update."
                               else paste0(pa$n_common, " overlapping period(s) found with Analytical."),
                               yellow = paste0("Small period offset (+/- ", pa$max_offset,
                                               " days). Total Check will auto-align."),
-                              red    = "No valid focus periods found. Verify Main Data File date range.", NULL)
+                              red    = "No valid focus periods found. Verify RAE Datafile date range.", NULL)
           impl_cls <- switch(ts_status, green = "impl-text impl-ok",
                              yellow = "impl-text impl-warn", red = "impl-text impl-err", "impl-text")
           div(class = impl_cls,
@@ -1487,12 +1480,12 @@ mod_setup_server <- function(id) {
         } else {
           scope_msg  <- switch(ts$status,
                                green  = "Date scopes are fully aligned.",
-                               yellow = "Data File scope differs from Analytical.",
-                               red    = "Data File is missing periods required by the model.", NULL)
+                               yellow = "RAE Datafile scope differs from Analytical.",
+                               red    = "RAE Datafile is missing periods required by the model.", NULL)
           period_msg <- switch(pa$status,
                                green  = if (pa$n_mn_extra > 0)
                                  paste0(format(pa$n_mn_extra, big.mark = ","),
-                                        " extra Data File periods become non-focus splits.")
+                                        " extra RAE Datafile periods become non-focus splits.")
                                else "All periods match exactly.",
                                yellow = paste0("Small offset (+/-", pa$max_offset,
                                                " days) - Total Check will auto-align."),
@@ -1501,7 +1494,7 @@ mod_setup_server <- function(id) {
           weekday_msg <- if (!is.null(wd) && wd$status == "red")
             tags$div(class = "text-danger fw-semibold mt-1",
                      paste0("Day-of-week mismatch: Analytical uses ", wd$an_day,
-                            ", Data File uses ", wd$mn_day,
+                            ", RAE Datafile uses ", wd$mn_day,
                             " - period alignment will be unreliable."))
           else NULL
           impl_cls <- switch(ts_status, green = "impl-text impl-ok",
@@ -1523,14 +1516,14 @@ mod_setup_server <- function(id) {
                             red    = paste0(chk$n_miss, " missing"), "N/A")
         impl <- switch(chk$status,
                        green  = div(class = "impl-text impl-ok",
-                                    paste0("All ", chk$n_an, " ", col, " values present in Data File.")),
+                                    paste0("All ", chk$n_an, " ", col, " values present in RAE Datafile.")),
                        yellow = div(class = "impl-text impl-warn",
-                                    tags$div(paste0("Data File has ", chk$n_extra, " additional ", col, " value(s).")),
+                                    tags$div(paste0("RAE Datafile has ", chk$n_extra, " additional ", col, " value(s).")),
                                     if (length(chk$sample_extra) > 0)
                                       tags$div(class = "text-muted small",
                                                paste0("Extra: ", paste(chk$sample_extra, collapse = " | ")))),
                        red    = div(class = "impl-text impl-err",
-                                    tags$div(paste0(chk$n_miss, " Analytical ", col, " value(s) not found in Data File.")),
+                                    tags$div(paste0(chk$n_miss, " Analytical ", col, " value(s) not found in RAE Datafile.")),
                                     if (length(chk$sample_miss) > 0)
                                       tags$div(class = "text-muted small",
                                                paste0("Missing: ", paste(chk$sample_miss, collapse = " | ")))),
@@ -1603,7 +1596,7 @@ mod_setup_server <- function(id) {
         div(class = "alert alert-info alert-sm p-2 mb-3",
             icon("circle-info"), " ",
             tags$strong("Model Update mode:"),
-            " Main Data File contains focus period only. ",
+            " RAE Datafile contains focus period only. ",
             "Analytical Dataset contains full history. Low period overlap is expected.")
       else NULL
       
@@ -1612,14 +1605,14 @@ mod_setup_server <- function(id) {
                                   tags$thead(tags$tr(style = "border-bottom:2px solid #5B9BD5;",
                                                      tags$th("Check",       class = "th-val"),
                                                      tags$th("Analytical",  class = "th-val"),
-                                                     tags$th("Data File",   class = "th-val"),
+                                                     tags$th("RAE Datafile", class = "th-val"),
                                                      tags$th("Implication", class = "th-val th-impl"),
                                                      tags$th("Status",      class = "th-val"))),
                                   tags$tbody(
                                     mk_sep("File Alignment",
                                            if (mode == "update")
-                                             "Analytical (full history) vs Main Data File (focus period only)"
-                                           else "Analytical vs Main Data File",
+                                             "Analytical (full history) vs RAE Datafile (focus period only)"
+                                           else "Analytical vs RAE Datafile",
                                            tagList(mk_pill(sum(fa_s == "green"), "ok"),
                                                    mk_pill(sum(fa_s == "yellow"), "warn"),
                                                    mk_pill(sum(fa_s == "red"), "err"))),
@@ -1628,7 +1621,7 @@ mod_setup_server <- function(id) {
                                             tags$td(checks$time_scope$an_range,   class = "td-val td-nowrap"),
                                             tags$td(checks$time_scope$main_range, class = "td-val td-nowrap"),
                                             tags$td(ts_impl, class = "td-val"), mk_badge(ts_status)),
-                                    mk_sep("Data Quality", "Main Data File only",
+                                    mk_sep("Data Quality", "RAE Datafile only",
                                            tagList(mk_pill(sum(dq_s %in% c("green","na")), "ok"),
                                                    mk_pill(sum(dq_s == "yellow"), "warn"),
                                                    mk_pill(sum(dq_s == "red"), "err"))),
@@ -1676,7 +1669,7 @@ mod_setup_server <- function(id) {
         loaded <- vapply(base_file_kinds, \(k) !is.null(rv$file_meta[[k]]), logical(1))
         base_ready <- !is.null(rv$main_data) && !is.null(rv$analytical) &&
           !is.null(rv$vof_data) && !is.null(rv$details) && !is.null(rv$channels_rois)
-        missing <- c(main = "Main", analytical = "Analytical", vof = "VOF",
+        missing <- c(main = "RAE Datafile", analytical = "Analytical", vof = "VOF",
                      details = "ModelDetails", rois = "ROIs")[!loaded]
         list(
           files_loaded      = sum(loaded),

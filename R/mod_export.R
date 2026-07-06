@@ -866,12 +866,85 @@ mod_export_server <- function(id, results, data, config, channels,
     }
 
     # ── 2. Side model mapping ─────────────────────────────────────────────
-    build_side_mapping_export <- function(res_list, d = NULL) {
+    build_side_mapping_export <- function(res_list, channels_list = list(), d = NULL) {
+      standard_cols <- c("VariableSplit", "MainModelVariableName", "Weight",
+                         "MinWeight", "MaxWeight", "rank")
+
+      normalize_mapping <- function(df, nm, cfg = NULL) {
+        if (is.null(df) || !nrow(df) || !"VariableSplit" %in% names(df))
+          return(NULL)
+
+        out <- as.data.frame(df)
+        if (!"MainModelVariableName" %in% names(out)) {
+          if ("model_var" %in% names(out)) {
+            out$MainModelVariableName <- out$model_var
+          } else {
+            out$MainModelVariableName <- cfg$channel_name %||% nm
+          }
+        }
+        if (!"Weight" %in% names(out)) out$Weight <- 1
+        if (!"MinWeight" %in% names(out)) out$MinWeight <- 0.5
+        if (!"MaxWeight" %in% names(out)) out$MaxWeight <- 2
+        if (!"rank" %in% names(out)) out$rank <- NA_real_
+
+        out %>%
+          dplyr::filter(!is.na(.data$VariableSplit),
+                        trimws(as.character(.data$VariableSplit)) != "") %>%
+          dplyr::select(dplyr::all_of(standard_cols)) %>%
+          dplyr::distinct(.data$VariableSplit, .data$MainModelVariableName,
+                          .keep_all = TRUE)
+      }
+
+      mapping_from_rag <- function(r, nm, cfg = NULL) {
+        if (is.null(r) || is.null(r$rag)) return(NULL)
+
+        rag_df <- as.data.frame(r$rag)
+        id_cols <- intersect(c(r$cross_cols %||% character(0), "Period"),
+                             names(rag_df))
+        num_cols <- setdiff(names(rag_df)[vapply(rag_df, is.numeric, logical(1))],
+                            id_cols)
+        if (!length(num_cols)) return(NULL)
+
+        spend_kw <- cfg$spend_keyword %||% "Spend"
+        num_cols <- num_cols[!grepl(spend_kw, num_cols, ignore.case = TRUE)]
+
+        act_kw <- cfg$activity_keyword %||% ""
+        act_cols <- if (nzchar(act_kw)) {
+          grep(act_kw, num_cols, ignore.case = TRUE, value = TRUE)
+        } else character(0)
+        if (!length(act_cols)) act_cols <- num_cols
+
+        active <- act_cols[vapply(act_cols, function(col) {
+          sum(rag_df[[col]], na.rm = TRUE) > 0
+        }, logical(1))]
+        if (!length(active)) return(NULL)
+
+        tibble::tibble(
+          VariableSplit = active,
+          MainModelVariableName = cfg$model_variable %||% cfg$channel_name %||% nm,
+          Weight = 1,
+          MinWeight = 0.5,
+          MaxWeight = 2,
+          rank = NA_real_
+        ) %>%
+          dplyr::distinct(.data$VariableSplit, .data$MainModelVariableName,
+                          .keep_all = TRUE)
+      }
+
       rows <- Filter(Negate(is.null), lapply(names(res_list), function(nm) {
         r <- res_list[[nm]]
-        if (is.null(r) || is.null(r$side_mapping) || !nrow(r$side_mapping) ||
-            !"VariableSplit" %in% names(r$side_mapping)) return(NULL)
-        r$side_mapping
+        if (is.null(r)) return(NULL)
+        cfg <- channels_list[[nm]] %||% list()
+
+        side_map <- normalize_mapping(r$side_mapping, nm, cfg)
+        if (!is.null(side_map) && nrow(side_map) > 0)
+          return(side_map)
+
+        act_map <- normalize_mapping(r$act_diagnoses, nm, cfg)
+        if (!is.null(act_map) && nrow(act_map) > 0)
+          return(act_map)
+
+        mapping_from_rag(r, nm, cfg)
       }))
       result <- if (!length(rows)) NULL
       else data.table::rbindlist(rows, fill = TRUE) %>% as.data.frame()
@@ -1219,10 +1292,13 @@ mod_export_server <- function(id, results, data, config, channels,
 
           incProgress(0.15, message = "Side Model Mapping...")
           tryCatch({
-            df <- build_side_mapping_export(res_snap, d_snap)
+            df <- build_side_mapping_export(res_snap, channels_snap, d_snap)
             if (!is.null(df) && nrow(df) > 0) {
               f <- file.path(tmp_dir, "side_model_mapping.csv")
               readr::write_csv(df, f, na = ""); written <- c(written, f)
+            } else {
+              showNotification("No Activity splits available for side_model_mapping.csv.",
+                               type = "warning", duration = 6)
             }
           }, error = \(e) showNotification(paste("Side Mapping error:", e$message),
                                            type = "warning", duration = 6))

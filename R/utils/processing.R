@@ -11,23 +11,69 @@ keep_nonzero_cols <- function(df) {
   df[, keep, drop = FALSE]
 }
 
+is_empty_split_part <- function(x) {
+  v <- trimws(as.character(x))
+  is.na(x) | is.na(v) | toupper(v) %in% c("", "NA", "N/A", "NULL", "NONE")
+}
+
+clean_split_part <- function(x) {
+  v <- trimws(as.character(x))
+  v[is_empty_split_part(x)] <- NA_character_
+  v
+}
+
 apply_dimension_breaks <- function(d, dimension_breaks, channel_name = NULL) {
   if (!length(dimension_breaks)) return(d)
   for (brk in dimension_breaks) {
     col <- brk$column; sep <- brk$separator; n <- brk$n_parts
     if (!col %in% names(d)) next
-    parts <- strsplit(as.character(d[[col]]), sep, fixed = TRUE)
-    
+    source_values <- clean_split_part(d[[col]])
+    split_values <- strsplit(source_values, sep, fixed = TRUE)
+
     for (i in seq_len(n)) {
-      d[[brk$names[i]]] <- sapply(parts, function(p) {
-        if (length(p) < i) NA_character_    # NA instead of repeating
-        else if (i == n) paste(p[i:length(p)], collapse = sep)
-        else p[i]
-      })
+      values <- vapply(split_values, function(p) {
+        if (!length(p) || length(p) < i) {
+          NA_character_
+        } else if (i == n) {
+          paste(p[i:length(p)], collapse = sep)
+        } else {
+          p[i]
+        }
+      }, character(1))
+      d[[brk$names[i]]] <- clean_split_part(values)
     }
     d[[col]] <- NULL
   }
   d
+}
+
+build_split_name_from_columns <- function(d, split_cols, fallback_col = "VariableName") {
+  split_cols_present <- intersect(split_cols, names(d))
+  if (!length(split_cols_present) && fallback_col %in% names(d))
+    split_cols_present <- fallback_col
+
+  if (!length(split_cols_present))
+    return(rep("Unknown", nrow(d)))
+
+  parts <- lapply(split_cols_present, function(col) {
+    v <- clean_split_part(d[[col]])
+    ifelse(is.na(v), "", v)
+  })
+
+  combined <- if (length(parts) == 1L) {
+    parts[[1]]
+  } else {
+    Reduce(function(a, b)
+      ifelse(nzchar(a) & nzchar(b), paste(a, b, sep = "_"),
+             ifelse(nzchar(a), a, b)),
+      parts)
+  }
+
+  fallback <- if (fallback_col %in% names(d)) clean_split_part(d[[fallback_col]])
+  else rep(NA_character_, nrow(d))
+  combined[!nzchar(combined) & !is.na(fallback)] <- fallback[!nzchar(combined) & !is.na(fallback)]
+  combined[!nzchar(combined)] <- "Unknown"
+  combined
 }
 
 get_diag_df <- function(df, cross_cols, ref_cross_key) {
@@ -566,28 +612,14 @@ process_channel <- function(all_rags,
     d[, VariableValue := suppressWarnings(as.numeric(as.character(VariableValue)))]
     d[is.na(VariableValue), VariableValue := 0]
     
-    d_df <- apply_dimension_breaks(as.data.frame(d), dimension_breaks,
-                                   channel_name = cfg$channel_name)
-    d <- data.table::as.data.table(d_df)
+    d <- apply_dimension_breaks(d, dimension_breaks,
+                                channel_name = cfg$channel_name)
+    d <- data.table::as.data.table(d)
     
-    # ── SplitName — vectorized ────────────────────────────────────────
-    split_cols_present <- intersect(cfg$split_columns, names(d))
-    if (!length(split_cols_present)) split_cols_present <- "VariableName"
-    
-    parts <- lapply(split_cols_present, function(col) {
-      v <- trimws(as.character(d[[col]]))
-      ifelse(is.na(v) | v == "NA" | v == "", "", v)
-    })
-    
-    combined <- if (length(parts) == 1L) {
-      parts[[1]]
-    } else {
-      Reduce(function(a, b)
-        ifelse(nzchar(a) & nzchar(b), paste(a, b, sep = "_"),
-               ifelse(nzchar(a), a, b)),
-        parts)
-    }
-    d[, SplitName := ifelse(nzchar(combined), combined, "Unknown")]
+    # Keep VariableName in the technical split key so activity/spend detection
+    # still works when the visible split order only uses broken dimensions.
+    split_cols_technical <- unique(c("VariableName", cfg$split_columns %||% character(0)))
+    d[, SplitName := build_split_name_from_columns(d, split_cols_technical)]
     
     # ── Pivot wide ────────────────────────────────────────────────────
     lhs    <- paste(cross_id, collapse = " + ")
@@ -678,7 +710,7 @@ process_channel <- function(all_rags,
       }
     }
     
-    rm(d, d_df, d_wide, nf_raw, nf, fc_raw, fc)
+    rm(d, d_wide, nf_raw, nf, fc_raw, fc)
   }
   
   # ── Assemble RAG ──────────────────────────────────────────────────────

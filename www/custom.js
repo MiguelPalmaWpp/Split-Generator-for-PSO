@@ -153,6 +153,20 @@ var label = container.querySelector('.custom-file-label');
 if (label) label.textContent = 'No file selected';
 });
 
+Shiny.addCustomMessageHandler('setActionButtonDisabled', function(msg) {
+if (!msg || !msg.id) return;
+
+var btn = document.getElementById(msg.id);
+if (!btn) return;
+
+btn.disabled = !!msg.disabled;
+if (msg.disabled) {
+  btn.classList.add('disabled');
+} else {
+  btn.classList.remove('disabled');
+}
+});
+
 function adjustVisibleDataTables() {
 if (!$.fn || !$.fn.dataTable) return;
 

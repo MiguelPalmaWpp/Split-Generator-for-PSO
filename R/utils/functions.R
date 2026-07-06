@@ -537,6 +537,28 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
       if (any(grepl(kw, matching, ignore.case = TRUE))) return(kw)
     "Spend"
   }
+
+  vof_metric_role <- function(metric) {
+    m <- stringr::str_to_lower(trimws(as.character(metric)))
+    dplyr::case_when(
+      stringr::str_detect(m, "spend|cost|investment|budget") ~ "spend",
+      stringr::str_detect(m, paste(
+        c("activity", keyword_dict$activity),
+        collapse = "|"
+      )) ~ "activity",
+      TRUE ~ NA_character_
+    )
+  }
+
+  keyword_from_metric <- function(metric, role = c("activity", "spend")) {
+    role <- match.arg(role)
+    dict <- if (identical(role, "activity")) keyword_dict$activity else keyword_dict$spend
+    metric <- trimws(as.character(metric))
+    matched <- dict[vapply(dict, function(kw) {
+      any(stringr::str_detect(metric, stringr::regex(kw, ignore_case = TRUE)))
+    }, logical(1))]
+    if (length(matched)) matched[1] else NA_character_
+  }
   
   # OPT-6: Fast schema derive using pre-indexed lookup
   derive_ch_config_fast <- function(anal_var_names) {
@@ -572,21 +594,21 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
     if (is.null(vof_rows) || !nrow(vof_rows)) next
     
     anal_var_names <- unique(vof_rows$AnalyticalVariableName)
+    metric_roles <- if ("Metric" %in% names(vof_rows))
+      vof_metric_role(vof_rows$Metric) else rep(NA_character_, nrow(vof_rows))
+    activity_vars <- unique(vof_rows$AnalyticalVariableName[
+      metric_roles == "activity" | is.na(metric_roles)
+    ])
+    spend_vars <- unique(vof_rows$AnalyticalVariableName[
+      metric_roles == "spend"
+    ])
+    if (!length(activity_vars)) activity_vars <- anal_var_names
     
     ch_cfg <- derive_ch_config_fast(anal_var_names)
     
-    act_kw <- if ("Metric" %in% names(vof_rows)) {
-      metrics <- unique(vof_rows$Metric[
-        !is.na(vof_rows$Metric) & nzchar(vof_rows$Metric)])
-      if (length(metrics) > 0) metrics[1]
-      else detect_activity_keyword(
-        stringr::str_remove(anal_var_names, "_Total_Total_Total$"),
-        keyword_dict)
-    } else {
-      detect_activity_keyword(
-        stringr::str_remove(anal_var_names, "_Total_Total_Total$"),
-        keyword_dict)
-    }
+    act_kw <- detect_activity_keyword(
+      stringr::str_remove(activity_vars, "_Total_Total_Total$"),
+      keyword_dict)
     
     vi_broad <- unique(trimws(stringr::str_remove(
       ch_cfg$varname_include,
@@ -597,7 +619,20 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
     varname_include <- unique(c(ch_cfg$varname_include, vi_broad))
     varname_include <- varname_include[nzchar(varname_include)]
     
-    spend_kw <- detect_spend_kw_fast(varname_include)
+    spend_kw <- if (length(spend_vars)) {
+      detected <- detect_spend_keyword(
+        data.frame(VariableName = stringr::str_remove(spend_vars, "_Total(_Total)*$")),
+        stringr::str_remove(spend_vars, "_Total(_Total)*$"),
+        keyword_dict)
+      metric_kw <- if ("Metric" %in% names(vof_rows))
+        keyword_from_metric(vof_rows$Metric[metric_roles == "spend"], "spend")
+      else NA_character_
+      if (!is.na(detected) && nzchar(detected)) detected
+      else if (!is.na(metric_kw) && nzchar(metric_kw)) metric_kw
+      else detect_spend_kw_fast(varname_include)
+    } else {
+      detect_spend_kw_fast(varname_include)
+    }
     
     # Dates — read from pre-parsed columns (now always Date class)
     min_p <- tryCatch({
@@ -999,30 +1034,14 @@ process_channel_legacy <- function(all_rags,
     d[, VariableValue := suppressWarnings(as.numeric(as.character(VariableValue)))]
     d[is.na(VariableValue), VariableValue := 0]
     
-    d_df <- apply_dimension_breaks(as.data.frame(d), dimension_breaks,
-                                   channel_name = cfg$channel_name)
-    d <- data.table::as.data.table(d_df)
+    d <- apply_dimension_breaks(d, dimension_breaks,
+                                channel_name = cfg$channel_name)
+    d <- data.table::as.data.table(d)
     
-    # ── OPT: SplitName — vectorized Reduce, no row-by-row loop ─────────────
-    # Was: vapply(seq_len(.N), function(i) { sapply(...) }, character(1))
-    # Now: fully vectorized — 100-500x faster on large datasets
-    split_cols_present <- intersect(cfg$split_columns, names(d))
-    if (!length(split_cols_present)) split_cols_present <- "VariableName"
-    
-    parts <- lapply(split_cols_present, function(col) {
-      v <- trimws(as.character(d[[col]]))
-      ifelse(is.na(v) | v == "NA" | v == "", "", v)
-    })
-    
-    combined <- if (length(parts) == 1L) {
-      parts[[1]]
-    } else {
-      Reduce(function(a, b)
-        ifelse(nzchar(a) & nzchar(b), paste(a, b, sep = "_"),
-               ifelse(nzchar(a), a, b)),
-        parts)
-    }
-    d[, SplitName := ifelse(nzchar(combined), combined, "Unknown")]
+    # Keep VariableName in the technical split key so activity/spend detection
+    # still works when the visible split order only uses broken dimensions.
+    split_cols_technical <- unique(c("VariableName", cfg$split_columns %||% character(0)))
+    d[, SplitName := build_split_name_from_columns(d, split_cols_technical)]
     
     # ── Pivot wide ───────────────────────────────────────────────────────────
     lhs    <- paste(cross_id, collapse = " + ")
@@ -1114,7 +1133,7 @@ process_channel_legacy <- function(all_rags,
       }
     }
     
-    rm(d, d_df, d_wide, nf_raw, nf, fc_raw, fc)
+    rm(d, d_wide, nf_raw, nf, fc_raw, fc)
   }
   
   # ── OPT: Assemble RAG — setnafill OUTSIDE the merge loop ────────────────

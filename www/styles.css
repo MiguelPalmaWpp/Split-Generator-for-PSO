@@ -1426,6 +1426,48 @@ font-size: 12.5px; color: #1e40af;
 .break-preview-td-orig { font-size: 11px; padding: 3px 8px; color: #6c757d; border-right: 1px solid #e3e8ef; }
 .break-preview-td      { font-size: 11px; padding: 3px 8px; color: #2c3e50; }
 .break-preview-td-warn { font-size: 11px; padding: 3px 8px; color: #856404; }
+.break-preview-stats {
+display: flex; flex-wrap: wrap; gap: 6px;
+margin: 0 0 8px;
+}
+.break-preview-chip {
+display: inline-flex; align-items: center;
+height: 22px; padding: 0 8px;
+border-radius: 7px; background: #f7f9fc;
+border: 1px solid #d9e3ef;
+font-size: 10.5px; font-weight: 700; color: #52667a;
+}
+.break-preview-chip-ok {
+background: #ecfdf3; border-color: #bbf7d0; color: #15803d;
+}
+.break-preview-chip-warn {
+background: #fff7ed; border-color: #fed7aa; color: #b45309;
+}
+.break-preview-dist {
+font-size: 11px; color: #7890aa; margin: 0 0 8px;
+}
+.break-preview-note {
+font-size: 11.5px; color: #6b7280;
+background: #f8fafc; border: 1px solid #e5edf6;
+border-radius: 6px; padding: 7px 9px; margin: 0 0 8px;
+}
+.break-preview-note-suggest {
+background: #EBF3FB; border-color: #bcd7f1; color: #2f75b5;
+}
+.break-preview-final {
+border-top: 1px solid #e5edf6; margin-top: 8px; padding-top: 8px;
+display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+}
+.break-preview-final-label {
+font-size: 11px; font-weight: 700; color: #52667a; margin-right: 2px;
+}
+.break-preview-final-code {
+font-size: 10.5px; color: #2f75b5; background: #EBF3FB;
+border-radius: 5px; padding: 2px 6px;
+}
+.break-preview-final-hint {
+flex-basis: 100%; margin: 1px 0 0; font-size: 10.5px; color: #8a9bb0;
+}
 
 /*
 ═══════════════════════════════════════════════════════════════════════

@@ -74,8 +74,10 @@ mod_channels_server <- function(id, data, media_index) {
     pending_delete <- reactiveVal(NULL)
     breaks_enabled <- reactiveVal(FALSE)
     config_import_pending <- reactiveVal(NULL)
+    copy_config_source <- reactiveVal(NULL)
     preview_row_limit <- 1000L
     split_preview_cache <- reactiveValues(key = NULL, ui = NULL)
+    break_preview_cache <- reactiveValues(key = NULL, data = NULL)
     break_n_parts_cache <- reactiveVal(2L)
     
     effective_split_choices <- function(breaks = list(), cross_cols = character(0)) {
@@ -86,6 +88,20 @@ mod_channels_server <- function(id, data, media_index) {
         choices <- c(choices, brk$names)
       }
       choices
+    }
+
+    clone_dimension_breaks <- function(breaks = list()) {
+      lapply(breaks %||% list(), function(brk) {
+        part_names <- as.character(brk$names %||% character(0))
+        n_parts <- brk$n_parts %||% length(part_names)
+        n_parts <- if (length(n_parts) && !is.na(n_parts)) as.integer(n_parts) else length(part_names)
+        list(
+          column = brk$column %||% "",
+          separator = brk$separator %||% "_",
+          n_parts = n_parts,
+          names = part_names
+        )
+      })
     }
 
     limit_preview_rows <- function(df, limit = preview_row_limit) {
@@ -233,6 +249,8 @@ mod_channels_server <- function(id, data, media_index) {
     observeEvent(main_data(), {
       split_preview_cache$key <- NULL
       split_preview_cache$ui <- NULL
+      break_preview_cache$key <- NULL
+      break_preview_cache$data <- NULL
     }, ignoreInit = TRUE)
     
     observeEvent(input$btn_enable_breaks, { breaks_enabled(TRUE) })
@@ -471,12 +489,104 @@ mod_channels_server <- function(id, data, media_index) {
                           input_id = ns("splits_selected"))),
           uiOutput(ns("split_preview"))),
         
-        div(class = "mt-3",
+        div(class = "mt-3 ch-copy-actions",
+            actionButton(ns("btn_copy_config"),
+                         tagList(icon("copy"), " Copy Config"),
+                         class = "btn-outline-secondary btn-sm"),
             actionButton(ns("btn_save"), tagList(icon("floppy-disk"), " Save Split Order"),
-                         class = "btn-success w-100"))
+                         class = "btn-success btn-sm flex-fill"))
       )
     })
     
+    observeEvent(input$btn_copy_config, {
+      req(rv$selected, rv$selected %in% names(rv$channels))
+      target_choices <- setdiff(names(rv$channels), rv$selected)
+      if (!length(target_choices)) {
+        showNotification("No other channels available to copy into.", type = "warning")
+        return()
+      }
+
+      source_nm <- rv$selected
+      copy_config_source(source_nm)
+      source_splits <- isolate(input$splits_selected) %||%
+        rv$channels[[source_nm]]$split_columns %||% c("VariableName")
+      source_splits <- source_splits[!is.na(source_splits) & nzchar(source_splits)]
+      if (!length(source_splits)) source_splits <- c("VariableName")
+      source_breaks <- rv$channels[[source_nm]]$dimension_breaks %||% list()
+
+      showModal(modalDialog(
+        title = tagList(icon("copy"), " Copy Split/Break Config"),
+        div(class = "break-info-box",
+            icon("circle-info", class = "icon-blue-sm"),
+            " Copy split order and dimension breaks from the current channel. Target merges will be cleared."),
+        tags$div(class = "import-preview-box mb-3",
+                 tags$p(class = "mb-1",
+                        tags$strong("Source: "), source_nm),
+                 tags$p(class = "text-muted small mb-0",
+                        paste0(length(source_splits), " split dimension",
+                               if (length(source_splits) != 1) "s" else "",
+                               " and ", length(source_breaks), " break",
+                               if (length(source_breaks) != 1) "s" else "",
+                               " will be copied."))),
+        selectizeInput(
+          ns("copy_config_targets"),
+          "Copy into channel(s)",
+          choices = target_choices,
+          selected = character(0),
+          multiple = TRUE,
+          options = list(placeholder = "Select target channels...")
+        ),
+        footer = tagList(
+          actionButton(ns("btn_apply_copy_config"),
+                       tagList(icon("check"), " Apply Copy"),
+                       class = "btn-primary"),
+          modalButton("Cancel")
+        ),
+        easyClose = TRUE,
+        size = "m"
+      ))
+    }, ignoreInit = TRUE)
+
+    observeEvent(input$btn_apply_copy_config, {
+      source_nm <- copy_config_source()
+      req(!is.null(source_nm), source_nm %in% names(rv$channels))
+
+      targets <- input$copy_config_targets %||% character(0)
+      targets <- intersect(targets, setdiff(names(rv$channels), source_nm))
+      if (!length(targets)) {
+        showNotification("Select at least one target channel.", type = "warning")
+        return()
+      }
+
+      source_cfg <- rv$channels[[source_nm]]
+      source_splits <- if (identical(source_nm, rv$selected)) {
+        isolate(input$splits_selected) %||% source_cfg$split_columns %||% c("VariableName")
+      } else {
+        source_cfg$split_columns %||% c("VariableName")
+      }
+      source_splits <- source_splits[!is.na(source_splits) & nzchar(source_splits)]
+      if (!length(source_splits)) source_splits <- c("VariableName")
+      source_breaks <- clone_dimension_breaks(source_cfg$dimension_breaks %||% list())
+
+      for (target_nm in targets) {
+        rv$channels[[target_nm]]$split_columns <- source_splits
+        rv$channels[[target_nm]]$dimension_breaks <- clone_dimension_breaks(source_breaks)
+        rv$channels[[target_nm]]$saved_merges <- list()
+        dirty_channels[[target_nm]] <- TRUE
+      }
+
+      split_preview_cache$key <- NULL
+      split_preview_cache$ui <- NULL
+      copy_config_source(NULL)
+      removeModal()
+      showNotification(
+        paste0("Copied split/break config to ", length(targets),
+               " channel(s). Merges cleared for review."),
+        type = "message",
+        duration = 5
+      )
+    }, ignoreInit = TRUE)
+
     observeEvent(input$btn_save, {
       req(rv$selected)
       splits <- isolate(input$splits_selected) %||% c("VariableName")
@@ -681,43 +791,94 @@ mod_channels_server <- function(id, data, media_index) {
                          modalButton("Cancel")),
         easyClose = FALSE, size = "m"))
     })
+
+    break_preview_unique_values <- reactive({
+      col <- input$break_col %||% "Campaign"
+      sep <- input$break_sep %||% "_"
+      n   <- auto_n_parts()
+      md  <- main_data()
+
+      empty_preview <- list(
+        filtered_rows = 0L,
+        raw_vals = character(0),
+        unique_vals = character(0),
+        parts = list()
+      )
+      if (is.null(md) || !col %in% names(md)) return(empty_preview)
+
+      cfg_p <- if (!is.null(rv$selected) && rv$selected %in% names(rv$channels))
+        rv$channels[[rv$selected]] else NULL
+      vi <- if (!is.null(cfg_p))
+        cfg_p$varname_include[nzchar(cfg_p$varname_include %||% "")]
+      else character(0)
+
+      cache_key <- paste(
+        rv$selected %||% "",
+        col,
+        sep,
+        n,
+        paste(vi, collapse = "|"),
+        nrow(md),
+        paste(names(md), collapse = "|"),
+        sep = "::"
+      )
+      if (identical(break_preview_cache$key, cache_key) &&
+          !is.null(break_preview_cache$data)) {
+        return(break_preview_cache$data)
+      }
+
+      cols_needed <- intersect(c("VariableName", col), names(md))
+      md_small <- md[, cols_needed, drop = FALSE]
+      if (length(vi) > 0 && "VariableName" %in% names(md_small)) {
+        vn_vec <- as.character(md_small$VariableName)
+        keep <- Reduce("|", lapply(vi, function(p)
+          grepl(paste0("^", p), vn_vec, ignore.case = TRUE, perl = TRUE)))
+        md_small <- md_small[keep, , drop = FALSE]
+      }
+      if (nrow(md_small) == 0 || !col %in% names(md_small)) {
+        break_preview_cache$key <- cache_key
+        break_preview_cache$data <- empty_preview
+        return(empty_preview)
+      }
+
+      raw_vals <- clean_split_part(md_small[[col]])
+      unique_vals <- unique(raw_vals)
+      if (!length(unique_vals)) unique_vals <- NA_character_
+      parts <- lapply(unique_vals, function(v) {
+        if (is.na(v)) character(0) else strsplit(v, sep, fixed = TRUE)[[1]]
+      })
+
+      out <- list(
+        filtered_rows = nrow(md_small),
+        raw_vals = raw_vals,
+        unique_vals = unique_vals,
+        parts = parts
+      )
+      break_preview_cache$key <- cache_key
+      break_preview_cache$data <- out
+      out
+    })
     
     output$break_preview_ui <- renderUI({
       col <- input$break_col %||% "Campaign"; sep <- input$break_sep %||% "_"
       n   <- auto_n_parts(); md <- main_data()
       if (is.null(md) || !col %in% names(md))
         return(tags$p(class = "text-muted small mt-2", "Upload data to see preview."))
-      if (!is.null(rv$selected) && rv$selected %in% names(rv$channels)) {
-        cfg_p <- rv$channels[[rv$selected]]
-        vi    <- cfg_p$varname_include[nzchar(cfg_p$varname_include %||% "")]
-        if (length(vi) > 0 && "VariableName" %in% names(md)) {
-          vn_vec <- as.character(md$VariableName)
-          keep   <- Reduce("|", lapply(vi, function(p)
-            grepl(paste0("^", p), vn_vec, ignore.case = TRUE, perl = TRUE)))
-          md <- md[keep, ]
-        }
-      }
-      if (nrow(md) == 0)
+
+      preview_data <- break_preview_unique_values()
+      if (preview_data$filtered_rows == 0)
         return(tags$p(class = "text-muted small mt-2",
                       "No data matches this channel's VarName filter."))
-      md <- limit_preview_rows(md)
-      raw_vals <- clean_split_part(md[[col]])
-      valid_vals <- raw_vals[!is.na(raw_vals)]
-      unique_vals <- unique(valid_vals)
-      part_counts <- if (length(valid_vals)) lengths(strsplit(valid_vals, sep, fixed = TRUE))
-      else integer(0)
+
+      raw_vals <- preview_data$raw_vals
+      unique_vals_all <- preview_data$unique_vals
+      unique_vals <- unique_vals_all[!is.na(unique_vals_all)]
       unique_part_counts <- if (length(unique_vals)) lengths(strsplit(unique_vals, sep, fixed = TRUE))
       else integer(0)
-      multi_vals <- unique_vals[unique_part_counts > 1]
-      single_vals <- unique_vals[unique_part_counts <= 1]
+      part_counts <- unique_part_counts
       skipped_n <- sum(is.na(raw_vals))
-      vals <- c(head(multi_vals, 4), head(single_vals, 3))
-      if (skipped_n > 0) vals <- c(vals, NA_character_)
-      vals <- head(vals, 8)
-      if (!length(vals)) vals <- NA_character_
-      parts <- lapply(vals, function(v) {
-        if (is.na(v)) character(0) else strsplit(v, sep, fixed = TRUE)[[1]]
-      })
+      vals <- unique_vals_all
+      parts <- preview_data$parts
       n_short <- sum(sapply(parts, length) < n)
       dist_tbl <- table(part_counts)
       dist_text <- if (length(dist_tbl)) {
@@ -726,7 +887,7 @@ mod_channels_server <- function(id, data, media_index) {
       } else "No values"
       separators <- c("_", " - ", "--", "|", "/")
       sep_hits <- vapply(separators, function(s) {
-        if (!length(valid_vals)) 0L else sum(lengths(strsplit(valid_vals, s, fixed = TRUE)) > 1)
+        if (!length(unique_vals)) 0L else sum(lengths(strsplit(unique_vals, s, fixed = TRUE)) > 1)
       }, integer(1))
       suggestion <- if (sum(part_counts > 1) == 0 && any(sep_hits > 0)) {
         best_sep <- separators[[which.max(sep_hits)]]
@@ -770,15 +931,20 @@ mod_channels_server <- function(id, data, media_index) {
       header <- c(list(tags$th("Original", class = "break-preview-th-orig")),
                   lapply(seq_len(n), function(j)
                     tags$th(paste0("Part ", j), class = "break-preview-th")))
+      unique_label <- paste0(
+        "Showing all ", format(length(vals), big.mark = ","),
+        " unique value", if (length(vals) != 1) "s" else "",
+        ". Scroll to inspect."
+      )
       tagList(
         div(class = "break-info-box", icon("circle-info", class = "icon-blue-sm"),
             paste0(" Auto-detected ", n, " part", if (n != 1) "s" else "",
                    " using separator \"", sep, "\".")),
         div(class = "break-preview-stats",
             tags$span(class = "break-preview-chip",
-                      paste0("Sampled rows ", format(nrow(md), big.mark = ","))),
+                      paste0("Filtered rows ", format(preview_data$filtered_rows, big.mark = ","))),
             tags$span(class = "break-preview-chip",
-                      paste0("Unique values ", format(length(unique_vals), big.mark = ","))),
+                      paste0("Unique values ", format(length(vals), big.mark = ","))),
             tags$span(class = "break-preview-chip break-preview-chip-ok",
                       paste0("Multi-part ", format(sum(part_counts > 1), big.mark = ","))),
             tags$span(class = "break-preview-chip",
@@ -789,16 +955,19 @@ mod_channels_server <- function(id, data, media_index) {
         if (!nzchar(suggestion) && sum(part_counts > 1) == 0)
           div(class = "break-preview-note",
               icon("circle-info", class = "icon-xs"),
-              " No multi-part values found with this separator in preview sample."),
+              " No multi-part values found with this separator in the filtered values."),
         if (nzchar(suggestion))
           div(class = "break-preview-note break-preview-note-suggest",
               icon("wand-magic-sparkles", class = "icon-xs"),
               paste0(" ", suggestion, " for more useful splits.")),
         tags$strong("Preview (filtered to channel variables):",
                     class = "section-strong mt-2 mb-1"),
-        div(class = "table-responsive",
+        if (length(vals) > 25)
+          div(class = "break-preview-note",
+              icon("circle-info", class = "icon-xs"),
+              paste0(" ", unique_label)),
+        div(class = "table-responsive break-preview-scroll",
             tags$table(class = "table table-sm mb-1",
-                       style = "border:1px solid #e3e8ef; border-radius:5px;",
                        tags$thead(tags$tr(style = "border-bottom:1px solid #5B9BD5;",
                                           do.call(tagList, header))),
                        tags$tbody(do.call(tagList, rows)))),

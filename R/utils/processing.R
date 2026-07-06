@@ -338,22 +338,29 @@ apply_single_merge <- function(res, merge_entry, cfg) {
         max = max(non_zero), period = view_filter, seg = 1L,
         model_var = cfg$model_variable %||% "")
   }
+
+  finite_or <- function(x, fun, default = NA_real_) {
+    x <- suppressWarnings(as.numeric(x))
+    x <- x[is.finite(x)]
+    if (!length(x)) return(default)
+    fun(x)
+  }
   
   merged_act <- if (nrow(selected_diag) > 0) {
     tibble::tibble(
       VariableSplit         = new_name,
       total_activity        = sum(selected_diag$total_activity,        na.rm = TRUE),
       pct_total_activity    = NA_real_,
-      num_weeks_activity    = max(selected_diag$num_weeks_activity,     na.rm = TRUE),
+      num_weeks_activity    = finite_or(selected_diag$num_weeks_activity, max, 0),
       max_index             = NA_real_,
-      min_consecutive_weeks = max(selected_diag$min_consecutive_weeks,  na.rm = TRUE),
+      min_consecutive_weeks = finite_or(selected_diag$min_consecutive_weeks, max),
       sd             = NA_real_,
-      min            = min(selected_diag$min,          na.rm = TRUE),
-      quartile_1     = mean(selected_diag$quartile_1,  na.rm = TRUE),
-      median         = mean(selected_diag$median,      na.rm = TRUE),
-      quartile_3     = mean(selected_diag$quartile_3,  na.rm = TRUE),
-      max_no_outlier = max(selected_diag$max_no_outlier, na.rm = TRUE),
-      max            = max(selected_diag$max,          na.rm = TRUE)
+      min            = finite_or(selected_diag$min, min),
+      quartile_1     = finite_or(selected_diag$quartile_1, mean),
+      median         = finite_or(selected_diag$median, mean),
+      quartile_3     = finite_or(selected_diag$quartile_3, mean),
+      max_no_outlier = finite_or(selected_diag$max_no_outlier, max),
+      max            = finite_or(selected_diag$max, max)
     ) %>% dplyr::bind_cols(
       selected_diag %>% dplyr::slice(1) %>%
         dplyr::select(dplyr::any_of(c("seg", "period", "model_var"))))
@@ -410,15 +417,15 @@ apply_single_merge <- function(res, merge_entry, cfg) {
         VariableSplit         = new_spend_name,
         total_spend           = sum(sel_cost$total_spend,          na.rm = TRUE),
         pct_total_spend       = NA_real_,
-        num_weeks_spend       = max(sel_cost$num_weeks_spend,       na.rm = TRUE),
-        min_consecutive_weeks = max(sel_cost$min_consecutive_weeks, na.rm = TRUE),
+        num_weeks_spend       = finite_or(sel_cost$num_weeks_spend, max, 0),
+        min_consecutive_weeks = finite_or(sel_cost$min_consecutive_weeks, max),
         sd             = NA_real_,
-        min            = min(sel_cost$min,          na.rm = TRUE),
-        quartile_1     = mean(sel_cost$quartile_1,  na.rm = TRUE),
-        median         = mean(sel_cost$median,      na.rm = TRUE),
-        quartile_3     = mean(sel_cost$quartile_3,  na.rm = TRUE),
-        max_no_outlier = max(sel_cost$max_no_outlier, na.rm = TRUE),
-        max            = max(sel_cost$max,          na.rm = TRUE),
+        min            = finite_or(sel_cost$min, min),
+        quartile_1     = finite_or(sel_cost$quartile_1, mean),
+        median         = finite_or(sel_cost$median, mean),
+        quartile_3     = finite_or(sel_cost$quartile_3, mean),
+        max_no_outlier = finite_or(sel_cost$max_no_outlier, max),
+        max            = finite_or(sel_cost$max, max),
         max_index      = NA_real_,
         period    = sel_cost$period[1]    %||% "focus",
         seg       = sel_cost$seg[1]       %||% NA_integer_,

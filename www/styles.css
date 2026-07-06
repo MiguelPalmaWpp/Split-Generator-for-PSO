@@ -1419,6 +1419,11 @@ font-size: 12.5px; color: #1e40af;
 .break-names-label { font-size: 12px; display: block; margin: 10px 0 6px; font-weight: 600; }
 .break-part-row    { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .break-part-label  { font-size: 12px; font-weight: 600; width: 55px; flex-shrink: 0; color: #4a5568; }
+.ch-copy-actions {
+display: flex;
+gap: 8px;
+align-items: center;
+}
 
 /* Break preview table */
 .break-preview-th-orig { padding: 3px 8px; font-size: 11px; color: #6c757d; }
@@ -1467,6 +1472,15 @@ border-radius: 5px; padding: 2px 6px;
 }
 .break-preview-final-hint {
 flex-basis: 100%; margin: 1px 0 0; font-size: 10.5px; color: #8a9bb0;
+}
+.break-preview-scroll {
+max-height: 300px;
+overflow-y: auto;
+border: 1px solid #e3e8ef;
+border-radius: 5px;
+}
+.break-preview-scroll table {
+margin-bottom: 0 !important;
 }
 
 /*

@@ -44,9 +44,6 @@ justify-content: space-between !important;
 padding: 0 32px !important;
 min-height: 110px !important;
 box-shadow: 0 3px 14px rgba(0, 0, 0, 0.18);
-position: sticky;
-top: 0;
-z-index: 1030;
 width: 100%;
 box-sizing: border-box;
 }

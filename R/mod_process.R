@@ -145,6 +145,13 @@ mod_process_server <- function(id, data, config, channels,
       ), collapse = "||")
     }
 
+    mark_result_current <- function(nm, cfg, saved_merges = NULL) {
+      cfg_current <- cfg
+      if (!is.null(saved_merges))
+        cfg_current$saved_merges <- saved_merges
+      result_signatures[[nm]] <- channel_signature(cfg_current)
+    }
+
     stale_names <- reactive({
       results_trigger()
       ch <- channels()
@@ -745,9 +752,8 @@ mod_process_server <- function(id, data, config, channels,
       has_data <- (!is.null(res$act_diagnoses) && nrow(res$act_diagnoses) > 0) ||
         (!is.null(res$rag) && nrow(res$rag) > 0)
       if (is.null(res) || !has_data) return(NULL)
-      diag    <- res$act_diagnoses
-      n_focus <- sum(diag$period == "focus",    na.rm = TRUE)
-      n_nf    <- sum(diag$period == "nonfocus", na.rm = TRUE)
+      n_focus <- tryCatch(nrow(build_current_act_data("focus")), error = \(e) 0L)
+      n_nf    <- tryCatch(nrow(build_current_act_data("nonfocus")), error = \(e) 0L)
       div(class = "filter-bar",
           tags$span(icon("filter", class = "icon-blue-sm"),
                     tags$strong(" View:", class = "filter-bar-label")),
@@ -760,12 +766,10 @@ mod_process_server <- function(id, data, config, channels,
     })
     
     # ── current_act_data ───────────────────────────────────────────────────
-    current_act_data <- reactive({
-      results_trigger()
-      nm         <- req(input$channel_select)
-      res        <- req(results_store[[nm]])
-      filter_val <- input$period_filter %||% "focus"
-      
+    build_current_act_data <- function(filter_val = "focus") {
+      nm  <- req(input$channel_select)
+      res <- req(results_store[[nm]])
+
       add_pct <- function(df) {
         if (is.null(df) || nrow(df) == 0 || !"total_activity" %in% names(df))
           return(df %||% tibble())
@@ -822,7 +826,11 @@ mod_process_server <- function(id, data, config, channels,
         select(-any_of(c("seg", "period", "model_var"))) %>%
         add_pct() %>%
         mutate(across(where(is.numeric), \(x) round(x, 4)))
-      
+    }
+
+    current_act_data <- reactive({
+      results_trigger()
+      build_current_act_data(input$period_filter %||% "focus")
     }) %>% bindCache(input$channel_select, input$period_filter, results_trigger())
     
     # ── current_spend_data ─────────────────────────────────────────────────
@@ -1020,7 +1028,9 @@ mod_process_server <- function(id, data, config, channels,
         existing <- channels()[[nm]]$saved_merges %||% list()
         max_id   <- if (length(existing)) max(sapply(existing, \(m) m$id %||% 0L)) else 0L
         for (i in seq_along(new_saved)) new_saved[[i]]$id <- max_id + i
-        update_merges(nm, c(existing, new_saved))
+        saved_after <- c(existing, new_saved)
+        update_merges(nm, saved_after)
+        mark_result_current(nm, cfg, saved_after)
       }
       n_ok <- length(new_log)
       showNotification(
@@ -1098,6 +1108,7 @@ mod_process_server <- function(id, data, config, channels,
       if (length(selected) < 2) return()
       df <- tryCatch(current_act_data(), error = \(e) NULL)
       if (is.null(df) || nrow(df) == 0) return()
+      selected <- selected[selected <= nrow(df)]
       selected_names <- df$VariableSplit[selected]
       if (length(selected_names) < 2) return()
       parts <- get_merge_name_parts(selected_names)
@@ -1117,6 +1128,10 @@ mod_process_server <- function(id, data, config, channels,
       cfg             <- channels()[[nm]]
       view_filter     <- input$period_filter %||% "focus"
       df              <- current_act_data()
+      selected        <- selected[selected <= nrow(df)]
+      if (length(selected) < 2) {
+        showNotification("Select at least 2 current rows to merge.", type = "warning"); return()
+      }
       selected_splits <- df$VariableSplit[selected]
       act_kw          <- cfg$activity_keyword %||% "Impressions"
       spend_kw        <- cfg$spend_keyword    %||% "Spend"
@@ -1124,9 +1139,13 @@ mod_process_server <- function(id, data, config, channels,
       if (!length(intersect(selected_splits, names(res$rag)))) {
         showNotification("Selected splits not found in RAG.", type = "warning"); return()
       }
-      if (!nrow(filter(res$act_diagnoses,
-                       VariableSplit %in% selected_splits,
-                       period == view_filter))) {
+      has_diag <- !is.null(res$act_diagnoses) &&
+        nrow(res$act_diagnoses) > 0 &&
+        all(c("VariableSplit", "period") %in% names(res$act_diagnoses)) &&
+        nrow(filter(res$act_diagnoses,
+                    VariableSplit %in% selected_splits,
+                    period == view_filter)) > 0
+      if (!has_diag && !length(intersect(selected_splits, names(res$rag)))) {
         showNotification(paste0("No diagnosis data for '", view_filter, "'."),
                          type = "warning", duration = 10); return()
       }
@@ -1149,12 +1168,14 @@ mod_process_server <- function(id, data, config, channels,
       if (!is.null(update_merges)) {
         existing <- channels()[[nm]]$saved_merges %||% list()
         max_id   <- if (length(existing)) max(sapply(existing, \(m) m$id %||% 0L)) else 0L
-        update_merges(nm, c(existing, list(list(
+        saved_after <- c(existing, list(list(
           id = max_id + 1L, new_name = new_name,
           merged = as.list(selected_splits), view = view_filter,
           spend_merged = as.list(matching_cost),
           new_spend_name = new_spend_name, active = TRUE,
-          saved_at = format(Sys.time(), "%Y-%m-%d %H:%M")))))
+          saved_at = format(Sys.time(), "%Y-%m-%d %H:%M"))))
+        update_merges(nm, saved_after)
+        mark_result_current(nm, cfg, saved_after)
       }
       
       updateTextInput(session, "merge_name", value = "")
@@ -1181,7 +1202,11 @@ mod_process_server <- function(id, data, config, channels,
       if (length(log) > 0) set_log(nm, log[-length(log)])
       if (!is.null(update_merges)) {
         existing <- channels()[[nm]]$saved_merges %||% list()
-        if (length(existing) > 0) update_merges(nm, existing[-length(existing)])
+        if (length(existing) > 0) {
+          saved_after <- existing[-length(existing)]
+          update_merges(nm, saved_after)
+          mark_result_current(nm, channels()[[nm]], saved_after)
+        }
       }
       showNotification("Last merge undone \u2014 removed from config.", type = "message")
     })
@@ -1205,7 +1230,10 @@ mod_process_server <- function(id, data, config, channels,
       nm <- req(input$channel_select); req(valid_nm(nm))
       orig <- get_orig(nm); req(orig)
       set_res(nm, orig); set_log(nm, list()); set_hist(nm, list())
-      if (!is.null(update_merges)) update_merges(nm, list())
+      if (!is.null(update_merges)) {
+        update_merges(nm, list())
+        mark_result_current(nm, channels()[[nm]], list())
+      }
       removeModal()
       showNotification(paste("All merges reset for", nm, "\u2014 config cleared."),
                        type = "message")
@@ -1308,7 +1336,7 @@ mod_process_server <- function(id, data, config, channels,
                     backgroundPosition = "center") %>%
         formatStyle("pct_total_activity",
                     color = styleInterval(threshold, c("#dc3545", "#333")))
-    }, server = TRUE)
+    }, server = FALSE)
     
     # ── Spend table ────────────────────────────────────────────────────────
     output$diag_cost <- DT::renderDT({

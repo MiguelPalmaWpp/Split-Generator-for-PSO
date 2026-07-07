@@ -33,14 +33,16 @@ apply_dimension_breaks <- function(d, dimension_breaks, channel_name = NULL) {
     for (i in seq_len(n)) {
       values <- vapply(split_values, function(p) {
         if (!length(p) || length(p) < i) {
-          NA_character_
+          "Total"
         } else if (i == n) {
           paste(p[i:length(p)], collapse = sep)
         } else {
           p[i]
         }
       }, character(1))
-      d[[brk$names[i]]] <- clean_split_part(values)
+      values <- clean_split_part(values)
+      values[is.na(values)] <- "Total"
+      d[[brk$names[i]]] <- values
     }
     d[[col]] <- NULL
   }

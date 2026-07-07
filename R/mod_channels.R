@@ -876,10 +876,20 @@ mod_channels_server <- function(id, data, media_index) {
       unique_part_counts <- if (length(unique_vals)) lengths(strsplit(unique_vals, sep, fixed = TRUE))
       else integer(0)
       part_counts <- unique_part_counts
-      skipped_n <- sum(is.na(raw_vals))
       vals <- unique_vals_all
       parts <- preview_data$parts
-      n_short <- sum(sapply(parts, length) < n)
+      missing_parts_n <- sum(vapply(parts, function(p) {
+        sum(vapply(seq_len(n), function(j) {
+          value <- if (!length(p) || length(p) < j) {
+            NA_character_
+          } else if (j == n) {
+            paste(p[j:length(p)], collapse = sep)
+          } else {
+            p[j]
+          }
+          is.na(clean_split_part(value))
+        }, logical(1)))
+      }, integer(1)))
       dist_tbl <- table(part_counts)
       dist_text <- if (length(dist_tbl)) {
         paste(paste0(names(dist_tbl), " part", ifelse(names(dist_tbl) == "1", "", "s"),
@@ -903,26 +913,26 @@ mod_channels_server <- function(id, data, media_index) {
             p[j]
           }
           value <- clean_split_part(value)
-          if (is.na(value)) "" else value
+          if (is.na(value)) "Total" else value
         }, character(1))
         values <- values[nzchar(values)]
-        if (length(values)) paste(values, collapse = "_") else "Skipped"
+        if (length(values)) paste(values, collapse = "_") else "Total"
       }, character(1)), 3)
       rows <- lapply(seq_along(vals), function(i) {
         p <- parts[[i]]
-        original <- if (is.na(vals[i])) "Skipped" else vals[i]
+        original <- if (is.na(vals[i])) "Total" else vals[i]
         cells <- c(list(tags$td(original, class = "break-preview-td-orig")),
                    lapply(seq_len(n), function(j) {
                      if (length(p) < j)
-                       tags$td("Skipped", class = "break-preview-td-warn",
+                       tags$td("Total", class = "break-preview-td-warn",
                                style = "color:#adb5bd; font-style:italic;")
                      else if (j == n) {
                        value <- clean_split_part(paste(p[j:length(p)], collapse = sep))
-                       tags$td(if (is.na(value)) "Skipped" else value,
+                       tags$td(if (is.na(value)) "Total" else value,
                                class = "break-preview-td")
                      } else {
                        value <- clean_split_part(p[j])
-                       tags$td(if (is.na(value)) "Skipped" else value,
+                       tags$td(if (is.na(value)) "Total" else value,
                                class = "break-preview-td")
                      }
                    }))
@@ -950,7 +960,7 @@ mod_channels_server <- function(id, data, media_index) {
             tags$span(class = "break-preview-chip",
                       paste0("Single-part ", format(sum(part_counts <= 1), big.mark = ","))),
             tags$span(class = "break-preview-chip break-preview-chip-warn",
-                      paste0("Skipped ", format(skipped_n, big.mark = ",")))),
+                      paste0("Total-filled ", format(missing_parts_n, big.mark = ",")))),
         div(class = "break-preview-dist", dist_text),
         if (!nzchar(suggestion) && sum(part_counts > 1) == 0)
           div(class = "break-preview-note",
@@ -977,11 +987,10 @@ mod_channels_server <- function(id, data, media_index) {
               tagList(lapply(split_examples, function(ex)
                 tags$code(class = "break-preview-final-code", ex))),
               tags$p(class = "break-preview-final-hint",
-                     "VariableName is preserved internally for Process; empty parts are skipped.")),
-        if (n_short > 0)
+                     "VariableName is preserved internally for Process; missing parts are filled with Total.")),
+        if (missing_parts_n > 0)
           div(class = "small text-muted mt-1", icon("circle-info", class = "icon-xs"),
-              paste0(" ", n_short, " value(s) have fewer or empty parts. ",
-                     "Empty parts are skipped from split names.")))
+              paste0(" ", missing_parts_n, " missing part(s) will be filled with Total.")))
     })
     
     output$break_names_ui <- renderUI({

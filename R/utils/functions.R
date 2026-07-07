@@ -330,7 +330,7 @@ export_channels_csv <- function(channels) {
         Type       = "Merge",
         SplitOrder = "",
         Name       = m$new_name,
-        Splits     = paste(unlist(m$merged), collapse = "|")
+        Splits     = paste(unlist(m$merged), collapse = " ||| ")
       )))
     }
   }
@@ -529,10 +529,9 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
   # OPT-5: Fast spend keyword detection using pre-computed unique VNs
   detect_spend_kw_fast <- function(varname_include) {
     if (!length(varname_include) || !length(all_main_vn)) return("Spend")
-    patterns <- paste0("^", varname_include)
-    combined <- paste(patterns, collapse = "|")
-    matching <- all_main_vn[grepl(combined, all_main_vn,
-                                  ignore.case = TRUE, perl = TRUE)]
+    matching <- all_main_vn[
+      tolower(trimws(all_main_vn)) %in% tolower(trimws(varname_include))
+    ]
     for (kw in keyword_dict$spend)
       if (any(grepl(kw, matching, ignore.case = TRUE))) return(kw)
     "Spend"
@@ -558,6 +557,47 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
       any(stringr::str_detect(metric, stringr::regex(kw, ignore_case = TRUE)))
     }, logical(1))]
     if (length(matched)) matched[1] else NA_character_
+  }
+
+  extract_vof_period_token <- function(x) {
+    x <- trimws(as.character(x %||% ""))
+    m <- stringr::str_match(
+      x,
+      stringr::regex("\\s+--p\\s+([^\\s]+)", ignore_case = TRUE)
+    )
+    token <- m[, 2]
+    ifelse(is.na(token), "", trimws(token))
+  }
+
+  vof_period_family <- function(x) {
+    x <- trimws(as.character(x %||% ""))
+    x <- stringr::str_remove(
+      x,
+      stringr::regex("\\s+--p\\s+[^\\s]+", ignore_case = TRUE)
+    )
+    trimws(x)
+  }
+
+  parse_period_token_date <- function(token) {
+    token <- trimws(as.character(token %||% ""))
+    digits <- stringr::str_extract(token, "\\d{8}")
+    if (is.na(digits) || !nzchar(digits)) return(as.Date(NA_character_))
+    suppressWarnings(as.Date(digits, format = "%Y%m%d"))
+  }
+
+  vof_period_boundary <- function(token, min_raw, max_raw) {
+    token <- trimws(as.character(token %||% ""))
+    token_date <- parse_period_token_date(token)
+    if (!is.na(token_date)) {
+      if (startsWith(token, "-")) return(token_date)
+      if (endsWith(token, "-")) return(token_date - 1)
+      return(token_date)
+    }
+    min_raw <- tryCatch(as.Date(min_raw), error = function(e) as.Date(NA))
+    max_raw <- tryCatch(as.Date(max_raw), error = function(e) as.Date(NA))
+    if (!is.na(min_raw) && is.na(max_raw)) return(min_raw - 1)
+    if (is.na(min_raw) && !is.na(max_raw)) return(max_raw)
+    as.Date(NA_character_)
   }
   
   # OPT-6: Fast schema derive using pre-indexed lookup
@@ -610,13 +650,7 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
       stringr::str_remove(activity_vars, "_Total_Total_Total$"),
       keyword_dict)
     
-    vi_broad <- unique(trimws(stringr::str_remove(
-      ch_cfg$varname_include,
-      stringr::regex(paste0("\\s*", act_kw, "s?\\s*$"), ignore_case = TRUE)
-    )))
-    vi_broad        <- vi_broad[nzchar(vi_broad) &
-                                  !(vi_broad %in% ch_cfg$varname_include)]
-    varname_include <- unique(c(ch_cfg$varname_include, vi_broad))
+    varname_include <- unique(ch_cfg$varname_include)
     varname_include <- varname_include[nzchar(varname_include)]
     
     spend_kw <- if (length(spend_vars)) {
@@ -635,17 +669,32 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
     }
     
     # Dates — read from pre-parsed columns (now always Date class)
-    min_p <- tryCatch({
+    vof_min_raw <- tryCatch({
       d <- vof_rows$.min_parsed
       d <- d[!is.na(d)]
       if (length(d)) min(d) else NA
     }, error = \(e) NA)
-    max_p <- tryCatch({
+    vof_max_raw <- tryCatch({
       d <- vof_rows$.max_parsed
       d <- d[!is.na(d)]
       if (length(d)) max(d) else NA
     }, error = \(e) NA)
+
+    if (is.na(vof_min_raw) || !is.finite(as.numeric(vof_min_raw)))
+      vof_min_raw <- as.Date(NA_character_)
+    if (is.na(vof_max_raw) || !is.finite(as.numeric(vof_max_raw)))
+      vof_max_raw <- as.Date(NA_character_)
+
+    vof_period_token_val <- extract_vof_period_token(mv)
+    vof_period_family_val <- vof_period_family(mv)
+    vof_period_boundary_val <- vof_period_boundary(
+      vof_period_token_val,
+      vof_min_raw,
+      vof_max_raw
+    )
     
+    min_p <- vof_min_raw
+    max_p <- vof_max_raw
     if (is.na(min_p) || !is.finite(as.numeric(min_p))) min_p <- an_min_date
     if (is.na(max_p) || !is.finite(as.numeric(max_p))) max_p <- an_max_date
     
@@ -697,9 +746,15 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
       channel_name      = mv,
       model_variable    = mv,
       varname_include   = varname_include,
+      varname_match_mode = "exact",
       analytical_varkeys = anal_var_names,
       min_period        = min_p,
       max_period        = max_p,
+      vof_min_raw       = vof_min_raw,
+      vof_max_raw       = vof_max_raw,
+      vof_period_token  = vof_period_token_val,
+      vof_period_family = vof_period_family_val,
+      vof_period_boundary = vof_period_boundary_val,
       segment_overrides = segment_overrides,
       activity_keyword  = act_kw,
       spend_keyword     = spend_kw,
@@ -763,6 +818,7 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
         channel_name      = col,
         model_variable    = col,
         varname_include   = varname_include,
+        varname_match_mode = "prefix",
         analytical_varkeys = col,
         min_period        = an_min_date,
         max_period        = an_max_date,
@@ -785,7 +841,17 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
   vof_sigs <- vapply(names(channels), function(nm) {
     ch <- channels[[nm]]
     if (!identical(ch$source, "vof")) return(NA_character_)
-    paste(sort(unique(ch$analytical_varkeys)), collapse = "||")
+    raw_boundary <- tryCatch(as.Date(ch$vof_period_boundary), error = function(e) as.Date(NA))
+    boundary_key <- if (!is.na(raw_boundary)) as.character(raw_boundary) else ""
+    family_key <- ch$vof_period_family %||% vof_period_family(ch$channel_name %||% nm)
+    paste(
+      paste(sort(unique(ch$analytical_varkeys)), collapse = "||"),
+      ch$media_channel %||% "",
+      ch$effect %||% "",
+      family_key,
+      boundary_key,
+      sep = "::::"
+    )
   }, character(1))
   
   vof_sigs <- vof_sigs[!is.na(vof_sigs)]
@@ -796,18 +862,22 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
     range_df <- data.frame(
       nm = group_nms,
       min_date = as.Date(vapply(group_nms, function(nm) {
-        mp <- channels[[nm]]$min_period
+        mp <- channels[[nm]]$vof_min_raw
         if (!is.null(mp) && !is.na(mp)) as.character(as.Date(mp)) else NA_character_
       }, character(1))),
       max_date = as.Date(vapply(group_nms, function(nm) {
-        mp <- channels[[nm]]$max_period
+        mp <- channels[[nm]]$vof_max_raw
         if (!is.null(mp) && !is.na(mp)) as.character(as.Date(mp)) else NA_character_
       }, character(1))),
       stringsAsFactors = FALSE
     )
     range_df$range_key <- paste(range_df$min_date, range_df$max_date, sep = "|")
     unique_ranges <- range_df[!duplicated(range_df$range_key), , drop = FALSE]
-    unique_ranges <- unique_ranges[order(unique_ranges$min_date, unique_ranges$max_date), , drop = FALSE]
+    min_order <- unique_ranges$min_date
+    min_order[is.na(min_order)] <- as.Date("1900-01-01")
+    max_order <- unique_ranges$max_date
+    max_order[is.na(max_order)] <- as.Date("2999-12-31")
+    unique_ranges <- unique_ranges[order(min_order, max_order), , drop = FALSE]
     if (nrow(unique_ranges) <= 1) next
     range_labels <- setNames(
       paste0(vapply(seq_len(nrow(unique_ranges)), ordinal_tag, character(1)), "TimeBreak"),
@@ -983,8 +1053,16 @@ process_channel_legacy <- function(all_rags,
   
   vi <- cfg$varname_include[nchar(cfg$varname_include %||% "") > 0]
   if (length(vi) > 0) {
-    pattern   <- paste(paste0("^", vi), collapse = "|")
-    d_prefilt <- d_prefilt[grepl(pattern, VariableName, ignore.case = TRUE)]
+    match_mode <- cfg$varname_match_mode %||%
+      if (identical(cfg$source %||% "", "vof")) "exact" else "prefix"
+    if (identical(match_mode, "exact")) {
+      d_prefilt <- d_prefilt[
+        tolower(trimws(VariableName)) %in% tolower(trimws(vi))
+      ]
+    } else {
+      pattern   <- paste(paste0("^", stringr::str_replace_all(vi, "([\\W])", "\\\\\\1")), collapse = "|")
+      d_prefilt <- d_prefilt[grepl(pattern, VariableName, ignore.case = TRUE, perl = TRUE)]
+    }
   }
   
   for (p in cfg$varname_exclude %||% character(0))

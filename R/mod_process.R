@@ -445,7 +445,7 @@ mod_process_server <- function(id, data, config, channels,
       
       if (!is.null(res_stored)) {
         active_saved <- Filter(\(m) isTRUE(m$active), cfg$saved_merges %||% list())
-        n_applied <- 0L; n_skipped <- 0L
+        n_applied <- 0L
         
         clean_store[[nm]] <- res_stored
         
@@ -453,18 +453,17 @@ mod_process_server <- function(id, data, config, channels,
           withProgress(message = paste0("Applying ", length(active_saved),
                                         " merge(s) from config..."),
                        value = 0.5, {
-                         for (m in active_saved) {
-                           rag_before <- names(res_stored$rag)
-                           res_stored <- tryCatch(
-                             apply_single_merge(res_stored, m, cfg),
-                             error = function(e) res_stored)
-                           if (m$new_name %in% names(res_stored$rag) &&
-                               !m$new_name %in% rag_before)
-                             n_applied <- n_applied + 1L
-                           else
-                             n_skipped <- n_skipped + 1L
-                         }
-                       })
+                          for (m in active_saved) {
+                            rag_before <- names(res_stored$rag)
+                            merged_names <- unlist(m$merged %||% character(0))
+                            res_stored <- tryCatch(
+                              apply_single_merge(res_stored, m, cfg),
+                              error = function(e) res_stored)
+                            if (m$new_name %in% names(res_stored$rag) &&
+                                length(intersect(merged_names, rag_before)) > 0)
+                              n_applied <- n_applied + 1L
+                          }
+                        })
         }
         
         set_res(nm, res_stored); set_orig(nm, res_stored)
@@ -475,11 +474,8 @@ mod_process_server <- function(id, data, config, channels,
         msg <- paste0(nm, " processed",
                       if (n_applied > 0)
                         paste0(" + ", n_applied, " merge(s) from config") else "")
-        if (n_skipped > 0)
-          msg <- paste0(msg, " (", n_skipped,
-                        " skipped \u2014 column names may have changed)")
         showNotification(msg,
-                         type = if (n_skipped > 0 && n_applied == 0) "warning" else "message",
+                         type = "message",
                          duration = 4)
         rm(res_stored); gc(verbose = FALSE, full = FALSE)
       }
@@ -631,15 +627,16 @@ mod_process_server <- function(id, data, config, channels,
                          clean_store[[nm]] <- res_stored
                          n_applied <- 0L
                          
-                         if (length(active_saved) > 0) {
-                           for (m in active_saved) {
-                             rag_before <- names(res_stored$rag)
-                             res_stored <- tryCatch(apply_single_merge(res_stored, m, cfg),
-                                                    error = function(e) res_stored)
-                             if (m$new_name %in% names(res_stored$rag) &&
-                                 !m$new_name %in% rag_before)
-                               n_applied <- n_applied + 1L
-                           }
+                          if (length(active_saved) > 0) {
+                            for (m in active_saved) {
+                              rag_before <- names(res_stored$rag)
+                              merged_names <- unlist(m$merged %||% character(0))
+                              res_stored <- tryCatch(apply_single_merge(res_stored, m, cfg),
+                                                     error = function(e) res_stored)
+                              if (m$new_name %in% names(res_stored$rag) &&
+                                  length(intersect(merged_names, rag_before)) > 0)
+                                n_applied <- n_applied + 1L
+                            }
                            if (n_applied > 0)
                              info_msgs <- c(info_msgs, paste0(nm, ": ", n_applied, " merge(s)"))
                          }
@@ -917,13 +914,16 @@ mod_process_server <- function(id, data, config, channels,
               tags$label(
                 class = "btn-upload-plan",
                 icon("upload"), " Apply Merge Plan",
-                tags$input(type = "file", accept = ".csv", class = "d-none",
+                tags$input(type = "file", accept = ".csv,.tsv,.txt", class = "d-none",
                            onchange = paste0(
+                             "if(!this.files||!this.files.length)return;",
+                             "var input=this;",
                              "var r=new FileReader();",
                              "r.onload=function(e){Shiny.setInputValue('",
                              session$ns("merge_plan_content"), "',",
-                             "e.target.result,{priority:'event'});};",
-                             "r.readAsText(this.files);")))),
+                             "e.target.result,{priority:'event'});input.value='';};",
+                             "r.onerror=function(){input.value='';};",
+                             "r.readAsText(this.files[0]);")))),
           tags$span(class = "hint-text",
                     icon("circle-info", class = "icon-xs"),
                     " Write the same ", tags$strong("MergeName"),
@@ -951,30 +951,111 @@ mod_process_server <- function(id, data, config, channels,
     )
     
     # ── Plan merge ─────────────────────────────────────────────────────────
+    clean_merge_plan_names <- function(x) {
+      x <- trimws(as.character(x))
+      x <- sub("^\ufeff", "", x)
+      x <- sub("^<U\\+FEFF>", "", x)
+      x <- sub("^Ã¯\\.\\.", "", x)
+      x
+    }
+
+    read_merge_plan_content <- function(content) {
+      read_attempt <- function(kind) {
+        con <- textConnection(content)
+        on.exit(close(con), add = TRUE)
+        switch(
+          kind,
+          tab = read.delim(con, stringsAsFactors = FALSE,
+                           na.strings = c("", "NA"), check.names = FALSE),
+          semi = read.csv2(con, stringsAsFactors = FALSE,
+                           na.strings = c("", "NA"), check.names = FALSE),
+          csv = read.csv(con, stringsAsFactors = FALSE,
+                         na.strings = c("", "NA"), check.names = FALSE)
+        )
+      }
+
+      first_line <- strsplit(content %||% "", "\r?\n")[[1]][1] %||% ""
+      preferred <- c(
+        if (grepl("\t", first_line, fixed = TRUE)) "tab",
+        if (grepl(",", first_line, fixed = TRUE)) "csv",
+        if (grepl(";", first_line, fixed = TRUE)) "semi",
+        "csv", "tab", "semi"
+      )
+
+      fallback <- NULL
+      for (kind in unique(preferred)) {
+        plan <- tryCatch(read_attempt(kind), error = function(e) NULL)
+        if (is.null(plan)) next
+        names(plan) <- clean_merge_plan_names(names(plan))
+        fallback <- fallback %||% plan
+        has_required <- all(c("VariableSplit", "MergeName") %in% names(plan))
+        has_display_lookup <- all(c("Split", "MergeName") %in% names(plan))
+        if (has_required || has_display_lookup) return(plan)
+      }
+      fallback
+    }
+
+    hydrate_plan_variable_split <- function(plan) {
+      if (is.null(plan) || !"Split" %in% names(plan)) return(plan)
+
+      df <- tryCatch(isolate(current_act_data()), error = function(e) NULL)
+      if (is.null(df) || !nrow(df) || !"VariableSplit" %in% names(df)) return(plan)
+
+      lookup <- df %>%
+        mutate(Split = strip_common_prefix(VariableSplit)) %>%
+        select(Split, VariableSplit) %>%
+        distinct(Split, .keep_all = TRUE)
+      if (!nrow(lookup)) return(plan)
+
+      plan$.row_id <- seq_len(nrow(plan))
+      plan <- plan %>%
+        left_join(lookup, by = "Split", suffix = c("", ".matched")) %>%
+        arrange(.row_id)
+
+      if (!"VariableSplit" %in% names(plan)) {
+        plan$VariableSplit <- plan$VariableSplit.matched
+      } else if ("VariableSplit.matched" %in% names(plan)) {
+        missing_split <- is.na(plan$VariableSplit) |
+          !nzchar(trimws(as.character(plan$VariableSplit)))
+        plan$VariableSplit[missing_split] <- plan$VariableSplit.matched[missing_split]
+      }
+
+      plan$.row_id <- NULL
+      if ("VariableSplit.matched" %in% names(plan)) plan$VariableSplit.matched <- NULL
+      plan
+    }
+
     observeEvent(input$merge_plan_content, {
       req(input$merge_plan_content)
       nm <- req(input$channel_select); req(valid_nm(nm))
       plan <- tryCatch({
-        con <- textConnection(input$merge_plan_content)
-        on.exit(close(con))
-        read.csv(con, stringsAsFactors = FALSE, na.strings = c("", "NA"))
+        read_merge_plan_content(input$merge_plan_content)
       }, error = \(e) {
         showNotification(paste("Error reading file:", conditionMessage(e)),
                          type = "error", duration = 8); NULL
       })
       if (is.null(plan)) return()
+      names(plan) <- clean_merge_plan_names(names(plan))
+      plan <- hydrate_plan_variable_split(plan)
+      names(plan) <- sub("^\ufeff", "", names(plan))
+      names(plan) <- sub("^<U\\+FEFF>", "", names(plan))
+      names(plan) <- sub("^ï\\.\\.", "", names(plan))
       
       missing_cols <- setdiff(c("VariableSplit", "MergeName"), names(plan))
       if (length(missing_cols) > 0) {
-        showNotification(paste("Missing columns:", paste(missing_cols, collapse = ", ")),
+        showNotification(paste("Missing columns:", paste(missing_cols, collapse = ", "),
+                               "| Parsed:", paste(names(plan), collapse = ", ")),
                          type = "error", duration = 8); return()
       }
+
+      plan$VariableSplit <- trimws(as.character(plan$VariableSplit))
+      plan$MergeName <- trimws(as.character(plan$MergeName))
       
       plan_active <- plan[!is.na(plan$MergeName) &
-                            nzchar(trimws(as.character(plan$MergeName))), ]
-      if (nrow(plan_active) == 0) {
-        showNotification("No merge names found.", type = "warning"); return()
-      }
+                            nzchar(plan$MergeName) &
+                            !is.na(plan$VariableSplit) &
+                            nzchar(plan$VariableSplit), ]
+      if (nrow(plan_active) == 0) return()
       
       res         <- results_store[[nm]]; req(res)
       cfg         <- channels()[[nm]]
@@ -987,18 +1068,28 @@ mod_process_server <- function(id, data, config, channels,
         for (i in seq_along(groups)) {
           grp        <- groups[[i]]; merge_name <- names(groups)[i]
           incProgress(1 / length(groups))
-          selected_splits <- grp$VariableSplit
+          selected_splits <- unique(trimws(as.character(grp$VariableSplit)))
+          selected_splits <- selected_splits[nzchar(selected_splits)]
+          selected_splits <- selected_splits[!is.na(selected_splits)]
           act_kw   <- cfg$activity_keyword %||% "Impressions"
           spend_kw <- cfg$spend_keyword    %||% "Spend"
           
-          if (!length(intersect(selected_splits, names(res$rag)))) {
-            n_skipped <- n_skipped + 1L
-            showNotification(paste0("'", merge_name, "': not in RAG — skipped."),
-                             type = "warning", duration = 5); next
+          if (!length(selected_splits)) next
+          matching_periods <- if (!is.null(res$act_diagnoses) &&
+                                  all(c("VariableSplit", "period") %in% names(res$act_diagnoses))) {
+            unique(res$act_diagnoses$period[res$act_diagnoses$VariableSplit %in% selected_splits])
+          } else character(0)
+          matching_periods <- matching_periods[!is.na(matching_periods) & nzchar(matching_periods)]
+          merge_view <- if (view_filter %in% matching_periods) {
+            view_filter
+          } else if (length(matching_periods)) {
+            matching_periods[1]
+          } else {
+            view_filter
           }
-          if (!nrow(filter(res$act_diagnoses,
+          if (FALSE && !nrow(filter(res$act_diagnoses,
                            VariableSplit %in% selected_splits,
-                           period == view_filter))) {
+                           period == merge_view))) {
             n_skipped <- n_skipped + 1L
             showNotification(paste0("'", merge_name, "': no data — skipped."),
                              type = "warning", duration = 5); next
@@ -1007,17 +1098,20 @@ mod_process_server <- function(id, data, config, channels,
           spend_splits   <- str_replace_all(selected_splits, regex(act_kw, ignore_case = TRUE), spend_kw)
           new_spend_name <- str_replace_all(merge_name, regex(act_kw, ignore_case = TRUE), spend_kw)
           if (new_spend_name == merge_name) new_spend_name <- paste0(merge_name, "_", spend_kw)
-          matching_cost <- intersect(spend_splits, res$cost_diagnoses$VariableSplit)
+          cost_splits <- if (!is.null(res$cost_diagnoses) &&
+                             "VariableSplit" %in% names(res$cost_diagnoses))
+            res$cost_diagnoses$VariableSplit else character(0)
+          matching_cost <- intersect(spend_splits, cost_splits)
           
           merge_entry <- list(new_name = merge_name, merged = as.list(selected_splits),
-                              view = view_filter, spend_merged = as.list(matching_cost),
+                              view = merge_view, spend_merged = as.list(matching_cost),
                               new_spend_name = new_spend_name)
           res     <- apply_single_merge(res, merge_entry, cfg)
           new_log <- c(new_log, list(list(
-            merged = selected_splits, new_name = merge_name, view = view_filter,
+            merged = selected_splits, new_name = merge_name, view = merge_view,
             spend_merged = matching_cost, new_spend_name = new_spend_name)))
           new_saved <- c(new_saved, list(list(
-            merged = as.list(selected_splits), new_name = merge_name, view = view_filter,
+            merged = as.list(selected_splits), new_name = merge_name, view = merge_view,
             spend_merged = as.list(matching_cost), new_spend_name = new_spend_name,
             active = TRUE, saved_at = format(Sys.time(), "%Y-%m-%d %H:%M"))))
         }

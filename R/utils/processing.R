@@ -211,6 +211,9 @@ splits_summary <- function(df, type = "activity") {
 apply_single_merge <- function(res, merge_entry, cfg) {
   new_name        <- merge_entry$new_name
   selected_splits <- unlist(merge_entry$merged)
+  selected_splits <- unique(trimws(as.character(selected_splits)))
+  selected_splits <- selected_splits[!is.na(selected_splits) & nzchar(selected_splits)]
+  if (!length(selected_splits)) return(res)
   view_filter     <- merge_entry$view %||% "focus"
   act_kw          <- cfg$activity_keyword %||% "Impressions"
   spend_kw        <- cfg$spend_keyword    %||% "Spend"
@@ -245,7 +248,7 @@ apply_single_merge <- function(res, merge_entry, cfg) {
     }
     df
   }
-  
+
   # Guard: ensure diagnostic tibbles have VariableSplit column
   if (is.null(res$act_diagnoses) ||
       !"VariableSplit" %in% names(res$act_diagnoses))
@@ -261,52 +264,140 @@ apply_single_merge <- function(res, merge_entry, cfg) {
   if (is.null(res$side_mapping) ||
       !"VariableSplit" %in% names(res$side_mapping))
     res$side_mapping <- tibble::tibble(VariableSplit = character())
-  
-  # Find matching RAG columns
-  rag_cols <- intersect(selected_splits, names(res$rag))
-  
-  if (!length(rag_cols)) {
-    id_cols         <- intersect(c(res$cross_cols, "Period"), names(res$rag))
-    rag_split_names <- setdiff(
-      names(res$rag)[sapply(as.data.frame(res$rag), is.numeric)], id_cols)
-    
-    # Filter by view to avoid duplicate stripped names
-    rag_candidates <- if (view_filter == "focus") {
+
+  split_time_suffix <- function(x) {
+    x <- as.character(x)
+    m <- regexpr("_Before\\s+.*$", x, ignore.case = TRUE, perl = TRUE)
+    ifelse(m > 0, substring(x, m), "")
+  }
+
+  split_without_time <- function(x) {
+    stringr::str_remove(as.character(x), stringr::regex("_Before\\s+.*$", ignore_case = TRUE))
+  }
+
+  split_signature <- function(x) {
+    base <- split_without_time(x)
+    suffix <- tolower(trimws(split_time_suffix(x)))
+    vars <- unique(trimws(as.character(cfg$varname_include %||% character(0))))
+    vars <- vars[!is.na(vars) & nzchar(vars)]
+    vars <- vars[order(nchar(vars), decreasing = TRUE)]
+
+    matched_var <- ""
+    remainder <- base
+    for (vn in vars) {
+      vn_l <- tolower(vn)
+      base_l <- tolower(base)
+      if (identical(base_l, vn_l)) {
+        matched_var <- vn
+        remainder <- ""
+        break
+      }
+      prefix <- paste0(vn, "_")
+      if (startsWith(base_l, tolower(prefix))) {
+        matched_var <- vn
+        remainder <- substring(base, nchar(prefix) + 1L)
+        break
+      }
+    }
+
+    if (!nzchar(matched_var)) {
+      pieces <- strsplit(base, "_", fixed = TRUE)[[1]]
+      matched_var <- pieces[1] %||% ""
+      remainder <- if (length(pieces) > 1) paste(pieces[-1], collapse = "_") else ""
+    }
+
+    parts <- strsplit(remainder, "_", fixed = TRUE)[[1]]
+    parts <- trimws(parts)
+    parts <- parts[!is.na(parts) & nzchar(parts)]
+    paste(
+      tolower(trimws(matched_var)),
+      suffix,
+      paste(sort(tolower(parts)), collapse = "|"),
+      sep = "||"
+    )
+  }
+
+  closest_split_examples <- function(x, candidates, n = 3L) {
+    if (!length(candidates)) return(character(0))
+    d <- utils::adist(x, candidates, ignore.case = TRUE)
+    candidates[order(as.numeric(d))[seq_len(min(n, length(candidates)))]]
+  }
+
+  resolve_merge_splits <- function(requested, rag_split_names, view_filter) {
+    requested <- unique(trimws(as.character(requested)))
+    requested <- requested[!is.na(requested) & nzchar(requested)]
+    exact <- intersect(requested, rag_split_names)
+    unresolved <- setdiff(requested, exact)
+
+    candidates <- if (identical(view_filter, "focus")) {
       rag_split_names[!grepl("Before", rag_split_names, fixed = TRUE)]
     } else {
       rag_split_names[grepl("Before", rag_split_names, fixed = TRUE)]
     }
-    if (!length(rag_candidates)) rag_candidates <- rag_split_names
-    
-    strip_time <- function(x)
-      stringr::str_remove(
-        x, "(_Before .*|_Before_.*|_[Ll]ast\\d+[wW].*|_\\d+[wW].*)$")
-    
-    rag_stripped   <- setNames(rag_candidates, strip_time(rag_candidates))
-    split_stripped <- strip_time(selected_splits)
-    matched_keys   <- intersect(split_stripped, names(rag_stripped))
-    
-    if (length(matched_keys)) {
-      rag_cols <- unname(rag_stripped[matched_keys])
-      rag_cols <- rag_cols[!is.na(rag_cols) & nzchar(rag_cols)]
+    if (!length(candidates)) candidates <- rag_split_names
+
+    mapped <- character(0)
+    ambiguous <- character(0)
+    missing <- character(0)
+    if (length(unresolved)) {
+      cand_sig <- vapply(candidates, split_signature, character(1))
+      for (nm in unresolved) {
+        sig <- split_signature(nm)
+        hits <- candidates[cand_sig == sig]
+        hits <- hits[!is.na(hits) & nzchar(hits)]
+        if (length(hits) == 1L) {
+          mapped <- c(mapped, hits)
+        } else if (length(hits) > 1L) {
+          ambiguous <- c(ambiguous, nm)
+        } else {
+          missing <- c(missing, nm)
+        }
+      }
     }
+
+    list(
+      cols = unique(c(exact, mapped)),
+      missing = missing,
+      ambiguous = ambiguous,
+      candidates = candidates
+    )
   }
   
-  if (!length(rag_cols)) {
+  # Find matching RAG columns
+  id_cols         <- intersect(c(res$cross_cols, "Period"), names(res$rag))
+  rag_split_names <- setdiff(
+    names(res$rag)[sapply(as.data.frame(res$rag), is.numeric)], id_cols)
+  resolved <- resolve_merge_splits(selected_splits, rag_split_names, view_filter)
+  rag_cols <- resolved$cols
+
+  if (length(rag_cols) != length(unique(selected_splits))) {
+    unresolved <- c(resolved$missing, resolved$ambiguous)
+    unresolved <- unresolved[!is.na(unresolved) & nzchar(unresolved)]
+    sample_missing <- paste(utils::head(unresolved, 2), collapse = " | ")
+    examples <- if (length(unresolved)) {
+      paste(closest_split_examples(unresolved[1], resolved$candidates), collapse = " | ")
+    } else ""
     showNotification(
-      paste0("Merge '", new_name, "': splits not found in RAG."),
+      paste0(
+        "Merge '", new_name, "' not applied. Missing: ", sample_missing,
+        ". View: ", view_filter,
+        if (nzchar(examples)) paste0(". Closest RAG: ", examples) else ""
+      ),
       type = "warning", duration = 8)
     return(res)
   }
   
   # RAG — activity
+  selected_splits <- rag_cols
   new_rag             <- res$rag
   new_rag[[new_name]] <- rowSums(new_rag[, rag_cols, drop = FALSE], na.rm = TRUE)
-  new_rag             <- new_rag[, setdiff(names(new_rag), rag_cols)]
+  new_rag             <- new_rag[, setdiff(names(new_rag), setdiff(rag_cols, new_name))]
   
   # RAG — spend
   spend_rag_cands  <- stringr::str_replace_all(
     rag_cols, stringr::regex(act_kw, ignore_case = TRUE), spend_kw)
+  spend_rag_cands  <- spend_rag_cands[!identical(act_kw, spend_kw) &
+                                        spend_rag_cands != rag_cols]
   spend_rag_cols   <- intersect(spend_rag_cands, names(new_rag))
   new_spend_rag_nm <- stringr::str_replace_all(
     new_name, stringr::regex(act_kw, ignore_case = TRUE), spend_kw)
@@ -315,7 +406,7 @@ apply_single_merge <- function(res, merge_entry, cfg) {
   if (length(spend_rag_cols) > 0) {
     new_rag[[new_spend_rag_nm]] <- rowSums(
       new_rag[, spend_rag_cols, drop = FALSE], na.rm = TRUE)
-    new_rag <- new_rag[, setdiff(names(new_rag), spend_rag_cols)]
+    new_rag <- new_rag[, setdiff(names(new_rag), setdiff(spend_rag_cols, new_spend_rag_nm))]
   }
   
   # act_diagnoses
@@ -548,8 +639,16 @@ process_channel <- function(all_rags,
   
   vi <- cfg$varname_include[nchar(cfg$varname_include %||% "") > 0]
   if (length(vi) > 0) {
-    pattern   <- paste(paste0("^", vi), collapse = "|")
-    d_prefilt <- d_prefilt[grepl(pattern, VariableName, ignore.case = TRUE)]
+    match_mode <- cfg$varname_match_mode %||%
+      if (identical(cfg$source %||% "", "vof")) "exact" else "prefix"
+    if (identical(match_mode, "exact")) {
+      d_prefilt <- d_prefilt[
+        tolower(trimws(VariableName)) %in% tolower(trimws(vi))
+      ]
+    } else {
+      pattern   <- paste(paste0("^", stringr::str_replace_all(vi, "([\\W])", "\\\\\\1")), collapse = "|")
+      d_prefilt <- d_prefilt[grepl(pattern, VariableName, ignore.case = TRUE, perl = TRUE)]
+    }
   }
   
   for (p in cfg$varname_exclude %||% character(0))

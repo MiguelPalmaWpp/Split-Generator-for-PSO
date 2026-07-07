@@ -21,14 +21,17 @@ mod_channels_ui <- function(id) {
           tags$label(
             class = "ch-load-label",
             icon("upload"), " Load Config",
-            tags$input(type = "file", accept = ".csv",
+            tags$input(type = "file", accept = ".csv,.tsv,.txt",
                        class = "d-none",
                        onchange = paste0(
-                         "var r=new FileReader();",
-                         "r.onload=function(e){Shiny.setInputValue('",
-                         ns("config_csv_content"),
-                         "',e.target.result,{priority:'event'});};",
-                         "r.readAsText(this.files[0]);")))
+                          "if(!this.files||!this.files.length)return;",
+                          "var input=this;",
+                          "var r=new FileReader();",
+                          "r.onload=function(e){Shiny.setInputValue('",
+                          ns("config_csv_content"),
+                          "',e.target.result,{priority:'event'});input.value='';};",
+                          "r.onerror=function(){input.value='';};",
+                          "r.readAsText(this.files[0]);")))
         )
       ),
       actionButton(ns("btn_manage_channels"),
@@ -130,6 +133,23 @@ mod_channels_server <- function(id, data, media_index) {
     }
     
     main_data <- reactive({ data()$all_rags })
+
+    filter_by_channel_varnames <- function(df, cfg) {
+      vi <- cfg$varname_include[nzchar(cfg$varname_include %||% "")]
+      if (!length(vi) || !"VariableName" %in% names(df)) return(df)
+
+      match_mode <- cfg$varname_match_mode %||%
+        if (identical(cfg$source %||% "", "vof")) "exact" else "prefix"
+      vn_vec <- as.character(df$VariableName)
+      if (identical(match_mode, "exact")) {
+        keep <- tolower(trimws(vn_vec)) %in% tolower(trimws(vi))
+      } else {
+        keep <- Reduce("|", lapply(vi, function(p)
+          grepl(paste0("^", stringr::str_replace_all(p, "([\\W])", "\\\\\\1")),
+                vn_vec, ignore.case = TRUE, perl = TRUE)))
+      }
+      df[keep, , drop = FALSE]
+    }
     
     mk_info_row <- function(label, value) {
       div(class = "info-row",
@@ -632,13 +652,7 @@ mod_channels_server <- function(id, data, media_index) {
       }
       
       if (!is.null(cfg_p)) {
-        vi <- cfg_p$varname_include[nzchar(cfg_p$varname_include %||% "")]
-        if (length(vi) > 0 && "VariableName" %in% names(md)) {
-          vn_vec <- as.character(md$VariableName)
-          keep   <- Reduce("|", lapply(vi, function(p)
-            grepl(paste0("^", p), vn_vec, ignore.case = TRUE, perl = TRUE)))
-          md <- md[keep, , drop = FALSE]
-        }
+        md <- filter_by_channel_varnames(md, cfg_p)
         is_limited <- nrow(md) > preview_row_limit
         md <- limit_preview_rows(md)
         if (length(cfg_p$dimension_breaks %||% list()) > 0)
@@ -739,13 +753,7 @@ mod_channels_server <- function(id, data, media_index) {
       if (is.null(md) || !col %in% names(md)) return(2L)
       if (!is.null(rv$selected) && rv$selected %in% names(rv$channels)) {
         cfg_p <- rv$channels[[rv$selected]]
-        vi    <- cfg_p$varname_include[nzchar(cfg_p$varname_include %||% "")]
-        if (length(vi) > 0 && "VariableName" %in% names(md)) {
-          vn_vec <- as.character(md$VariableName)
-          keep   <- Reduce("|", lapply(vi, function(p)
-            grepl(paste0("^", p), vn_vec, ignore.case = TRUE, perl = TRUE)))
-          md <- md[keep, , drop = FALSE]
-        }
+        md <- filter_by_channel_varnames(md, cfg_p)
       }
       if (nrow(md) == 0 || !col %in% names(md)) return(2L)
       md <- limit_preview_rows(md)
@@ -829,12 +837,8 @@ mod_channels_server <- function(id, data, media_index) {
 
       cols_needed <- intersect(c("VariableName", col), names(md))
       md_small <- md[, cols_needed, drop = FALSE]
-      if (length(vi) > 0 && "VariableName" %in% names(md_small)) {
-        vn_vec <- as.character(md_small$VariableName)
-        keep <- Reduce("|", lapply(vi, function(p)
-          grepl(paste0("^", p), vn_vec, ignore.case = TRUE, perl = TRUE)))
-        md_small <- md_small[keep, , drop = FALSE]
-      }
+      if (!is.null(rv$selected) && rv$selected %in% names(rv$channels))
+        md_small <- filter_by_channel_varnames(md_small, rv$channels[[rv$selected]])
       if (nrow(md_small) == 0 || !col %in% names(md_small)) {
         break_preview_cache$key <- cache_key
         break_preview_cache$data <- empty_preview
@@ -1284,13 +1288,81 @@ mod_channels_server <- function(id, data, media_index) {
         readr::write_csv(df, file, na = "")
       }
     )
+
+    clean_config_col_names <- function(x) {
+      x <- trimws(as.character(x))
+      x <- sub("^\ufeff", "", x)
+      x <- sub("^<U\\+FEFF>", "", x)
+      x <- sub("^Ã¯\\.\\.", "", x)
+      x
+    }
+
+    read_channel_config_content <- function(config_text) {
+      read_attempt <- function(kind) {
+        con <- textConnection(config_text)
+        on.exit(close(con), add = TRUE)
+        switch(
+          kind,
+          tab = read.delim(con, stringsAsFactors = FALSE,
+                           check.names = FALSE, na.strings = c("", "NA")),
+          semi = read.csv2(con, stringsAsFactors = FALSE,
+                           check.names = FALSE, na.strings = c("", "NA")),
+          csv = read.csv(con, stringsAsFactors = FALSE,
+                         check.names = FALSE, na.strings = c("", "NA"))
+        )
+      }
+
+      first_line <- strsplit(config_text %||% "", "\r?\n")[[1]][1] %||% ""
+      preferred <- c(
+        if (grepl("\t", first_line, fixed = TRUE)) "tab",
+        if (grepl(",", first_line, fixed = TRUE)) "csv",
+        if (grepl(";", first_line, fixed = TRUE)) "semi",
+        "csv", "tab", "semi"
+      )
+
+      fallback <- NULL
+      for (kind in unique(preferred)) {
+        df <- tryCatch(read_attempt(kind), error = function(e) NULL)
+        if (is.null(df)) next
+        names(df) <- clean_config_col_names(names(df))
+        fallback <- fallback %||% df
+        if (all(c("Channel", "Type") %in% names(df))) return(df)
+      }
+      fallback
+    }
+
+    parse_merge_splits_config <- function(merged_raw) {
+      merged_raw <- trimws(as.character(merged_raw %||% ""))
+      if (!nzchar(merged_raw)) return(character(0))
+
+      if (grepl("\\s\\|\\|\\|\\s", merged_raw, perl = TRUE)) {
+        parts <- strsplit(merged_raw, "\\s\\|\\|\\|\\s", perl = TRUE)[[1]]
+        return(Filter(nzchar, trimws(parts)))
+      }
+
+      tokens <- trimws(strsplit(merged_raw, "\\|", fixed = FALSE)[[1]])
+      tokens <- tokens[nzchar(tokens)]
+      if (!length(tokens)) return(character(0))
+
+      time_break_token <- function(x) {
+        grepl("^[[:alpha:]]+TimeBreak$", x, ignore.case = TRUE)
+      }
+
+      out <- character(0)
+      for (tok in tokens) {
+        if (time_break_token(tok) && length(out) > 0) {
+          out[length(out)] <- paste0(out[length(out)], "|", tok)
+        } else {
+          out <- c(out, tok)
+        }
+      }
+      out
+    }
     
     apply_config_import <- function(config_text) {
       req(config_text)
       tryCatch({
-        con <- textConnection(config_text)
-        on.exit(close(con))
-        df  <- read.csv(con, stringsAsFactors = FALSE, check.names = FALSE)
+        df  <- read_channel_config_content(config_text)
         
         if (!all(c("Channel", "Type") %in% names(df))) {
           showNotification("Config file missing Channel or Type columns.",
@@ -1380,6 +1452,13 @@ mod_channels_server <- function(id, data, media_index) {
             media_channel = if (!is.na(roi_info$channel)) roi_info$channel else "",
             sub_channel = "", effect = "")
         }
+
+        infer_merge_view <- function(merge_name, merged_raw) {
+          txt <- paste(c(merge_name, merged_raw), collapse = " ")
+          has_nonfocus <- grepl("_Before\\s+", txt, ignore.case = TRUE) ||
+            grepl("\\|[[:alpha:]]+TimeBreak", txt, ignore.case = TRUE)
+          if (has_nonfocus) "nonfocus" else "focus"
+        }
         
         for (i in seq_len(nrow(config_rows))) {
           nm     <- config_rows$Channel[i]
@@ -1438,7 +1517,7 @@ mod_channels_server <- function(id, data, media_index) {
               merge_name <- trimws(merge_rows$SplitOrder[i] %||% "")
               merged_raw <- trimws(merge_rows$BreakInfo[i]  %||% "")
             }
-            merged <- Filter(nzchar, trimws(strsplit(merged_raw, "\\|")[[1]]))
+            merged <- parse_merge_splits_config(merged_raw)
             if (!nzchar(merge_name) || !length(merged)) next
             existing       <- rv$channels[[nm]]$saved_merges %||% list()
             existing_names <- vapply(existing, \(m) m$new_name %||% "", character(1))
@@ -1451,9 +1530,10 @@ mod_channels_server <- function(id, data, media_index) {
             new_spend <- stringr::str_replace_all(
               merge_name, stringr::regex(act_kw, ignore_case = TRUE), spend_kw)
             if (new_spend == merge_name) new_spend <- paste0(merge_name, "_", spend_kw)
+            merge_view <- infer_merge_view(merge_name, merged_raw)
             rv$channels[[nm]]$saved_merges <- c(existing, list(list(
               id = max_id + 1L, new_name = merge_name, merged = as.list(merged),
-              view = "focus", spend_merged = list(), new_spend_name = new_spend,
+              view = merge_view, spend_merged = list(), new_spend_name = new_spend,
               active = TRUE, saved_at = format(Sys.time(), "%Y-%m-%d %H:%M"))))
             n_merges <- n_merges + 1L
           }
@@ -1475,9 +1555,7 @@ mod_channels_server <- function(id, data, media_index) {
     }
 
     preview_config_import <- function(config_text) {
-      con <- textConnection(config_text)
-      on.exit(close(con))
-      df <- read.csv(con, stringsAsFactors = FALSE, check.names = FALSE)
+      df <- read_channel_config_content(config_text)
       if (!all(c("Channel", "Type") %in% names(df))) {
         stop("Config file missing Channel or Type columns.")
       }

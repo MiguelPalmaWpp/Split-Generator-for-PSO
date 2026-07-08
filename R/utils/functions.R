@@ -312,7 +312,10 @@ export_channels_csv <- function(channels) {
       Type       = "Config",
       SplitOrder = paste(cfg$split_columns %||% character(0), collapse = "|"),
       Name       = "",
-      Splits     = ""
+      Splits     = "",
+      ActivityKeyword = cfg$activity_keyword %||% "",
+      SpendKeyword    = cfg$spend_keyword %||% "",
+      VarNameInclude  = paste(cfg$varname_include %||% character(0), collapse = " ||| ")
     )))
     for (b in cfg$dimension_breaks %||% list()) {
       rows <- c(rows, list(tibble::tibble(
@@ -320,7 +323,10 @@ export_channels_csv <- function(channels) {
         Type       = "Break",
         SplitOrder = b$column,
         Name       = paste(b$names, collapse = "|"),
-        Splits     = paste(c(b$separator, b$n_parts), collapse = "|")
+        Splits     = paste(c(b$separator, b$n_parts), collapse = "|"),
+        ActivityKeyword = "",
+        SpendKeyword    = "",
+        VarNameInclude  = ""
       )))
     }
     for (m in cfg$saved_merges %||% list()) {
@@ -330,7 +336,10 @@ export_channels_csv <- function(channels) {
         Type       = "Merge",
         SplitOrder = "",
         Name       = m$new_name,
-        Splits     = paste(unlist(m$merged), collapse = " ||| ")
+        Splits     = paste(unlist(m$merged), collapse = " ||| "),
+        ActivityKeyword = "",
+        SpendKeyword    = "",
+        VarNameInclude  = ""
       )))
     }
   }

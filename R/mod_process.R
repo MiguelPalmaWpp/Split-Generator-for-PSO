@@ -60,7 +60,8 @@ mod_process_ui <- function(id) {
 
 # ── Server ──────────────────────────────────────────────────────────────────
 mod_process_server <- function(id, data, config, channels,
-                               update_merges = NULL) {
+                               update_merges = NULL,
+                               config_import_event = reactive(NULL)) {
   moduleServer(id, function(input, output, session) {
     
     results_store       <- reactiveValues()
@@ -480,6 +481,77 @@ mod_process_server <- function(id, data, config, channels,
         rm(res_stored); gc(verbose = FALSE, full = FALSE)
       }
     }
+
+    observeEvent(config_import_event(), {
+      evt <- config_import_event()
+      if (is.null(evt) || is.null(evt$channels)) return()
+      imported <- unique(evt$channels)
+      imported <- imported[imported %in% names(channels())]
+      if (!length(imported)) return()
+
+      if (isTRUE(is_batch_processing())) {
+        showNotification(
+          paste0("Config applied to ", length(imported),
+                 " channel(s). Processing is already running; use Reprocess Changed when it finishes."),
+          type = "warning", duration = 8)
+        return()
+      }
+
+      d <- data()
+      gcfg <- config()
+      missing_ready <- c(
+        if (is.null(d$all_rags)) "RAE Datafile",
+        if (is.null(d$analytical)) "Analytical Dataset",
+        if (is.null(d$dates_df)) "dates",
+        if (is.null(gcfg$start_report_date) || is.null(gcfg$end_report_date)) "Global Parameters",
+        if (is.null(gcfg$cross_cols)) "cross-sections"
+      )
+      if (length(missing_ready)) {
+        results_trigger(isolate(results_trigger()) + 1L)
+        showNotification(
+          paste0("Config applied, but auto-processing was skipped. Missing: ",
+                 paste(missing_ready, collapse = ", "),
+                 ". The imported channels need reprocess."),
+          type = "warning", duration = 10)
+        return()
+      }
+
+      n_ok <- 0L
+      n_err <- 0L
+      t_start <- proc.time()
+      is_batch_processing(TRUE)
+      on.exit({
+        is_batch_processing(FALSE)
+        results_trigger(isolate(results_trigger()) + 1L)
+      }, add = TRUE)
+
+      withProgress(message = paste0("Auto-processing ", length(imported),
+                                    " imported channel(s)..."),
+                   value = 0, {
+                     for (i in seq_along(imported)) {
+                       nm <- imported[[i]]
+                       setProgress((i - 1) / length(imported),
+                                   message = paste0("(", i, "/", length(imported), ") ", nm))
+                       before_err <- process_errors[[nm]]
+                       run_one(nm)
+                       after_err <- process_errors[[nm]]
+                       if (is.null(after_err)) n_ok <- n_ok + 1L
+                       else if (!identical(before_err, after_err) || !is.null(after_err)) n_err <- n_err + 1L
+                     }
+                     setProgress(1, message = "Done")
+                   })
+
+      elapsed <- round((proc.time() - t_start)[["elapsed"]], 1)
+      batch_summary_state(list(processed = n_ok, already_done = 0L,
+                               skipped = 0L, failed = n_err,
+                               elapsed = elapsed))
+      showNotification(
+        paste0("Config applied. Auto-processed ", n_ok, " channel(s)",
+               if (n_err > 0) paste0("; ", n_err, " failed") else "",
+               " in ", elapsed, "s."),
+        type = if (n_err > 0) "warning" else "message",
+        duration = 7)
+    }, ignoreInit = TRUE)
     
     observeEvent(input$btn_one, {
       nm <- req(input$channel_select); req(valid_nm(nm)); run_one(nm)

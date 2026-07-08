@@ -77,6 +77,8 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
     pending_delete <- reactiveVal(NULL)
     breaks_enabled <- reactiveVal(FALSE)
     config_import_pending <- reactiveVal(NULL)
+    config_import_event <- reactiveVal(NULL)
+    config_import_event_id <- reactiveVal(0L)
     copy_config_source <- reactiveVal(NULL)
     preview_row_limit <- 1000L
     split_preview_cache <- reactiveValues(key = NULL, ui = NULL)
@@ -1450,6 +1452,30 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
       }
       out
     }
+
+    parse_config_varnames <- function(raw) {
+      raw <- trimws(as.character(raw %||% ""))
+      if (is.na(raw) || !nzchar(raw)) return(character(0))
+      sep <- if (grepl("\\s\\|\\|\\|\\s", raw, perl = TRUE)) "\\s\\|\\|\\|\\s" else "\\|"
+      parts <- trimws(strsplit(raw, sep, perl = TRUE)[[1]])
+      unique(parts[nzchar(parts)])
+    }
+
+    apply_config_keywords <- function(cfg, row) {
+      if ("ActivityKeyword" %in% names(row)) {
+        act_kw <- trimws(as.character(row$ActivityKeyword[[1]] %||% ""))
+        if (!is.na(act_kw) && nzchar(act_kw)) cfg$activity_keyword <- act_kw
+      }
+      if ("SpendKeyword" %in% names(row)) {
+        spend_kw <- trimws(as.character(row$SpendKeyword[[1]] %||% ""))
+        if (!is.na(spend_kw) && nzchar(spend_kw)) cfg$spend_keyword <- spend_kw
+      }
+      if ("VarNameInclude" %in% names(row)) {
+        vi <- parse_config_varnames(row$VarNameInclude[[1]] %||% "")
+        if (length(vi)) cfg$varname_include <- vi
+      }
+      cfg
+    }
     
     apply_config_import <- function(config_text) {
       req(config_text)
@@ -1469,6 +1495,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
         has_date_cols  <- all(c("MinPeriod", "MaxPeriod") %in% names(df))
         n_restored <- n_imported <- n_built <- n_merges <- n_skipped <- 0L
         an         <- data()$analytical
+        affected_channels <- character(0)
         
         recover_dates <- function(nm, row_idx) {
           saved_min <- as.Date(NA); saved_max <- as.Date(NA)
@@ -1508,6 +1535,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
 
         build_channel_from_config_row <- function(nm, row_idx, splits) {
           dates <- recover_dates(nm, row_idx)
+          row <- config_rows[row_idx, , drop = FALSE]
           if (nm %in% names(rv$available_channels)) {
             cfg <- rv$available_channels[[nm]]
             cfg$split_columns    <- splits
@@ -1515,7 +1543,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
             cfg$saved_merges     <- list()
             cfg$min_period       <- dates$min_p
             cfg$max_period       <- dates$max_p
-            return(cfg)
+            return(apply_config_keywords(cfg, row))
           }
 
           varname_include <- get_varname_include_fallback(nm)
@@ -1533,7 +1561,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
           } else nm
 
           roi_info <- lookup_roi(actual_mv, nm)
-          list(
+          cfg <- list(
             channel_name = nm, model_variable = actual_mv,
             varname_include = varname_include, analytical_varkeys = actual_mv,
             min_period = dates$min_p, max_period = dates$max_p,
@@ -1543,6 +1571,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
             roi = roi_info$value, source = "manual",
             media_channel = if (!is.na(roi_info$channel)) roi_info$channel else "",
             sub_channel = "", effect = "")
+          apply_config_keywords(cfg, row)
         }
 
         infer_merge_view <- function(merge_name, merged_raw) {
@@ -1567,6 +1596,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
             rv$channels[[nm]] <- build_channel_from_config_row(nm, i, splits)
             dirty_channels[[nm]] <- FALSE; n_built <- n_built + 1L
           }
+          affected_channels <- c(affected_channels, nm)
         }
         
         if (nrow(break_rows) > 0) {
@@ -1642,6 +1672,12 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
           if (n_skipped  > 0) paste0(n_skipped,  " not found"))
         showNotification(paste(parts, collapse = " \u2014 "),
                          type = "message", duration = 5)
+        affected_channels <- unique(affected_channels[nzchar(affected_channels)])
+        if (length(affected_channels)) {
+          next_id <- isolate(config_import_event_id()) + 1L
+          config_import_event_id(next_id)
+          config_import_event(list(id = next_id, channels = affected_channels))
+        }
       }, error = \(e)
       showNotification(paste("Error:", e$message), type = "error", duration = 8))
     }
@@ -1716,6 +1752,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
     
     list(
       channels      = reactive(rv$channels),
+      config_import_event = reactive(config_import_event()),
       qa_status = reactive({
         ch <- rv$channels
         n_total <- length(ch)

@@ -21,7 +21,8 @@ server <- function(input, output, session) {
     data          = setup_module$data,
     config        = setup_module$config,
     channels      = channels_module$channels,
-    update_merges = channels_module$update_merges
+    update_merges = channels_module$update_merges,
+    config_import_event = channels_module$config_import_event
   )
   
   # ── 4. Export ─────────────────────────────────────────────────────────

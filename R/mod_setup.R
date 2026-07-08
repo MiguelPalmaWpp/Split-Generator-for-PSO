@@ -62,7 +62,8 @@ mod_setup_ui <- function(id) {
                            accept = c(".csv", ".zip", ".RData", ".xlsx", ".xls"),
                            multiple = TRUE,
                            placeholder = "Select files"
-                         )))
+                         ))),
+        uiOutput(ns("batch_upload_summary"))
       ),
       layout_columns(
         col_widths = c(4, 4, 4), class = "mb-3",
@@ -190,7 +191,8 @@ mod_setup_server <- function(id) {
       analytical_combined    = NULL,
       side_mapping_nonfocus  = NULL,
       update_status          = "pending",
-      file_meta              = list()
+      file_meta              = list(),
+      upload_issues          = NULL
     )
     
     mi_building    <- reactiveVal(FALSE)
@@ -207,6 +209,96 @@ mod_setup_server <- function(id) {
       }
       TRUE
     }
+
+    output$batch_upload_summary <- renderUI({
+      issues <- rv$upload_issues
+      has_loaded <- length(rv$file_meta) > 0
+      has_issues <- !is.null(issues) && (
+        length(issues$unrecognized %||% list()) > 0 ||
+          length(issues$duplicates %||% list()) > 0 ||
+          length(issues$errors %||% list()) > 0
+      )
+      if (!has_loaded && !has_issues) return(NULL)
+      issues <- issues %||% list()
+
+      recognized_items <- lapply(intersect(base_file_kinds, names(rv$file_meta)), function(kind) {
+        meta <- rv$file_meta[[kind]]
+        list(
+          main = paste0(meta$name, " -> ", base_file_labels[[kind]]),
+          sub  = paste0(
+            "Loaded | ",
+            format_file_size(meta$size),
+            if (!is.null(meta$rows)) paste0(" | ", format(meta$rows, big.mark = ","), " rows") else "",
+            if (!is.null(meta$cols)) paste0(" | ", format(meta$cols, big.mark = ","), " cols") else "",
+            " | via ", meta$source,
+            " | ", meta$loaded_at
+          )
+        )
+      })
+      missing_items <- lapply(setdiff(required_base_file_kinds, names(rv$file_meta)), function(kind) {
+        list(main = base_file_labels[[kind]], sub = "Not loaded yet.")
+      })
+      optional_missing_items <- lapply(setdiff(optional_base_file_kinds, names(rv$file_meta)), function(kind) {
+        list(
+          main = base_file_labels[[kind]],
+          sub = "Optional but important. You can continue, but seed_for_indices.csv will export without ROI values until this file is loaded."
+        )
+      })
+      duplicate_items <- lapply(issues$duplicates %||% list(), function(x) {
+        list(
+          main = paste0(x$file, " skipped as duplicate ", x$label),
+          sub  = paste0("Kept: ", x$kept_file)
+        )
+      })
+      unrecognized_items <- lapply(issues$unrecognized %||% list(), function(x) {
+        list(
+          main = paste0(x$file, " from ", x$source %||% "upload"),
+          sub  = paste0("Not recognized | ", x$reason)
+        )
+      })
+      error_items <- lapply(issues$errors %||% list(), function(x) {
+        list(
+          main = paste0(x$file, " -> ", x$label),
+          sub  = paste0("Load failed | ", x$error)
+        )
+      })
+
+      has_review <- length(missing_items) > 0 || length(optional_missing_items) > 0 ||
+        length(duplicate_items) > 0 || length(unrecognized_items) > 0 || length(error_items) > 0
+
+      tags$div(
+        class = "batch-upload-summary",
+        tags$div(
+          class = "batch-summary-head",
+          tags$div(
+            class = "batch-summary-title",
+            icon(if (has_review) "triangle-exclamation" else "circle-check"),
+            "Upload summary"
+          ),
+          tags$div(
+            class = "batch-summary-badges",
+            batch_summary_badge("Recognized", length(recognized_items), "ok"),
+            batch_summary_badge("Missing", length(missing_items),
+                                if (length(missing_items)) "warn" else "neutral"),
+            batch_summary_badge("Optional missing", length(optional_missing_items),
+                                if (length(optional_missing_items)) "warn" else "neutral"),
+            batch_summary_badge("Skipped", length(duplicate_items),
+                                if (length(duplicate_items)) "warn" else "neutral"),
+            batch_summary_badge("Not recognized", length(unrecognized_items),
+                                if (length(unrecognized_items)) "error" else "neutral")
+          )
+        ),
+        tags$div(
+          class = "batch-summary-body",
+          batch_summary_section("Recognized files", recognized_items, "ok"),
+          batch_summary_section("Missing required files", missing_items, "warn"),
+          batch_summary_section("Optional files not loaded", optional_missing_items, "warn"),
+          batch_summary_section("Skipped duplicates", duplicate_items, "warn"),
+          batch_summary_section("Not recognized", unrecognized_items, "error"),
+          batch_summary_section("Load errors", error_items, "error")
+        )
+      )
+    })
 
     read_csv_header <- function(path, nrows = 5) {
       data.table::fread(path, nrows = nrows, data.table = FALSE,
@@ -225,7 +317,9 @@ mod_setup_server <- function(id) {
       rv$update_status         <- "pending"
     }
 
-    base_file_kinds <- c("main", "analytical", "vof", "details", "rois")
+    required_base_file_kinds <- c("main", "analytical", "vof", "details")
+    optional_base_file_kinds <- c("rois")
+    base_file_kinds <- c(required_base_file_kinds, optional_base_file_kinds)
 
     base_file_input_ids <- c(
       main       = "file_main",
@@ -242,6 +336,89 @@ mod_setup_server <- function(id) {
       if (bytes >= 1024)
         return(paste0(round(bytes / 1024, 1), " KB"))
       paste0(bytes, " B")
+    }
+
+    base_file_labels <- c(
+      main       = "RAE Datafile",
+      analytical = "Analytical Dataset",
+      vof        = "VOF Metadata",
+      details    = "ModelDetails",
+      rois       = "ROIs by Channel"
+    )
+
+    required_files_ready <- function() {
+      !is.null(rv$main_data) && !is.null(rv$analytical) &&
+        !is.null(rv$vof_data) && !is.null(rv$details)
+    }
+
+    batch_summary_badge <- function(label, count, type = "neutral") {
+      tags$span(
+        class = paste("batch-summary-badge", paste0("batch-summary-badge-", type)),
+        tags$span(class = "batch-summary-badge-count", count),
+        label
+      )
+    }
+
+    batch_summary_section <- function(title, items, type = "neutral") {
+      if (!length(items)) return(NULL)
+      tags$div(
+        class = "batch-summary-section",
+        tags$div(class = "batch-summary-section-title", title),
+        tags$div(
+          class = "batch-summary-list",
+          lapply(items, function(item) {
+            tags$div(
+              class = paste("batch-summary-row", paste0("batch-summary-row-", type)),
+              icon(switch(type,
+                          ok = "circle-check",
+                          warn = "triangle-exclamation",
+                          error = "circle-xmark",
+                          muted = "circle-info",
+                          "circle-info"),
+                   class = "batch-summary-row-icon"),
+              tags$div(
+                class = "batch-summary-row-text",
+                tags$div(class = "batch-summary-row-main", item$main),
+                if (!is.null(item$sub) && nzchar(item$sub))
+                  tags$div(class = "batch-summary-row-sub", item$sub)
+              )
+            )
+          })
+        )
+      )
+    }
+
+    set_upload_issues <- function(unrecognized = list(), duplicates = list(),
+                                  errors = list()) {
+      rv$upload_issues <- list(
+        unrecognized = unrecognized,
+        duplicates = duplicates,
+        errors = errors,
+        last_upload_at = format(Sys.time(), "%Y-%m-%d %H:%M")
+      )
+    }
+
+    set_manual_upload_summary <- function(kind, file_row, ok, reason,
+                                          error = NULL, status = NULL) {
+      label <- base_file_labels[[kind]] %||% kind
+      if (isTRUE(ok)) {
+        set_upload_issues()
+      } else {
+        set_upload_issues(
+          unrecognized = list(list(
+            file = file_row$name,
+            ext = tolower(tools::file_ext(file_row$name)),
+            reason = reason,
+            source = label
+          )),
+          errors = if (!is.null(error)) list(list(
+            file = file_row$name,
+            kind = kind,
+            label = label,
+            error = error
+          )) else list()
+        )
+      }
     }
 
     set_file_meta <- function(kind, file_row, rows = NULL, cols = NULL,
@@ -345,16 +522,70 @@ mod_setup_server <- function(id) {
       if (!validate_required_cols(df, "RAE Datafile")) return(FALSE)
       rv$main_data <- df
       set_file_meta("main", file_row, nrow(rv$main_data), ncol(rv$main_data), source)
-      showNotification(paste0("RAE Datafile loaded - ",
-                              format(nrow(rv$main_data), big.mark = ","),
-                              " rows"),
-                       type = "message", duration = 4)
+      if (!identical(source, "batch")) {
+        showNotification(paste0("RAE Datafile loaded - ",
+                                format(nrow(rv$main_data), big.mark = ","),
+                                " rows"),
+                         type = "message", duration = 4)
+      }
       TRUE
+    }
+
+    analytical_dim_cols <- setdiff(REQUIRED_COLS, c("VariableName", "Period", "VariableValue"))
+    model_details_required_cols <- c(
+      "Type", "VariableName", "FunctionForm", "Normalization", "MinMaxAdjustment"
+    )
+
+    validate_analytical_signature <- function(df) {
+      cols <- names(df)
+      period_pos <- match("Period", cols)
+      if (is.na(period_pos)) {
+        return(list(ok = FALSE, reason = "Analytical Dataset must contain Period"))
+      }
+      left_cols <- if (period_pos > 1L) cols[seq_len(period_pos - 1L)] else character(0)
+      matched_dims <- intersect(left_cols, analytical_dim_cols)
+      if (!length(matched_dims)) {
+        return(list(
+          ok = FALSE,
+          reason = paste0(
+            "Analytical Dataset needs Period with at least one RAE dimension to its left: ",
+            paste(analytical_dim_cols, collapse = ", ")
+          )
+        ))
+      }
+      list(
+        ok = TRUE,
+        reason = paste0("Period found after dimension(s): ", paste(matched_dims, collapse = ", "))
+      )
+    }
+
+    validate_model_details_signature <- function(df) {
+      missing <- setdiff(model_details_required_cols, names(df))
+      if (length(missing)) {
+        return(list(
+          ok = FALSE,
+          reason = paste0("ModelDetails missing columns: ", paste(missing, collapse = ", "))
+        ))
+      }
+      list(ok = TRUE, reason = "ModelDetails required columns matched")
+    }
+
+    validate_rois_signature <- function(df) {
+      roi_cols <- names(df)[stringr::str_detect(names(df), stringr::regex("\\bROI\\b", ignore_case = TRUE))]
+      if (!length(roi_cols)) {
+        return(list(ok = FALSE, reason = "ROIs by Channel must contain an ROI column"))
+      }
+      list(ok = TRUE, reason = paste0("ROI column found: ", roi_cols[1]))
     }
 
     load_analytical_base <- function(file_row, preloaded = NULL, source = "manual") {
       df <- preloaded %||% read_first_rdata_object(file_row$datapath)
       df <- df[, !duplicated(names(df), fromLast = TRUE)]
+      sig <- validate_analytical_signature(df)
+      if (!isTRUE(sig$ok)) {
+        showNotification(sig$reason, type = "error", duration = 12)
+        return(FALSE)
+      }
       if ("Period" %in% names(df))
         df <- df %>% dplyr::mutate(Period = parse_period_robust(Period))
       rv$analytical <- tibble::as_tibble(df) %>% dplyr::ungroup()
@@ -373,10 +604,12 @@ mod_setup_server <- function(id) {
       })
       reset_update_outputs()
       set_file_meta("analytical", file_row, nrow(rv$analytical), ncol(rv$analytical), source)
-      showNotification(paste0("Analytical loaded - ",
-                              format(nrow(rv$analytical), big.mark = ","),
-                              " rows"),
-                       type = "message", duration = 5)
+      if (!identical(source, "batch")) {
+        showNotification(paste0("Analytical loaded - ",
+                                format(nrow(rv$analytical), big.mark = ","),
+                                " rows"),
+                         type = "message", duration = 5)
+      }
       TRUE
     }
 
@@ -398,9 +631,11 @@ mod_setup_server <- function(id) {
       }
       rv$vof_data <- vof_raw
       set_file_meta("vof", file_row, nrow(rv$vof_data), ncol(rv$vof_data), source)
-      showNotification(paste0("VOF loaded - ", format(nrow(vof_raw), big.mark = ","),
-                              " rows"),
-                       type = "message", duration = 4)
+      if (!identical(source, "batch")) {
+        showNotification(paste0("VOF loaded - ", format(nrow(vof_raw), big.mark = ","),
+                                " rows"),
+                         type = "message", duration = 4)
+      }
       TRUE
     }
 
@@ -408,8 +643,9 @@ mod_setup_server <- function(id) {
       details_raw <- preloaded %||%
         data.table::fread(file_row$datapath, data.table = FALSE,
                           showProgress = FALSE)
-      if (!all(c("Type", "VariableName") %in% names(details_raw))) {
-        showNotification("ModelDetails missing Type or VariableName.",
+      sig <- validate_model_details_signature(details_raw)
+      if (!isTRUE(sig$ok)) {
+        showNotification(sig$reason,
                          type = "error", duration = 10)
         return(FALSE)
       }
@@ -418,9 +654,11 @@ mod_setup_server <- function(id) {
       set_file_meta("details", file_row, nrow(rv$details), ncol(rv$details), source)
       n_in <- sum(stringr::str_detect(stringr::str_to_lower(trimws(rv$details$Type)),
                                       "\\b(in|fixed)\\b"), na.rm = TRUE)
-      showNotification(paste0("ModelDetails loaded - ", n_in,
-                              " Type='IN'/'FIXED' variables"),
-                       type = "message", duration = 4)
+      if (!identical(source, "batch")) {
+        showNotification(paste0("ModelDetails loaded - ", n_in,
+                                " Type='IN'/'FIXED' variables"),
+                         type = "message", duration = 4)
+      }
       TRUE
     }
 
@@ -432,9 +670,17 @@ mod_setup_server <- function(id) {
         else
           data.table::fread(file_row$datapath, data.table = FALSE, showProgress = FALSE)
       }
+      sig <- validate_rois_signature(rv$channels_rois)
+      if (!isTRUE(sig$ok)) {
+        rv$channels_rois <- NULL
+        showNotification(sig$reason, type = "error", duration = 10)
+        return(FALSE)
+      }
       set_file_meta("rois", file_row, nrow(rv$channels_rois), ncol(rv$channels_rois), source)
-      showNotification(paste0("ROIs loaded - ", nrow(rv$channels_rois), " rows"),
-                       type = "message", duration = 4)
+      if (!identical(source, "batch")) {
+        showNotification(paste0("ROIs loaded - ", nrow(rv$channels_rois), " rows"),
+                         type = "message", duration = 4)
+      }
       TRUE
     }
 
@@ -444,41 +690,63 @@ mod_setup_server <- function(id) {
 
       if (ext == "zip") {
         df <- read_main_data(file_row$datapath, ext)
-        return(list(kind = "main", data = df))
+        return(list(kind = "main", data = df,
+                    reason = "ZIP file read as RAE Datafile"))
       }
 
       if (ext == "rdata") {
         obj <- read_first_rdata_object(file_row$datapath)
-        if (is.data.frame(obj) && "Period" %in% names(obj))
-          return(list(kind = "analytical", data = obj))
-        return(list(kind = NA_character_, data = NULL))
+        if (is.data.frame(obj)) {
+          sig <- validate_analytical_signature(obj)
+          if (isTRUE(sig$ok))
+            return(list(kind = "analytical", data = obj,
+                        reason = sig$reason))
+          return(list(kind = NA_character_, data = NULL,
+                      reason = sig$reason))
+        }
+        return(list(kind = NA_character_, data = NULL,
+                    reason = "RData first object is not a data.frame"))
       }
 
       if (ext %in% c("xlsx", "xls")) {
         df <- readxl::read_excel(file_row$datapath, n_max = 5)
-        if ("MainModelVariableName" %in% names(df))
-          return(list(kind = "rois", data = NULL))
-        return(list(kind = NA_character_, data = NULL))
+        sig <- validate_rois_signature(df)
+        if (isTRUE(sig$ok))
+          return(list(kind = "rois", data = NULL,
+                      reason = sig$reason))
+        return(list(kind = NA_character_, data = NULL,
+                    reason = sig$reason))
       }
 
       if (ext == "csv") {
         hdr <- read_csv_header(file_row$datapath, nrows = 5)
         cols <- names(hdr)
         if (all(REQUIRED_COLS %in% cols))
-          return(list(kind = "main", data = NULL))
+          return(list(kind = "main", data = NULL,
+                      reason = "Matched REQUIRED_COLS"))
         if (all(c("AnalyticalVariableName", "MainModelVariableName",
                   "MinPeriod", "MaxPeriod") %in% cols) &&
             any(c("Geography", "Geographies") %in% cols))
-          return(list(kind = "vof", data = NULL))
-        if (all(c("Type", "VariableName") %in% cols) ||
-            stringr::str_detect(nm, "model.?details"))
-          return(list(kind = "details", data = NULL))
-        if ("MainModelVariableName" %in% cols ||
-            stringr::str_detect(nm, "roi"))
-          return(list(kind = "rois", data = NULL))
+          return(list(kind = "vof", data = NULL,
+                      reason = "CSV VOF required columns"))
+        if (all(model_details_required_cols %in% cols))
+          return(list(kind = "details", data = NULL,
+                      reason = "CSV ModelDetails required columns"))
+        if (stringr::str_detect(nm, "model.?details"))
+          return(list(kind = NA_character_, data = NULL,
+                      reason = paste0("ModelDetails filename but missing columns: ",
+                                      paste(setdiff(model_details_required_cols, cols),
+                                            collapse = ", "))))
+        roi_sig <- validate_rois_signature(hdr)
+        if (isTRUE(roi_sig$ok))
+          return(list(kind = "rois", data = NULL,
+                      reason = roi_sig$reason))
+        return(list(kind = NA_character_, data = NULL,
+                    reason = "CSV columns did not match any base file signature"))
       }
 
-      list(kind = NA_character_, data = NULL)
+      list(kind = NA_character_, data = NULL,
+           reason = paste0("Unsupported extension: .", ext))
     }
 
     load_base_by_kind <- function(kind, file_row, preloaded = NULL, source = "manual") {
@@ -491,6 +759,47 @@ mod_setup_server <- function(id) {
              FALSE)
     }
 
+    load_manual_base_file <- function(kind, file_row, progress_message = NULL) {
+      label <- base_file_labels[[kind]] %||% kind
+      det <- tryCatch(detect_base_file(file_row), error = function(e) {
+        list(kind = NA_character_, data = NULL, reason = e$message)
+      })
+
+      if (is.na(det$kind) || !identical(det$kind, kind)) {
+        detected_label <- if (!is.na(det$kind) && det$kind %in% names(base_file_labels))
+          base_file_labels[[det$kind]] else "no base file type"
+        reason <- paste0(
+          label, " expected, but this upload matched ", detected_label,
+          ". ", det$reason %||% "No matching signature."
+        )
+        set_manual_upload_summary(kind, file_row, FALSE, reason)
+        showNotification(reason, type = "warning", duration = 10)
+        return(FALSE)
+      }
+
+      run_load <- function() load_base_by_kind(kind, file_row, det$data, source = "manual")
+      ok <- tryCatch({
+        if (!is.null(progress_message)) {
+          withProgress(message = progress_message, value = 0.2, {
+            incProgress(0.5, detail = "Loading...")
+            run_load()
+          })
+        } else {
+          run_load()
+        }
+      }, error = function(e) {
+        set_manual_upload_summary(kind, file_row, FALSE, det$reason, e$message)
+        showNotification(paste(label, "error:", e$message), type = "error", duration = 12)
+        FALSE
+      })
+
+      set_manual_upload_summary(
+        kind, file_row, isTRUE(ok), det$reason,
+        error = if (isTRUE(ok)) NULL else paste(label, "failed validation")
+      )
+      ok
+    }
+
     for (kind in base_file_kinds) {
       local({
         k <- kind
@@ -500,7 +809,7 @@ mod_setup_server <- function(id) {
     
     # ── Navigation availability ────────────────────────────────────────
     observe({
-      session$sendCustomMessage("setTabsDisabled", list(disabled = FALSE))
+      session$sendCustomMessage("setTabsDisabled", list(disabled = !required_files_ready()))
     })
     
     observeEvent(input$period_preset, {
@@ -526,62 +835,79 @@ mod_setup_server <- function(id) {
       req(input$file_base_bundle)
       files <- input$file_base_bundle
       expected <- c("main", "analytical", "vof", "details", "rois")
-      labels <- c(main = "RAE Datafile", analytical = "Analytical Dataset",
-                  vof = "VOF Metadata", details = "ModelDetails",
-                  rois = "ROIs by Channel")
+      labels <- base_file_labels
       detected <- list()
-      skipped <- character(0)
+      duplicates <- list()
+      unrecognized <- list()
+      errors <- list()
 
       withProgress(message = "Detecting base files...", value = 0, {
         for (i in seq_len(nrow(files))) {
           file_row <- files[i, , drop = FALSE]
           incProgress(0.05, detail = paste("Inspecting", file_row$name))
           det <- tryCatch(detect_base_file(file_row), error = function(e) {
-            skipped <<- c(skipped, paste0(file_row$name, " (", e$message, ")"))
-            list(kind = NA_character_, data = NULL)
+            list(kind = NA_character_, data = NULL, reason = e$message)
           })
 
           if (is.na(det$kind) || !det$kind %in% expected) {
-            skipped <- c(skipped, paste0(file_row$name, " (not recognized)"))
+            unrecognized[[length(unrecognized) + 1L]] <- list(
+              file = file_row$name,
+              ext = tolower(tools::file_ext(file_row$name)),
+              reason = det$reason %||% "Unsupported or missing required columns",
+              source = "Base Files"
+            )
             next
           }
           if (!is.null(detected[[det$kind]])) {
-            skipped <- c(skipped, paste0(file_row$name, " (duplicate ",
-                                         labels[[det$kind]], ")"))
+            duplicates[[length(duplicates) + 1L]] <- list(
+              file = file_row$name,
+              kind = det$kind,
+              label = labels[[det$kind]],
+              kept_file = detected[[det$kind]]$file$name,
+              reason = det$reason %||% "Duplicate detected type"
+            )
             next
           }
-          detected[[det$kind]] <- list(file = file_row, data = det$data)
+          detected[[det$kind]] <- list(file = file_row, data = det$data,
+                                       reason = det$reason)
         }
 
-        loaded <- character(0)
         for (kind in expected) {
           item <- detected[[kind]]
           if (is.null(item)) next
           incProgress(0.10, detail = paste("Loading", labels[[kind]]))
           ok <- tryCatch(load_base_by_kind(kind, item$file, item$data, source = "batch"),
                          error = function(e) {
-                           showNotification(paste(labels[[kind]], "error:", e$message),
-                                            type = "error", duration = 10)
+                           errors[[length(errors) + 1L]] <<- list(
+                             file = item$file$name,
+                             kind = kind,
+                             label = labels[[kind]],
+                             error = e$message
+                           )
                            FALSE
                          })
-          if (isTRUE(ok)) loaded <- c(loaded, labels[[kind]])
+          if (!isTRUE(ok)) {
+            if (!any(vapply(errors, function(x) identical(x$file, item$file$name), logical(1)))) {
+              errors[[length(errors) + 1L]] <- list(
+                file = item$file$name,
+                kind = kind,
+                label = labels[[kind]],
+                error = paste(labels[[kind]], "failed validation")
+              )
+            }
+          }
         }
 
-        missing <- labels[setdiff(expected, names(detected))]
-        if (length(loaded) > 0) {
-          showNotification(paste0("Batch upload loaded: ",
-                                  paste(loaded, collapse = ", ")),
-                           type = "message", duration = 6)
-        }
-        if (length(missing) > 0) {
-          showNotification(paste0("Batch upload missing: ",
-                                  paste(unname(missing), collapse = ", ")),
-                           type = "warning", duration = 8)
-        }
-        if (length(skipped) > 0) {
-          showNotification(paste0("Skipped: ", paste(skipped, collapse = "; ")),
-                           type = "warning", duration = 10)
-        }
+        set_upload_issues(
+          unrecognized = unrecognized,
+          duplicates = duplicates,
+          errors = errors
+        )
+
+        has_review <- length(unrecognized) > 0 || length(duplicates) > 0 || length(errors) > 0
+        showNotification("Batch upload reviewed. See summary below.",
+                         type = if (has_review) "warning" else "message",
+                         duration = if (has_review) 7 else 4)
       })
     }, ignoreInit = TRUE)
 
@@ -597,146 +923,36 @@ mod_setup_server <- function(id) {
     # ── Load RAE Datafile ────────────────────────────────────────────
     observeEvent(input$file_main, {
       req(input$file_main)
-      ext  <- tools::file_ext(input$file_main$name)
       size <- round(input$file_main$size / 1024^2, 1)
-      withProgress(message = paste0("Loading RAE Datafile (", size, " MB)..."), value = 0, {
-        incProgress(0.05, detail = "Checking columns...")
-        tryCatch({
-          df_zip <- NULL
-          header_check <- if (tolower(ext) == "zip") {
-            df_zip <- read_main_data(input$file_main$datapath, ext)
-            utils::head(df_zip, 5)
-          } else {
-            data.table::fread(input$file_main$datapath, nrows = 5,
-                              data.table = FALSE, showProgress = FALSE)
-          }
-          missing <- setdiff(REQUIRED_COLS, names(header_check))
-          if (length(missing) > 0) {
-            showNotification(paste0("Missing columns: ", paste(missing, collapse = ", ")),
-                             type = "error", duration = 15); return()
-          }
-          incProgress(0.10, detail = "Reading file...")
-          df <- df_zip %||% read_main_data(input$file_main$datapath, ext)
-          incProgress(0.70, detail = "Validating...")
-          if (!validate_required_cols(df, "RAE Datafile")) return()
-          incProgress(0.10, detail = "Storing...")
-          rv$main_data <- df
-          set_file_meta("main", input$file_main,
-                        nrow(rv$main_data), ncol(rv$main_data), "manual")
-          rm(df); gc(verbose = FALSE, full = TRUE)
-          incProgress(0.05, detail = "Done!")
-          showNotification(paste0("RAE Datafile loaded - ",
-                                  format(nrow(rv$main_data), big.mark = ","),
-                                  " rows | ", size, " MB"),
-                           type = "message", duration = 4)
-        }, error = \(e) showNotification(e$message, type = "error", duration = 10))
-      })
+      load_manual_base_file(
+        "main",
+        input$file_main,
+        paste0("Loading RAE Datafile (", size, " MB)...")
+      )
     })
     
     # ── Load Analytical Dataset ────────────────────────────────────────
     observeEvent(input$file_analytical, {
       req(input$file_analytical)
-      tryCatch({
-        e  <- new.env()
-        load(input$file_analytical$datapath, envir = e)
-        df <- get(ls(e)[1], envir = e)
-        df <- df[, !duplicated(names(df), fromLast = TRUE)]
-        if ("Period" %in% names(df))
-          df <- df %>% dplyr::mutate(Period = parse_period_robust(Period))
-        rv$analytical <- tibble::as_tibble(df) %>% dplyr::ungroup()
-        rv$dates_df   <- rv$analytical %>% dplyr::distinct(Period) %>% dplyr::arrange(Period)
-        tryCatch({
-          sch                <- infer_schema(rv$analytical)
-          rv$schema_metadata <- build_schema_metadata(rv$analytical, sch)
-          rv$cross_cols <- if (length(rv$schema_metadata$xs_dims) > 0)
-            rv$schema_metadata$xs_dims else auto_detect_cross_cols(rv$analytical)
-          rv$analytical_rag <- rv$analytical %>%
-            dplyr::distinct(dplyr::across(dplyr::any_of(c(rv$cross_cols, "Period"))))
-        }, error = \(e) {
-          showNotification(paste("Schema inference warning:", e$message),
-                           type = "warning", duration = 6)
-          rv$cross_cols <- auto_detect_cross_cols(rv$analytical)
-        })
-        rv$analytical_combined <- NULL; rv$side_mapping_nonfocus <- NULL
-        rv$update_status       <- "pending"
-        set_file_meta("analytical", input$file_analytical,
-                      nrow(rv$analytical), ncol(rv$analytical), "manual")
-        rm(df); gc(verbose = FALSE, full = TRUE)
-        schema_msg <- if (!is.null(rv$schema_metadata))
-          paste0(" | xs: ", paste(rv$schema_metadata$xs_dims, collapse = ", "),
-                 if (length(rv$schema_metadata$useful_long) > 0)
-                   paste0(" | key: ", paste(rv$schema_metadata$useful_long, collapse = ", ")) else "")
-        else ""
-        showNotification(paste0("Analytical loaded - ",
-                                format(nrow(rv$analytical), big.mark = ","),
-                                " rows", schema_msg),
-                         type = "message", duration = 5)
-      }, error = \(e) showNotification(paste("Analytical error:", e$message),
-                                       type = "error", duration = 15))
+      load_manual_base_file("analytical", input$file_analytical)
     })
     
     # ── Load VOF Metadata ──────────────────────────────────────────────
     observeEvent(input$file_vof, {
       req(input$file_vof)
-      tryCatch({
-        vof_raw <- as.data.frame(data.table::fread(input$file_vof$datapath,
-                                                   data.table = FALSE,
-                                                   stringsAsFactors = FALSE,
-                                                   showProgress = FALSE))
-        req_fixed <- c("AnalyticalVariableName", "MainModelVariableName",
-                       "MinPeriod", "MaxPeriod")
-        miss_vof <- setdiff(req_fixed, names(vof_raw))
-        if (!any(c("Geography", "Geographies") %in% names(vof_raw)))
-          miss_vof <- c(miss_vof, "Geography (or Geographies)")
-        if (length(miss_vof) > 0) {
-          showNotification(paste0("VOF missing required columns: ",
-                                  paste(miss_vof, collapse = ", ")),
-                           type = "error", duration = 15); return()
-        }
-        rv$vof_data <- vof_raw
-        set_file_meta("vof", input$file_vof,
-                      nrow(rv$vof_data), ncol(rv$vof_data), "manual")
-        showNotification(paste0("VOF loaded - ", format(nrow(vof_raw), big.mark = ","),
-                                " rows, ",
-                                dplyr::n_distinct(vof_raw$MainModelVariableName),
-                                " model variables"),
-                         type = "message", duration = 4)
-      }, error = \(e) showNotification(paste("VOF error:", e$message),
-                                       type = "error", duration = 10))
+      load_manual_base_file("vof", input$file_vof)
     })
     
     # ── Load ModelDetails ──────────────────────────────────────────────
     observeEvent(input$file_details, {
       req(input$file_details)
-      tryCatch({
-        rv$details <- data.table::fread(input$file_details$datapath, data.table = FALSE,
-                                        showProgress = FALSE) %>%
-          dplyr::filter(!stringr::str_detect(stringr::str_to_lower(trimws(Type)), "none"))
-        set_file_meta("details", input$file_details,
-                      nrow(rv$details), ncol(rv$details), "manual")
-        gc(verbose = FALSE)
-        n_in <- sum(stringr::str_detect(stringr::str_to_lower(trimws(rv$details$Type)),
-                                        "\\b(in|fixed)\\b"), na.rm = TRUE)
-        showNotification(paste0("ModelDetails loaded - ", n_in, " Type='IN'/'FIXED' variables"),
-                         type = "message", duration = 4)
-      }, error = \(e) showNotification(e$message, type = "error", duration = 10))
+      load_manual_base_file("details", input$file_details)
     })
     
     # ── Load ROIs by Channel ───────────────────────────────────────────
     observeEvent(input$file_rois, {
       req(input$file_rois)
-      ext <- tools::file_ext(input$file_rois$name)
-      tryCatch({
-        rv$channels_rois <- if (tolower(ext) %in% c("xlsx", "xls"))
-          readxl::read_excel(input$file_rois$datapath)
-        else
-          data.table::fread(input$file_rois$datapath, data.table = FALSE, showProgress = FALSE)
-        set_file_meta("rois", input$file_rois,
-                      nrow(rv$channels_rois), ncol(rv$channels_rois), "manual")
-        gc(verbose = FALSE)
-        showNotification(paste0("ROIs loaded - ", nrow(rv$channels_rois), " rows"),
-                         type = "message", duration = 4)
-      }, error = \(e) showNotification(e$message, type = "error", duration = 10))
+      load_manual_base_file("rois", input$file_rois)
     })
     
     # ── Load Past Analytical Splits (CSV or RData) ─────────────────────
@@ -1371,17 +1587,24 @@ mod_setup_server <- function(id) {
     # ── File Validation — mode-aware ──────────────────────────────────
     output$validation_summary <- renderUI({
       loaded <- vapply(base_file_kinds, \(k) !is.null(rv$file_meta[[k]]), logical(1))
-      n_loaded <- sum(loaded)
-      base_ready <- !is.null(rv$main_data) && !is.null(rv$analytical) &&
-        !is.null(rv$vof_data) && !is.null(rv$details) && !is.null(rv$channels_rois)
+      required_loaded <- vapply(required_base_file_kinds, \(k) !is.null(rv$file_meta[[k]]), logical(1))
+      n_required_loaded <- sum(required_loaded)
+      base_ready <- required_files_ready()
+      rois_missing <- is.null(rv$channels_rois)
       status <- rv$validation_status %||% "pending"
       severity <- if (!base_ready) "blocker" else if (identical(status, "red")) "blocker"
+      else if (rois_missing) "warning"
       else if (identical(status, "yellow")) "warning"
       else if (identical(status, "green")) "ok" else "pending"
       message <- if (!base_ready) {
-        missing <- c(main = "Main", analytical = "Analytical", vof = "VOF",
-                     details = "ModelDetails", rois = "ROIs")[!loaded]
+        missing <- c(main = "RAE Datafile", analytical = "Analytical Dataset",
+                     vof = "VOF Metadata", details = "ModelDetails")[!required_loaded]
         paste0("Missing: ", paste(unname(missing), collapse = ", "))
+      } else if (rois_missing) {
+        paste(
+          "You can continue and use Channels, Process and Export.",
+          "However, ROIs by Channel is not loaded, so seed_for_indices.csv will export without ROI values."
+        )
       } else if (identical(severity, "ok")) {
         "Files validated. Channels and processing can continue."
       } else if (identical(severity, "warning")) {
@@ -1392,18 +1615,24 @@ mod_setup_server <- function(id) {
         "Validation pending. The comparison will update automatically."
       }
       div(
-        class = paste("qa-summary", paste0("qa-summary-", severity)),
+        class = paste("qa-summary", paste0("qa-summary-", severity),
+                      if (rois_missing && base_ready) "qa-summary-roi-missing" else ""),
         div(class = "qa-summary-main",
             icon(if (severity == "ok") "circle-check"
                  else if (severity == "warning") "triangle-exclamation"
                  else if (severity == "blocker") "circle-xmark" else "clock",
                  class = "qa-summary-icon"),
             div(tags$strong(if (severity == "ok") "Validation OK"
+                            else if (rois_missing && base_ready) "ROIs by Channel missing"
                             else if (severity == "warning") "Warnings found"
                             else if (severity == "blocker") "Action needed"
                             else "Pending validation"),
                 tags$span(message, class = "qa-summary-text"))),
-        tags$span(paste0(n_loaded, "/5 files"), class = "qa-summary-count")
+        tags$span(
+          paste0(n_required_loaded, "/4 required",
+                 if (rois_missing) " | ROI values missing" else ""),
+          class = "qa-summary-count"
+        )
       )
     })
 
@@ -1667,15 +1896,20 @@ mod_setup_server <- function(id) {
       validation_status = reactive(rv$validation_status),
       qa_status = reactive({
         loaded <- vapply(base_file_kinds, \(k) !is.null(rv$file_meta[[k]]), logical(1))
-        base_ready <- !is.null(rv$main_data) && !is.null(rv$analytical) &&
-          !is.null(rv$vof_data) && !is.null(rv$details) && !is.null(rv$channels_rois)
-        missing <- c(main = "RAE Datafile", analytical = "Analytical", vof = "VOF",
-                     details = "ModelDetails", rois = "ROIs")[!loaded]
+        required_loaded <- vapply(required_base_file_kinds, \(k) !is.null(rv$file_meta[[k]]), logical(1))
+        base_ready <- required_files_ready()
+        missing <- c(main = "RAE Datafile", analytical = "Analytical Dataset",
+                     vof = "VOF Metadata", details = "ModelDetails")[!required_loaded]
+        optional_missing <- c(rois = "ROIs by Channel")[is.null(rv$file_meta$rois)]
         list(
           files_loaded      = sum(loaded),
           files_total       = length(base_file_kinds),
+          required_loaded   = sum(required_loaded),
+          required_total    = length(required_base_file_kinds),
           files_ready       = base_ready,
           missing_files     = unname(missing),
+          optional_missing_files = unname(optional_missing),
+          rois_loaded       = !is.null(rv$channels_rois),
           validation_status = rv$validation_status %||% "pending",
           media_ready       = !is.null(rv$media_index)
         )

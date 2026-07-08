@@ -838,18 +838,26 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
   }
   
   # ── Step 7: time_break_labels
+  for (nm in names(channels)) {
+    if (!identical(channels[[nm]]$source, "vof")) next
+    channels[[nm]]$time_break_label <- ""
+    channels[[nm]]$vof_time_break_group <- ""
+    channels[[nm]]$vof_time_break_order <- NA_integer_
+    channels[[nm]]$vof_time_break_group_size <- 0L
+  }
+
   vof_sigs <- vapply(names(channels), function(nm) {
     ch <- channels[[nm]]
     if (!identical(ch$source, "vof")) return(NA_character_)
+    if (!nzchar(ch$vof_period_token %||% "")) return(NA_character_)
     raw_boundary <- tryCatch(as.Date(ch$vof_period_boundary), error = function(e) as.Date(NA))
-    boundary_key <- if (!is.na(raw_boundary)) as.character(raw_boundary) else ""
+    if (is.na(raw_boundary)) return(NA_character_)
     family_key <- ch$vof_period_family %||% vof_period_family(ch$channel_name %||% nm)
     paste(
       paste(sort(unique(ch$analytical_varkeys)), collapse = "||"),
       ch$media_channel %||% "",
       ch$effect %||% "",
       family_key,
-      boundary_key,
       sep = "::::"
     )
   }, character(1))
@@ -861,6 +869,10 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
     group_nms <- names(vof_sigs[vof_sigs == sig])
     range_df <- data.frame(
       nm = group_nms,
+      boundary = as.Date(vapply(group_nms, function(nm) {
+        bd <- channels[[nm]]$vof_period_boundary
+        if (!is.null(bd) && !is.na(bd)) as.character(as.Date(bd)) else NA_character_
+      }, character(1))),
       min_date = as.Date(vapply(group_nms, function(nm) {
         mp <- channels[[nm]]$vof_min_raw
         if (!is.null(mp) && !is.na(mp)) as.character(as.Date(mp)) else NA_character_
@@ -873,19 +885,50 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
     )
     range_df$range_key <- paste(range_df$min_date, range_df$max_date, sep = "|")
     unique_ranges <- range_df[!duplicated(range_df$range_key), , drop = FALSE]
+    range_order <- unique_ranges$boundary
+    range_order[is.na(range_order)] <- unique_ranges$min_date[is.na(range_order)]
+    range_order[is.na(range_order)] <- unique_ranges$max_date[is.na(range_order)]
+    range_order[is.na(range_order)] <- as.Date("2999-12-31")
     min_order <- unique_ranges$min_date
     min_order[is.na(min_order)] <- as.Date("1900-01-01")
     max_order <- unique_ranges$max_date
     max_order[is.na(max_order)] <- as.Date("2999-12-31")
-    unique_ranges <- unique_ranges[order(min_order, max_order), , drop = FALSE]
-    if (nrow(unique_ranges) <= 1) next
-    range_labels <- setNames(
-      paste0(vapply(seq_len(nrow(unique_ranges)), ordinal_tag, character(1)), "TimeBreak"),
-      unique_ranges$range_key
-    )
-    for (nm in group_nms) {
-      key <- range_df$range_key[range_df$nm == nm][1]
-      channels[[nm]]$time_break_label <- range_labels[[key]] %||% ""
+    unique_ranges <- unique_ranges[order(range_order, min_order, max_order,
+                                         unique_ranges$nm), , drop = FALSE]
+
+    cluster_id <- integer(nrow(unique_ranges))
+    current_cluster <- 0L
+    prev_end <- as.Date(NA_character_)
+    for (i in seq_len(nrow(unique_ranges))) {
+      starts_open <- !is.na(unique_ranges$min_date[i]) && is.na(unique_ranges$max_date[i])
+      close_to_prev_end <- starts_open && !is.na(prev_end) &&
+        as.integer(unique_ranges$min_date[i] - prev_end) >= 1L &&
+        as.integer(unique_ranges$min_date[i] - prev_end) <= 7L
+      if (!close_to_prev_end) current_cluster <- current_cluster + 1L
+      cluster_id[i] <- current_cluster
+      if (!is.na(unique_ranges$max_date[i])) prev_end <- unique_ranges$max_date[i]
+    }
+    unique_ranges$cluster_id <- cluster_id
+    range_clusters <- unique_ranges[, c("range_key", "cluster_id"), drop = FALSE]
+    range_df <- merge(range_df, range_clusters, by = "range_key", all.x = TRUE, sort = FALSE)
+
+    for (cid in sort(unique(unique_ranges$cluster_id))) {
+      cluster_ranges <- unique_ranges[unique_ranges$cluster_id == cid, , drop = FALSE]
+      if (nrow(cluster_ranges) <= 1) next
+      range_labels <- setNames(
+        paste0(vapply(seq_len(nrow(cluster_ranges)), ordinal_tag, character(1)), "TimeBreak"),
+        cluster_ranges$range_key
+      )
+      range_orders <- setNames(seq_len(nrow(cluster_ranges)), cluster_ranges$range_key)
+      cluster_group <- paste(sig, paste0("cluster_", cid), sep = "::::")
+      cluster_nms <- range_df$nm[range_df$cluster_id == cid]
+      for (nm in cluster_nms) {
+        key <- range_df$range_key[range_df$nm == nm][1]
+        channels[[nm]]$time_break_label <- range_labels[[key]] %||% ""
+        channels[[nm]]$vof_time_break_group <- cluster_group
+        channels[[nm]]$vof_time_break_order <- range_orders[[key]] %||% NA_integer_
+        channels[[nm]]$vof_time_break_group_size <- nrow(cluster_ranges)
+      }
     }
   }
   

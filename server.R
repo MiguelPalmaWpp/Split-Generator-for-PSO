@@ -11,7 +11,8 @@ server <- function(input, output, session) {
   channels_module <- mod_channels_server(
     "channels",
     data        = setup_module$data,
-    media_index = setup_module$media_index
+    media_index = setup_module$media_index,
+    config      = setup_module$config
   )
   
   # ── 3. Process ────────────────────────────────────────────────────────

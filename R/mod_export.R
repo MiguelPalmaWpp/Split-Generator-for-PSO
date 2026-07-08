@@ -326,6 +326,7 @@ mod_export_server <- function(id, results, data, config, channels,
         } else NA_character_
       }, character(1), USE.NAMES = FALSE)
       zero_names <- zero_names[!is.na(zero_names)]
+      rois_missing <- is.null(data()$channels_rois)
       roi_issues <- roi_issue_summary()
 
       issues <- Filter(Negate(is.null), list(
@@ -372,7 +373,14 @@ mod_export_server <- function(id, results, data, config, channels,
           detail = "The channel processed, but no split columns were produced.",
           names = zero_names
         ),
-        if ((roi_issues$count %||% 0L) > 0L) list(
+        if (rois_missing) list(
+          severity = "warn", icon = "chart-line",
+          title = "ROIs by Channel missing - seed file will not include ROI values",
+          detail = "The ZIP can still be downloaded, but seed_for_indices.csv will export without ROI values until ROIs by Channel is loaded in Setup.",
+          names = character(0),
+          highlight = TRUE
+        ),
+        if (!rois_missing && (roi_issues$count %||% 0L) > 0L) list(
           severity = "warn", icon = "chart-line",
           title = paste0(roi_issues$count, " ROI coverage warning",
                          if (roi_issues$count != 1) "s" else ""),
@@ -422,7 +430,8 @@ mod_export_server <- function(id, results, data, config, channels,
       if (!length(issues)) return(NULL)
 
       mk_issue <- function(x) {
-        div(class = paste("export-issue-row", paste0("export-issue-", x$severity)),
+        div(class = paste("export-issue-row", paste0("export-issue-", x$severity),
+                          if (isTRUE(x$highlight)) "export-issue-highlight" else ""),
             div(class = "export-issue-icon", icon(x$icon)),
             div(class = "export-issue-copy",
                 div(class = "export-issue-line",

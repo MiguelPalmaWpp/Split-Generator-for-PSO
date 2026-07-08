@@ -62,7 +62,7 @@ mod_channels_ui <- function(id) {
 }
 
 # ── Server ──────────────────────────────────────────────────────────────────
-mod_channels_server <- function(id, data, media_index) {
+mod_channels_server <- function(id, data, media_index, config = reactive(list())) {
   moduleServer(id, function(input, output, session) {
     
     ns <- session$ns
@@ -133,6 +133,82 @@ mod_channels_server <- function(id, data, media_index) {
     }
     
     main_data <- reactive({ data()$all_rags })
+
+    preview_date_bounds <- function(cfg = NULL) {
+      gcfg <- tryCatch(config(), error = \(e) list())
+      global_start <- tryCatch(as.Date(gcfg$start_report_date), error = \(e) as.Date(NA))
+      global_end <- tryCatch(as.Date(gcfg$end_report_date), error = \(e) as.Date(NA))
+      channel_start <- tryCatch(as.Date(cfg$min_period %||% NA), error = \(e) as.Date(NA))
+      channel_end <- tryCatch(as.Date(cfg$max_period %||% NA), error = \(e) as.Date(NA))
+
+      starts <- c(global_start, channel_start)
+      ends <- c(global_end, channel_end)
+      start <- suppressWarnings(max(starts[!is.na(starts)]))
+      end <- suppressWarnings(min(ends[!is.na(ends)]))
+      if (!is.finite(start)) start <- as.Date(NA)
+      if (!is.finite(end)) end <- as.Date(NA)
+      list(
+        start = start,
+        end = end,
+        has_filter = !is.na(start) || !is.na(end),
+        key = paste(
+          as.character(global_start), as.character(global_end),
+          as.character(channel_start), as.character(channel_end),
+          sep = "|"
+        )
+      )
+    }
+
+    filter_preview_dates <- function(df, cfg = NULL) {
+      base <- list(
+        data = df,
+        mode = "unfiltered_fallback",
+        message = "",
+        has_filter = FALSE
+      )
+      if (is.null(df) || !nrow(df) || !"Period" %in% names(df)) return(base)
+      bounds <- preview_date_bounds(cfg)
+      if (!isTRUE(bounds$has_filter)) return(base)
+
+      period <- tryCatch(parse_period_robust(df$Period), error = \(e) as.Date(df$Period))
+      keep_active <- !is.na(period)
+      if (!is.na(bounds$start)) keep_active <- keep_active & period >= bounds$start
+      if (!is.na(bounds$end)) keep_active <- keep_active & period <= bounds$end
+      active_df <- df[keep_active, , drop = FALSE]
+      if (nrow(active_df) > 0) {
+        return(list(
+          data = active_df,
+          mode = "active_range",
+          message = "Preview filtered by active date range.",
+          has_filter = TRUE
+        ))
+      }
+
+      ch_start <- tryCatch(as.Date(cfg$min_period %||% NA), error = \(e) as.Date(NA))
+      ch_end <- tryCatch(as.Date(cfg$max_period %||% NA), error = \(e) as.Date(NA))
+      has_channel_range <- !is.na(ch_start) || !is.na(ch_end)
+      if (has_channel_range) {
+        keep_channel <- !is.na(period)
+        if (!is.na(ch_start)) keep_channel <- keep_channel & period >= ch_start
+        if (!is.na(ch_end)) keep_channel <- keep_channel & period <= ch_end
+        channel_df <- df[keep_channel, , drop = FALSE]
+        if (nrow(channel_df) > 0) {
+          return(list(
+            data = channel_df,
+            mode = "channel_range_fallback",
+            message = "No rows in Global Parameters for this date-split channel; preview uses the channel's own date range.",
+            has_filter = TRUE
+          ))
+        }
+      }
+
+      list(
+        data = df,
+        mode = "unfiltered_fallback",
+        message = "No rows in Global Parameters for this channel; preview uses a sample from the channel data.",
+        has_filter = FALSE
+      )
+    }
 
     filter_by_channel_varnames <- function(df, cfg) {
       vi <- cfg$varname_include[nzchar(cfg$varname_include %||% "")]
@@ -637,12 +713,17 @@ mod_channels_server <- function(id, data, media_index) {
       
       cfg_p <- if (!is.null(rv$selected) && rv$selected %in% names(rv$channels))
         rv$channels[[rv$selected]] else NULL
+      bounds <- preview_date_bounds(cfg_p)
+      md_scoped <- if (!is.null(cfg_p)) filter_by_channel_varnames(md, cfg_p) else md
+      date_filter <- filter_preview_dates(md_scoped, cfg_p)
 
       cache_key <- paste(
         rv$selected %||% "",
         paste(splits, collapse = "|"),
         if (!is.null(cfg_p)) breaks_signature(cfg_p$dimension_breaks %||% list()) else "none",
         if (!is.null(cfg_p)) paste(cfg_p$varname_include %||% character(0), collapse = "|") else "",
+        bounds$key,
+        date_filter$mode,
         nrow(md),
         sep = "::"
       )
@@ -651,21 +732,17 @@ mod_channels_server <- function(id, data, media_index) {
         return(split_preview_cache$ui)
       }
       
-      if (!is.null(cfg_p)) {
-        md <- filter_by_channel_varnames(md, cfg_p)
-        is_limited <- nrow(md) > preview_row_limit
-        md <- limit_preview_rows(md)
-        if (length(cfg_p$dimension_breaks %||% list()) > 0)
-          md <- tryCatch(apply_dimension_breaks(md, cfg_p$dimension_breaks), error = \(e) md)
-      } else {
-        is_limited <- nrow(md) > preview_row_limit
-        md <- limit_preview_rows(md)
-      }
+      md <- date_filter$data
+      is_limited <- nrow(md) > preview_row_limit
+      md <- limit_preview_rows(md)
+      if (!is.null(cfg_p) && length(cfg_p$dimension_breaks %||% list()) > 0)
+        md <- tryCatch(apply_dimension_breaks(md, cfg_p$dimension_breaks), error = \(e) md)
       
       if (nrow(md) == 0)
         return(div(class = "preview-warn",
                    icon("triangle-exclamation", class = "icon-warning-sm d-block mb-1"),
-                   tags$p("No data matches this channel's filter.", class = "preview-warn-msg")))
+                   tags$p("No data matches this channel.",
+                          class = "preview-warn-msg")))
       
       valid_cols <- intersect(splits, names(md))
       if (!length(valid_cols)) return(NULL)
@@ -694,6 +771,7 @@ mod_channels_server <- function(id, data, media_index) {
                     tags$code(paste(valid_cols, collapse = " + "), class = "split-formula-code")),
                 div(class = "split-preview-example", div(class = "split-example-text", example)),
                 tags$p(paste0(count_label, " unique splits in this channel preview. ",
+                              if (nzchar(date_filter$message)) paste0(date_filter$message, " ") else "",
                               if (is_limited) "Preview based on sample." else ""),
                        class = "hint-text"))
       split_preview_cache$key <- cache_key
@@ -754,6 +832,9 @@ mod_channels_server <- function(id, data, media_index) {
       if (!is.null(rv$selected) && rv$selected %in% names(rv$channels)) {
         cfg_p <- rv$channels[[rv$selected]]
         md <- filter_by_channel_varnames(md, cfg_p)
+        md <- filter_preview_dates(md, cfg_p)$data
+      } else {
+        md <- filter_preview_dates(md, NULL)$data
       }
       if (nrow(md) == 0 || !col %in% names(md)) return(2L)
       md <- limit_preview_rows(md)
@@ -808,6 +889,8 @@ mod_channels_server <- function(id, data, media_index) {
 
       empty_preview <- list(
         filtered_rows = 0L,
+        filter_mode = "empty",
+        filter_message = "",
         raw_vals = character(0),
         unique_vals = character(0),
         parts = list()
@@ -816,6 +899,9 @@ mod_channels_server <- function(id, data, media_index) {
 
       cfg_p <- if (!is.null(rv$selected) && rv$selected %in% names(rv$channels))
         rv$channels[[rv$selected]] else NULL
+      bounds <- preview_date_bounds(cfg_p)
+      md_scoped <- if (!is.null(cfg_p)) filter_by_channel_varnames(md, cfg_p) else md
+      date_filter <- filter_preview_dates(md_scoped, cfg_p)
       vi <- if (!is.null(cfg_p))
         cfg_p$varname_include[nzchar(cfg_p$varname_include %||% "")]
       else character(0)
@@ -826,6 +912,8 @@ mod_channels_server <- function(id, data, media_index) {
         sep,
         n,
         paste(vi, collapse = "|"),
+        bounds$key,
+        date_filter$mode,
         nrow(md),
         paste(names(md), collapse = "|"),
         sep = "::"
@@ -835,10 +923,8 @@ mod_channels_server <- function(id, data, media_index) {
         return(break_preview_cache$data)
       }
 
-      cols_needed <- intersect(c("VariableName", col), names(md))
-      md_small <- md[, cols_needed, drop = FALSE]
-      if (!is.null(rv$selected) && rv$selected %in% names(rv$channels))
-        md_small <- filter_by_channel_varnames(md_small, rv$channels[[rv$selected]])
+      cols_needed <- intersect(c("VariableName", "Period", col), names(date_filter$data))
+      md_small <- date_filter$data[, cols_needed, drop = FALSE]
       if (nrow(md_small) == 0 || !col %in% names(md_small)) {
         break_preview_cache$key <- cache_key
         break_preview_cache$data <- empty_preview
@@ -854,6 +940,8 @@ mod_channels_server <- function(id, data, media_index) {
 
       out <- list(
         filtered_rows = nrow(md_small),
+        filter_mode = date_filter$mode,
+        filter_message = date_filter$message,
         raw_vals = raw_vals,
         unique_vals = unique_vals,
         parts = parts
@@ -872,7 +960,7 @@ mod_channels_server <- function(id, data, media_index) {
       preview_data <- break_preview_unique_values()
       if (preview_data$filtered_rows == 0)
         return(tags$p(class = "text-muted small mt-2",
-                      "No data matches this channel's VarName filter."))
+                      "No data matches this channel."))
 
       raw_vals <- preview_data$raw_vals
       unique_vals_all <- preview_data$unique_vals
@@ -966,6 +1054,10 @@ mod_channels_server <- function(id, data, media_index) {
             tags$span(class = "break-preview-chip break-preview-chip-warn",
                       paste0("Total-filled ", format(missing_parts_n, big.mark = ",")))),
         div(class = "break-preview-dist", dist_text),
+        if (nzchar(preview_data$filter_message %||% ""))
+          div(class = "break-preview-note",
+              icon("circle-info", class = "icon-xs"),
+              paste0(" ", preview_data$filter_message)),
         if (!nzchar(suggestion) && sum(part_counts > 1) == 0)
           div(class = "break-preview-note",
               icon("circle-info", class = "icon-xs"),
@@ -974,7 +1066,7 @@ mod_channels_server <- function(id, data, media_index) {
           div(class = "break-preview-note break-preview-note-suggest",
               icon("wand-magic-sparkles", class = "icon-xs"),
               paste0(" ", suggestion, " for more useful splits.")),
-        tags$strong("Preview (filtered to channel variables):",
+        tags$strong("Preview (filtered to channel variables and active date range):",
                     class = "section-strong mt-2 mb-1"),
         if (length(vals) > 25)
           div(class = "break-preview-note",

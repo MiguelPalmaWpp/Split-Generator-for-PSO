@@ -829,22 +829,60 @@ mod_process_server <- function(id, data, config, channels,
       results_trigger()
       build_current_act_data(input$period_filter %||% "focus")
     }) %>% bindCache(input$channel_select, input$period_filter, results_trigger())
+
+    build_current_spend_from_rag <- function(res, cfg) {
+      if (is.null(res) || is.null(res$rag)) return(empty_spend_diag())
+      rag_df <- as.data.frame(res$rag)
+      if (!nrow(rag_df)) return(empty_spend_diag())
+
+      spend_kw <- cfg$spend_keyword %||% "Spend"
+      id_cols <- intersect(c(res$cross_cols %||% character(0),
+                             config()$cross_cols %||% character(0),
+                             "Geography", "Product", "Period", "BP_Year"),
+                           names(rag_df))
+      num_cols <- setdiff(names(rag_df)[sapply(rag_df, is.numeric)], id_cols)
+      spend_cols_keyword <- grep(spend_kw, num_cols, ignore.case = TRUE, value = TRUE)
+      spend_cols_diag <- if (!is.null(res$cost_diagnoses) &&
+                             "VariableSplit" %in% names(res$cost_diagnoses)) {
+        intersect(unique(res$cost_diagnoses$VariableSplit), num_cols)
+      } else {
+        character(0)
+      }
+      spend_cols <- unique(c(spend_cols_keyword, spend_cols_diag))
+      if (!length(spend_cols)) return(empty_spend_diag())
+
+      active_cols <- spend_cols[vapply(spend_cols, function(col) {
+        vals <- suppressWarnings(as.numeric(rag_df[[col]]))
+        any(!is.na(vals) & vals != 0)
+      }, logical(1))]
+      if (!length(active_cols)) return(empty_spend_diag())
+
+      keep_cols <- union(intersect("Period", names(rag_df)), active_cols)
+      out <- splits_summary(rag_df[, keep_cols, drop = FALSE], "spend")
+      if (is.null(out) || !nrow(out)) return(empty_spend_diag())
+
+      out %>%
+        filter(!is.na(total_spend) & total_spend > 0) %>%
+        mutate(across(where(is.numeric), \(x) round(x, 4)))
+    }
     
     # ── current_spend_data ─────────────────────────────────────────────────
     current_spend_data <- reactive({
       results_trigger()
       nm  <- req(input$channel_select)
       res <- req(results_store[[nm]])
+      cfg <- channels()[[nm]] %||% list()
       cost_df <- res$cost_diagnoses
       if (is.null(cost_df) || nrow(cost_df) == 0 ||
           !"VariableSplit" %in% names(cost_df) ||
           !"total_spend" %in% names(cost_df)) {
-        return(empty_spend_diag())
+        return(build_current_spend_from_rag(res, cfg))
       }
-      cost_df %>%
+      out <- cost_df %>%
         filter(!is.na(total_spend) & total_spend > 0) %>%
         select(-any_of(c("seg", "period", "model_var"))) %>%
         mutate(across(where(is.numeric), \(x) round(x, 4)))
+      if (!nrow(out)) build_current_spend_from_rag(res, cfg) else out
     }) %>% bindCache(input$channel_select, results_trigger())
     
     # ── Activity KPIs ──────────────────────────────────────────────────────

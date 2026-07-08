@@ -83,6 +83,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
     preview_row_limit <- 1000L
     split_preview_cache <- reactiveValues(key = NULL, ui = NULL)
     break_preview_cache <- reactiveValues(key = NULL, data = NULL)
+    channel_audit_cache <- reactiveValues(key = NULL, value = NULL)
     break_n_parts_cache <- reactiveVal(2L)
     
     effective_split_choices <- function(breaks = list(), cross_cols = character(0)) {
@@ -228,11 +229,223 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
       }
       df[keep, , drop = FALSE]
     }
+
+    filter_by_channel_varnames_for_audit <- function(df, cfg) {
+      vi <- cfg$varname_include[nzchar(cfg$varname_include %||% "")]
+      if (!length(vi) || !"VariableName" %in% names(df)) return(df)
+      vi <- expand_varname_include_with_spend(
+        unique(trimws(as.character(df$VariableName))),
+        vi,
+        cfg$spend_keyword %||% NULL
+      )
+      cfg2 <- cfg
+      cfg2$varname_include <- vi
+      filter_by_channel_varnames(df, cfg2)
+    }
     
     mk_info_row <- function(label, value) {
       div(class = "info-row",
           tags$span(label, class = "info-row-label"),
           div(class = "info-row-value", value))
+    }
+
+    fmt_audit_count <- function(x) {
+      x <- suppressWarnings(as.numeric(x %||% 0))
+      if (is.na(x)) x <- 0
+      format(round(x), big.mark = ",", scientific = FALSE)
+    }
+
+    source_label <- function(cfg) {
+      if (isTRUE(cfg$config_imported)) return("Imported from Config")
+      switch(cfg$source %||% "vof",
+             vof = "Auto-configured from VOF",
+             keyword_fallback = "From MFF (keyword match)",
+             "From MFF / Manual")
+    }
+
+    selected_channel_audit <- function(nm, cfg) {
+      d <- data()
+      md <- d$all_rags
+      an <- d$analytical
+      bounds <- preview_date_bounds(cfg)
+      cache_key <- paste(
+        nm %||% "",
+        cfg$model_variable %||% "",
+        paste(cfg$varname_include %||% character(0), collapse = "|"),
+        cfg$activity_keyword %||% "",
+        cfg$spend_keyword %||% "",
+        paste(cfg$split_columns %||% character(0), collapse = "|"),
+        breaks_signature(cfg$dimension_breaks %||% list()),
+        cfg$source %||% "",
+        isTRUE(cfg$config_imported),
+        as.character(cfg$min_period %||% ""),
+        as.character(cfg$max_period %||% ""),
+        bounds$key,
+        if (!is.null(md)) nrow(md) else 0,
+        if (!is.null(md)) paste(names(md), collapse = "|") else "",
+        if (!is.null(an)) paste(names(an), collapse = "|") else "",
+        sep = "::"
+      )
+      if (identical(channel_audit_cache$key, cache_key) &&
+          !is.null(channel_audit_cache$value)) {
+        return(channel_audit_cache$value)
+      }
+
+      notes <- character(0)
+      warnings <- character(0)
+      blockers <- character(0)
+      activity_rows <- 0L
+      spend_rows <- 0L
+      date_mode <- "unavailable"
+      date_message <- ""
+      date_rows <- 0L
+
+      if (is.null(md)) {
+        blockers <- c(blockers, "RAE Datafile is not loaded.")
+      } else if (!"VariableName" %in% names(md)) {
+        blockers <- c(blockers, "RAE Datafile has no VariableName column.")
+      } else {
+        scoped <- filter_by_channel_varnames_for_audit(md, cfg)
+        filtered <- filter_preview_dates(scoped, cfg)
+        scoped <- filtered$data
+        date_mode <- filtered$mode
+        date_message <- filtered$message %||% ""
+        date_rows <- nrow(scoped)
+        if (nzchar(date_message) && identical(date_mode, "channel_range_fallback")) {
+          notes <- c(notes, date_message)
+        }
+
+        vn <- trimws(as.character(scoped$VariableName %||% character(0)))
+        act_kw <- cfg$activity_keyword %||% ""
+        spend_kw <- cfg$spend_keyword %||% ""
+        if (nzchar(act_kw)) {
+          activity_rows <- sum(grepl(act_kw, vn, ignore.case = TRUE), na.rm = TRUE)
+        }
+        if (nzchar(spend_kw)) {
+          spend_rows <- sum(grepl(spend_kw, vn, ignore.case = TRUE), na.rm = TRUE)
+        }
+
+        if (activity_rows == 0L) {
+          blockers <- c(blockers, "No Activity rows match this channel and date range.")
+        }
+        if (activity_rows > 0L && spend_rows == 0L) {
+          warnings <- c(warnings, paste0("No Cost/Spend rows found with keyword '", spend_kw, "'."))
+        }
+
+        if (identical(tolower(spend_kw), "spend")) {
+          vi_expanded_cost <- expand_varname_include_with_spend(
+            unique(trimws(as.character(md$VariableName))),
+            cfg$varname_include %||% character(0),
+            "Cost"
+          )
+          cost_candidate <- any(grepl("Cost", vi_expanded_cost, ignore.case = TRUE))
+          if (isTRUE(cost_candidate)) {
+            warnings <- c(warnings, "RAE appears to contain Cost for this family, but Spend keyword is set to Spend.")
+          }
+        }
+      }
+
+      model_var <- cfg$model_variable %||% ""
+      model_ok <- !is.null(an) && nzchar(model_var) && model_var %in% names(an)
+      if (is.null(an)) {
+        blockers <- c(blockers, "Analytical Dataset is not loaded.")
+      } else if (!model_ok) {
+        blockers <- c(blockers, paste0("Model variable not found in Analytical: ", model_var))
+      }
+
+      roi_val <- effective_roi(cfg, nm)
+      if (is.na(roi_val)) {
+        warnings <- c(warnings, "ROI is missing. Processing can continue, but seed_for_indices.csv will not include ROI values.")
+      }
+
+      gcfg <- tryCatch(config(), error = \(e) list())
+      if (is.null(gcfg$start_report_date) || is.null(gcfg$end_report_date)) {
+        blockers <- c(blockers, "Global Parameters are not configured.")
+      }
+
+      n_merges <- sum(vapply(cfg$saved_merges %||% list(), \(m) isTRUE(m$active), logical(1)))
+      if (n_merges > 0) {
+        notes <- c(notes, paste0(n_merges, " saved merge(s) will be applied during Process."))
+      }
+
+      roi_missing <- is.na(roi_val)
+      status <- if (length(blockers)) "Blocked" else if (length(warnings) || length(notes)) "Needs review" else "Ready"
+      status_class <- switch(status, Ready = "audit-ready", `Needs review` = "audit-review", Blocked = "audit-blocked")
+      out <- list(
+        status = status,
+        status_class = status_class,
+        activity_rows = activity_rows,
+        spend_rows = spend_rows,
+        date_rows = date_rows,
+        date_mode = date_mode,
+        date_message = date_message,
+        model_ok = model_ok,
+        roi = roi_val,
+        roi_missing = roi_missing,
+        n_merges = n_merges,
+        n_breaks = length(cfg$dimension_breaks %||% list()),
+        warnings = unique(warnings),
+        blockers = unique(blockers),
+        notes = unique(notes)
+      )
+      channel_audit_cache$key <- cache_key
+      channel_audit_cache$value <- out
+      out
+    }
+
+    audit_pill <- function(label, value, tone = c("neutral", "ok", "warn", "error", "info")) {
+      tone <- match.arg(tone)
+      div(class = paste("channel-audit-row", paste0("audit-row-", tone)),
+          tags$span(label, class = "channel-audit-label"),
+          tags$strong(value, class = "channel-audit-value"))
+    }
+
+    render_channel_audit <- function(nm, cfg) {
+      audit <- selected_channel_audit(nm, cfg)
+      roi_text <- if (is.na(audit$roi)) "Missing" else paste0(round(audit$roi, 1))
+      time_text <- if (nzchar(cfg$time_break_label %||% "")) cfg$time_break_label else "None"
+      spend_label <- cfg$spend_keyword %||% "Spend"
+      status_tone <- switch(audit$status, Ready = "ok", `Needs review` = "warn", Blocked = "error")
+      tagList(
+        div(class = "channel-audit-summary",
+            audit_pill("Status", audit$status, status_tone),
+            audit_pill("Activity rows", fmt_audit_count(audit$activity_rows),
+                       if (audit$activity_rows > 0) "ok" else "error"),
+            audit_pill(paste0(spend_label, " rows"), fmt_audit_count(audit$spend_rows),
+                       if (audit$spend_rows > 0) "ok" else "warn"),
+            audit_pill("ROI", roi_text, if (isTRUE(audit$roi_missing)) "error" else "ok"),
+            audit_pill("TimeBreak", time_text, if (nzchar(cfg$time_break_label %||% "")) "info" else "neutral"),
+            audit_pill("Merges", audit$n_merges, if (audit$n_merges > 0) "info" else "neutral")),
+        if (isTRUE(audit$roi_missing))
+          div(class = "channel-audit-roi-critical",
+              icon("triangle-exclamation"),
+              div(tags$strong("ROIs by Channel missing"),
+                  tags$span("seed_for_indices.csv will export without ROI values until the ROI file is loaded in Setup."))),
+        if (length(audit$blockers) || length(audit$warnings) || length(audit$notes))
+          div(class = "channel-audit-messages",
+              tagList(lapply(audit$blockers, \(msg)
+                div(class = "channel-audit-message audit-msg-error",
+                    icon("circle-xmark"), tags$span(msg)))),
+              tagList(lapply(audit$warnings[!grepl("^ROI is missing", audit$warnings)], \(msg)
+                div(class = "channel-audit-message audit-msg-warn",
+                    icon("triangle-exclamation"), tags$span(msg)))),
+              tagList(lapply(audit$notes, \(msg)
+                div(class = "channel-audit-message audit-msg-info",
+                    icon("circle-info"), tags$span(msg))))),
+        tags$details(class = "channel-audit-details",
+                     tags$summary("Audit details"),
+                     mk_info_row("Effective preview range",
+                                 paste0(audit$date_mode, " | ",
+                                        fmt_audit_count(audit$date_rows), " row(s)")),
+                     mk_info_row("Source", source_label(cfg)),
+                     mk_info_row("Breaks", audit$n_breaks),
+                     mk_info_row("Config keywords",
+                                 if (isTRUE(cfg$config_imported))
+                                   "Loaded from config when present; otherwise inferred from VOF/RAE."
+                                 else "Inferred from VOF/RAE."),
+                     if (nzchar(audit$date_message %||% ""))
+                       mk_info_row("Date note", audit$date_message))
+      )
     }
 
     normalize_model_var <- function(x) {
@@ -349,6 +562,8 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
       split_preview_cache$ui <- NULL
       break_preview_cache$key <- NULL
       break_preview_cache$data <- NULL
+      channel_audit_cache$key <- NULL
+      channel_audit_cache$value <- NULL
     }, ignoreInit = TRUE)
     
     observeEvent(input$btn_enable_breaks, { breaks_enabled(TRUE) })
@@ -514,10 +729,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
       roi_ch <- roi_info$channel
       roi_val <- effective_roi(cfg, rv$selected)
       
-      info_title <- switch(cfg$source %||% "vof",
-                           vof              = "Auto-configured from VOF",
-                           keyword_fallback = "From MFF (keyword match)",
-                           "From MFF")
+      info_title <- source_label(cfg)
       info_class <- switch(cfg$source %||% "vof",
                            vof = "info-box-vof", keyword_fallback = "info-box-kw", "info-box-mff")
       info_icon  <- switch(cfg$source %||% "vof",
@@ -528,7 +740,8 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
             div(class = "card-header-inner mb-2",
                 icon("circle-info", class = info_icon),
                 tags$strong(info_title, class = "info-box-title"),
-                tags$span("(read-only)", class = "section-subtitle")),
+                tags$span("(audit)", class = "section-subtitle")),
+            render_channel_audit(rv$selected, cfg),
             if (!is.na(roi_ch)) mk_info_row("Channel", roi_ch),
             if (nzchar(cfg$sub_channel %||% "")) mk_info_row("Sub Channel", cfg$sub_channel),
             if (nzchar(cfg$effect %||% ""))      mk_info_row("Effect", cfg$effect),
@@ -1543,6 +1756,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
             cfg$saved_merges     <- list()
             cfg$min_period       <- dates$min_p
             cfg$max_period       <- dates$max_p
+            cfg$config_imported  <- TRUE
             return(apply_config_keywords(cfg, row))
           }
 
@@ -1570,7 +1784,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
             saved_merges = list(), dimension_breaks = list(),
             roi = roi_info$value, source = "manual",
             media_channel = if (!is.na(roi_info$channel)) roi_info$channel else "",
-            sub_channel = "", effect = "")
+            sub_channel = "", effect = "", config_imported = TRUE)
           apply_config_keywords(cfg, row)
         }
 

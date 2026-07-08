@@ -351,20 +351,95 @@ detect_activity_keyword <- function(var_names,
   "Impressions"
 }
 
+metric_base_name <- function(var_names,
+                             keyword_dict = MEDIA_KEYWORD_DICT) {
+  x <- trimws(as.character(var_names %||% character(0)))
+  x <- stringr::str_remove(x, "_Total(_Total)*$")
+  keywords <- unique(c(keyword_dict$activity, keyword_dict$spend))
+  keywords <- keywords[nzchar(keywords)]
+  if (length(keywords)) {
+    escaped <- stringr::str_replace_all(keywords, "([\\W])", "\\\\\\1")
+    x <- stringr::str_remove(
+      x,
+      stringr::regex(
+        paste0("\\s*(", paste(escaped, collapse = "|"), ")s?\\s*$"),
+        ignore_case = TRUE
+      )
+    )
+  }
+  x <- stringr::str_squish(x)
+  tolower(x)
+}
+
+expand_varname_include_with_spend <- function(all_variable_names,
+                                              varname_include,
+                                              spend_keyword = NULL,
+                                              keyword_dict = MEDIA_KEYWORD_DICT) {
+  vi <- unique(trimws(as.character(varname_include %||% character(0))))
+  vi <- vi[!is.na(vi) & nzchar(vi)]
+  all_vn <- unique(trimws(as.character(all_variable_names %||% character(0))))
+  all_vn <- all_vn[!is.na(all_vn) & nzchar(all_vn)]
+  if (!length(vi) || !length(all_vn)) return(vi)
+
+  spend_terms <- if (!is.null(spend_keyword) && nzchar(trimws(spend_keyword))) {
+    unique(c(spend_keyword, keyword_dict$spend))
+  } else {
+    keyword_dict$spend
+  }
+  spend_terms <- spend_terms[!is.na(spend_terms) & nzchar(spend_terms)]
+  spend_match <- Reduce(`|`, lapply(spend_terms, function(kw) {
+    stringr::str_detect(all_vn, stringr::regex(kw, ignore_case = TRUE))
+  }))
+  spend_candidates <- all_vn[spend_match]
+  if (!length(spend_candidates)) return(vi)
+
+  include_base <- unique(metric_base_name(vi, keyword_dict))
+  spend_base <- metric_base_name(spend_candidates, keyword_dict)
+  compatible <- vapply(spend_base, function(sb) {
+    any(include_base == sb |
+          startsWith(sb, paste0(include_base, " ")) |
+          startsWith(include_base, paste0(sb, " ")))
+  }, logical(1))
+
+  unique(c(vi, spend_candidates[compatible]))
+}
+
 # ── detect_spend_keyword ───────────────────────────────────────────────────
 detect_spend_keyword <- function(main_data, varname_include,
                                  keyword_dict = MEDIA_KEYWORD_DICT) {
   if (is.null(main_data) || !"VariableName" %in% names(main_data))
     return("Spend")
+  main_vn <- unique(trimws(as.character(main_data$VariableName)))
+  main_vn <- main_vn[!is.na(main_vn) & nzchar(main_vn)]
+  if (!length(main_vn)) return("Spend")
   matching <- if (length(varname_include) > 0) {
-    unique(main_data$VariableName[
+    unique(main_vn[
       Reduce("|", lapply(varname_include, function(p)
-        grepl(p, main_data$VariableName, ignore.case = TRUE)))
+        grepl(p, main_vn, ignore.case = TRUE)))
     ])
   } else character(0)
   for (kw in keyword_dict$spend)
     if (any(stringr::str_detect(matching, stringr::regex(kw, ignore_case = TRUE))))
       return(kw)
+
+  include_base <- unique(metric_base_name(varname_include, keyword_dict))
+  include_base <- include_base[!is.na(include_base) & nzchar(include_base)]
+  if (length(include_base)) {
+    spend_match <- Reduce(`|`, lapply(keyword_dict$spend, function(kw) {
+      stringr::str_detect(main_vn, stringr::regex(kw, ignore_case = TRUE))
+    }))
+    spend_candidates <- main_vn[spend_match]
+
+    if (length(spend_candidates)) {
+      spend_base <- metric_base_name(spend_candidates, keyword_dict)
+      paired <- spend_candidates[spend_base %in% include_base]
+      if (length(paired)) {
+        for (kw in keyword_dict$spend)
+          if (any(stringr::str_detect(paired, stringr::regex(kw, ignore_case = TRUE))))
+            return(kw)
+      }
+    }
+  }
   "Spend"
 }
 
@@ -515,7 +590,8 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
   
   # OPT-3: Pre-compute unique VariableNames from main_data ONCE
   all_main_vn <- if (!is.null(main_data) && "VariableName" %in% names(main_data))
-    unique(as.character(main_data$VariableName)) else character(0)
+    unique(trimws(as.character(main_data$VariableName))) else character(0)
+  all_main_vn <- all_main_vn[!is.na(all_main_vn) & nzchar(all_main_vn)]
   
   # OPT-4: Pre-index schema name_lookup as named list → O(1) lookup
   schema_lookup_by_orig <- NULL
@@ -534,6 +610,23 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
     ]
     for (kw in keyword_dict$spend)
       if (any(grepl(kw, matching, ignore.case = TRUE))) return(kw)
+
+    include_base <- unique(metric_base_name(varname_include, keyword_dict))
+    include_base <- include_base[!is.na(include_base) & nzchar(include_base)]
+    if (length(include_base)) {
+      spend_match <- Reduce(`|`, lapply(keyword_dict$spend, function(kw) {
+        grepl(kw, all_main_vn, ignore.case = TRUE)
+      }))
+      spend_candidates <- all_main_vn[spend_match]
+      if (length(spend_candidates)) {
+        spend_base <- metric_base_name(spend_candidates, keyword_dict)
+        paired <- spend_candidates[spend_base %in% include_base]
+        if (length(paired)) {
+          for (kw in keyword_dict$spend)
+            if (any(grepl(kw, paired, ignore.case = TRUE))) return(kw)
+        }
+      }
+    }
     "Spend"
   }
 
@@ -1095,6 +1188,13 @@ process_channel_legacy <- function(all_rags,
   d_prefilt <- data.table::as.data.table(source_data)
   
   vi <- cfg$varname_include[nchar(cfg$varname_include %||% "") > 0]
+  if (length(vi) > 0 && "VariableName" %in% names(d_prefilt)) {
+    vi <- expand_varname_include_with_spend(
+      unique(d_prefilt$VariableName),
+      vi,
+      cfg$spend_keyword %||% NULL
+    )
+  }
   if (length(vi) > 0) {
     match_mode <- cfg$varname_match_mode %||%
       if (identical(cfg$source %||% "", "vof")) "exact" else "prefix"

@@ -82,7 +82,20 @@ get_diag_df <- function(df, cross_cols, ref_cross_key) {
   if (nrow(df) == 0) return(df)
   cross_data <- df[, cross_cols, drop = FALSE]
   cross_key  <- do.call(paste, c(as.list(cross_data), list(sep = " / ")))
-  df[cross_key == ref_cross_key, ]
+  split_cols <- setdiff(names(df)[sapply(df, is.numeric)], cross_cols)
+  has_signal <- function(rows) {
+    if (!length(split_cols) || !nrow(rows)) return(nrow(rows) > 0)
+    vals <- as.data.frame(rows[, split_cols, drop = FALSE])
+    any(vapply(vals, function(x) any(!is.na(x) & x != 0), logical(1)))
+  }
+  out <- df[cross_key == ref_cross_key, , drop = FALSE]
+  if (has_signal(out)) return(out)
+  fallback_keys <- sort(unique(cross_key))
+  for (fallback_key in fallback_keys) {
+    candidate <- df[cross_key == fallback_key, , drop = FALSE]
+    if (has_signal(candidate)) return(candidate)
+  }
+  if (nrow(out) > 0) out else df[cross_key == fallback_keys[1], , drop = FALSE]
 }
 
 build_model_total <- function(analytical, cross_id, model_variables,
@@ -638,6 +651,13 @@ process_channel <- function(all_rags,
   d_prefilt <- data.table::as.data.table(source_data)
   
   vi <- cfg$varname_include[nchar(cfg$varname_include %||% "") > 0]
+  if (length(vi) > 0 && "VariableName" %in% names(d_prefilt)) {
+    vi <- expand_varname_include_with_spend(
+      unique(d_prefilt$VariableName),
+      vi,
+      cfg$spend_keyword %||% NULL
+    )
+  }
   if (length(vi) > 0) {
     match_mode <- cfg$varname_match_mode %||%
       if (identical(cfg$source %||% "", "vof")) "exact" else "prefix"

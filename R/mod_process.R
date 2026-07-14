@@ -89,11 +89,47 @@ mod_process_server <- function(id, data, config, channels,
     set_hist <- function(nm, val) { history_store[[nm]] <- val }
     set_error <- function(nm, msg = NULL) {
       process_errors[[nm]] <- msg
-      results_trigger(isolate(results_trigger()) + 1L)
+      if (!isTRUE(is_batch_processing()))
+        results_trigger(isolate(results_trigger()) + 1L)
     }
     
     valid_nm <- function(nm)
       !is.null(nm) && length(nm) == 1 && !is.na(nm) && nzchar(nm)
+
+    channel_source_data <- function(all_rags, cfg) {
+      if (is.null(all_rags) || is.null(cfg) || !"VariableName" %in% names(all_rags))
+        return(all_rags)
+
+      vi <- cfg$varname_include[nzchar(cfg$varname_include %||% "")]
+      if (!length(vi))
+        return(all_rags)
+
+      vi <- expand_varname_include_with_spend(
+        unique(all_rags$VariableName),
+        vi,
+        cfg$spend_keyword %||% NULL
+      )
+      vi <- unique(trimws(as.character(vi)))
+      vi <- vi[!is.na(vi) & nzchar(vi)]
+      if (!length(vi))
+        return(all_rags)
+
+      vn <- trimws(as.character(all_rags$VariableName))
+      match_mode <- cfg$varname_match_mode %||%
+        if (identical(cfg$source %||% "", "vof")) "exact" else "prefix"
+
+      keep <- if (identical(match_mode, "exact")) {
+        tolower(vn) %in% tolower(vi)
+      } else {
+        pattern <- paste(
+          paste0("^", stringr::str_replace_all(vi, "([\\W])", "\\\\\\1")),
+          collapse = "|"
+        )
+        grepl(pattern, vn, ignore.case = TRUE, perl = TRUE)
+      }
+
+      all_rags[keep %in% TRUE, , drop = FALSE]
+    }
 
     empty_spend_diag <- function() {
       tibble::tibble(
@@ -375,7 +411,7 @@ mod_process_server <- function(id, data, config, channels,
     )
     
     # ── run_one ────────────────────────────────────────────────────────────
-    run_one <- function(nm) {
+    run_one <- function(nm, do_gc = TRUE) {
       d    <- data()
       cfg  <- channels()[[nm]]; req(cfg)
       gcfg <- config()
@@ -412,11 +448,18 @@ mod_process_server <- function(id, data, config, channels,
       }
       
       res_stored <- NULL; err_stored <- NULL
+      t_channel <- proc.time()
+      rags_nm <- channel_source_data(d$all_rags, cfg)
+      if (isTRUE(getOption("pso.profile", FALSE))) {
+        message("[mod_process] ", nm, ": RAE rows ",
+                format(nrow(d$all_rags), big.mark = ","),
+                " -> ", format(nrow(rags_nm), big.mark = ","))
+      }
       
       withProgress(message = paste0("Processing: ", nm), value = 0, {
         tryCatch({
           res_stored <- process_channel(
-            all_rags          = d$all_rags,
+            all_rags          = rags_nm,
             analytical        = d$analytical,
             dates_df          = d$dates_df,
             cfg               = cfg,
@@ -439,9 +482,15 @@ mod_process_server <- function(id, data, config, channels,
       
       if (!is.null(err_stored)) {
         set_error(nm, err_stored)
+        if (isTRUE(getOption("pso.profile", FALSE))) {
+          elapsed <- round((proc.time() - t_channel)[["elapsed"]], 3)
+          message("[mod_process] ", nm, " failed in ", elapsed, "s")
+        }
         showNotification(paste(nm, "error:", err_stored),
                          type = "error", duration = 12)
-        gc(verbose = FALSE, full = FALSE); return()
+        rm(rags_nm)
+        if (isTRUE(do_gc)) gc(verbose = FALSE, full = FALSE)
+        return()
       }
       
       if (!is.null(res_stored)) {
@@ -475,10 +524,15 @@ mod_process_server <- function(id, data, config, channels,
         msg <- paste0(nm, " processed",
                       if (n_applied > 0)
                         paste0(" + ", n_applied, " merge(s) from config") else "")
+        if (isTRUE(getOption("pso.profile", FALSE))) {
+          elapsed <- round((proc.time() - t_channel)[["elapsed"]], 3)
+          message("[mod_process] ", nm, " processed in ", elapsed, "s")
+        }
         showNotification(msg,
                          type = "message",
                          duration = 4)
-        rm(res_stored); gc(verbose = FALSE, full = FALSE)
+        rm(res_stored, rags_nm)
+        if (isTRUE(do_gc)) gc(verbose = FALSE, full = FALSE)
       }
     }
 
@@ -533,13 +587,14 @@ mod_process_server <- function(id, data, config, channels,
                        setProgress((i - 1) / length(imported),
                                    message = paste0("(", i, "/", length(imported), ") ", nm))
                        before_err <- process_errors[[nm]]
-                       run_one(nm)
+                       run_one(nm, do_gc = FALSE)
                        after_err <- process_errors[[nm]]
                        if (is.null(after_err)) n_ok <- n_ok + 1L
                        else if (!identical(before_err, after_err) || !is.null(after_err)) n_err <- n_err + 1L
                      }
                      setProgress(1, message = "Done")
                    })
+      gc(verbose = FALSE, full = TRUE)
 
       elapsed <- round((proc.time() - t_start)[["elapsed"]], 1)
       batch_summary_state(list(processed = n_ok, already_done = 0L,
@@ -627,8 +682,6 @@ mod_process_server <- function(id, data, config, channels,
       t_start  <- proc.time()
       
       cross_cols_val <- gcfg$cross_cols %||% "Geography"
-      has_vn_col     <- "VariableName" %in% names(d$all_rags)
-      
       is_batch_processing(TRUE)
       on.exit({
         is_batch_processing(FALSE)
@@ -656,13 +709,11 @@ mod_process_server <- function(id, data, config, channels,
                          next
                        }
                        
-                       vi <- cfg$varname_include[nzchar(cfg$varname_include %||% "")]
-                       rags_nm <- if (!length(vi) || !has_vn_col) {
-                         d$all_rags
-                       } else {
-                         pat <- paste0("^(", paste(vi, collapse = "|"), ")")
-                         d$all_rags[grepl(pat, d$all_rags$VariableName,
-                                          ignore.case = TRUE, perl = TRUE), , drop = FALSE]
+                       rags_nm <- channel_source_data(d$all_rags, cfg)
+                       if (isTRUE(getOption("pso.profile", FALSE))) {
+                         message("[mod_process] ", nm, ": RAE rows ",
+                                 format(nrow(d$all_rags), big.mark = ","),
+                                 " -> ", format(nrow(rags_nm), big.mark = ","))
                        }
                        
                        res_stored <- NULL; err_msg <- NULL
@@ -685,7 +736,8 @@ mod_process_server <- function(id, data, config, channels,
                          )
                        }, error = function(e) { err_msg <<- conditionMessage(e) })
                        
-                       rm(rags_nm); gc(verbose = FALSE, full = FALSE)
+                       rm(rags_nm)
+                       if (i %% 5L == 0L) gc(verbose = FALSE, full = FALSE)
                        
                        if (!is.null(err_msg)) {
                          n_err    <- n_err + 1L
@@ -772,12 +824,13 @@ mod_process_server <- function(id, data, config, channels,
                        setProgress((i - 1) / length(failed),
                                    message = paste0("(", i, "/", length(failed), ") ", failed[[i]]))
                        before_err <- process_errors[[failed[[i]]]]
-                       run_one(failed[[i]])
+                       run_one(failed[[i]], do_gc = FALSE)
                        after_err <- process_errors[[failed[[i]]]]
                        if (is.null(after_err)) n_ok <- n_ok + 1L
                        else if (!identical(before_err, after_err) || !is.null(after_err)) n_err <- n_err + 1L
                      }
                    })
+      gc(verbose = FALSE, full = TRUE)
       elapsed <- round((proc.time() - t_start)[["elapsed"]], 1)
       batch_summary_state(list(processed = n_ok, already_done = 0L,
                                skipped = 0L, failed = n_err, elapsed = elapsed))
@@ -803,11 +856,12 @@ mod_process_server <- function(id, data, config, channels,
                      for (i in seq_along(changed)) {
                        setProgress((i - 1) / length(changed),
                                    message = paste0("(", i, "/", length(changed), ") ", changed[[i]]))
-                       run_one(changed[[i]])
+                       run_one(changed[[i]], do_gc = FALSE)
                        if (changed[[i]] %in% stale_names()) n_err <- n_err + 1L
                        else n_ok <- n_ok + 1L
                      }
                    })
+      gc(verbose = FALSE, full = TRUE)
       elapsed <- round((proc.time() - t_start)[["elapsed"]], 1)
       batch_summary_state(list(processed = n_ok, already_done = 0L,
                                skipped = 0L, failed = n_err, elapsed = elapsed))
@@ -1511,21 +1565,25 @@ mod_process_server <- function(id, data, config, channels,
       num_fmt  <- intersect(c("sd", "min", "quartile_1", "median",
                               "quartile_3", "max_no_outlier", "max"),
                             names(df_display))
-      col_defs <- list(
-        list(className = "dt-left", targets = 0),
-        list(targets = which(names(df_display) == "total_activity") - 1,
-             render = JS("function(d,t){if(t!=='display')return d;",
-                         "var n=parseFloat(d);",
-                         "if(n>=1e9)return(n/1e9).toFixed(1)+'B';",
-                         "if(n>=1e6)return(n/1e6).toFixed(1)+'M';",
-                         "if(n>=1e3)return(n/1e3).toFixed(0)+'K';",
-                         "return n.toLocaleString();}")))
+      col_defs <- list(list(className = "dt-left", targets = 0))
+      activity_target <- which(names(df_display) == "total_activity") - 1
+      if (length(activity_target) == 1 && !is.na(activity_target)) {
+        col_defs <- c(col_defs, list(
+          list(targets = activity_target,
+               render = JS("function(d,t){if(t!=='display')return d;",
+                           "var n=parseFloat(d);",
+                           "if(n>=1e9)return(n/1e9).toFixed(1)+'B';",
+                           "if(n>=1e6)return(n/1e6).toFixed(1)+'M';",
+                           "if(n>=1e3)return(n/1e3).toFixed(0)+'K';",
+                           "return n.toLocaleString();}"))))
+      }
       
       dt <- df_display %>%
         datatable(
           selection = list(mode = "multiple", target = "row"),
           options   = list(
-            scrollX = TRUE, scrollY = "420px", paging = FALSE, dom = "frt",
+            scrollX = TRUE, scrollY = "420px", paging = TRUE, pageLength = 50,
+            lengthChange = FALSE, dom = "frtip",
             deferRender = TRUE, scroller = TRUE, autoWidth = FALSE,
             initComplete = dt_blue_callback, columnDefs = col_defs),
           rownames = FALSE)
@@ -1540,7 +1598,7 @@ mod_process_server <- function(id, data, config, channels,
                     backgroundPosition = "center") %>%
         formatStyle("pct_total_activity",
                     color = styleInterval(threshold, c("#dc3545", "#333")))
-    }, server = FALSE)
+    }, server = TRUE)
     
     # ── Spend table ────────────────────────────────────────────────────────
     output$diag_cost <- DT::renderDT({

@@ -81,6 +81,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
     config_import_event_id <- reactiveVal(0L)
     copy_config_source <- reactiveVal(NULL)
     preview_row_limit <- 1000L
+    default_break_separator <- " - "
     split_preview_cache <- reactiveValues(key = NULL, ui = NULL)
     break_preview_cache <- reactiveValues(key = NULL, data = NULL)
     channel_audit_cache <- reactiveValues(key = NULL, value = NULL)
@@ -103,7 +104,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
         n_parts <- if (length(n_parts) && !is.na(n_parts)) as.integer(n_parts) else length(part_names)
         list(
           column = brk$column %||% "",
-          separator = brk$separator %||% "_",
+          separator = brk$separator %||% default_break_separator,
           n_parts = n_parts,
           names = part_names
         )
@@ -1041,7 +1042,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
     })
     
     auto_n_parts <- reactive({
-      col <- input$break_col %||% "Campaign"; sep <- input$break_sep %||% "_"
+      col <- input$break_col %||% "Campaign"; sep <- input$break_sep %||% default_break_separator
       md  <- main_data()
       if (is.null(md) || !col %in% names(md)) return(2L)
       if (!is.null(rv$selected) && rv$selected %in% names(rv$channels)) {
@@ -1084,7 +1085,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
         div(class = "break-info-box", icon("circle-info", class = "icon-blue-sm"),
             " This break will be applied to both activity and spend columns automatically."),
         selectInput(ns("break_col"), "Column to break", choices = available),
-        textInput(ns("break_sep"), "Separator", value = "_"),
+        textInput(ns("break_sep"), "Separator", value = default_break_separator),
         uiOutput(ns("break_preview_ui")), uiOutput(ns("break_names_ui")),
         footer = tagList(actionButton(ns("btn_confirm_break"),
                                       tagList(icon("check"), " Add Break"),
@@ -1098,7 +1099,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
 
     break_preview_unique_values <- reactive({
       col <- input$break_col %||% "Campaign"
-      sep <- input$break_sep %||% "_"
+      sep <- input$break_sep %||% default_break_separator
       n   <- auto_n_parts()
       md  <- main_data()
 
@@ -1167,7 +1168,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
     })
     
     output$break_preview_ui <- renderUI({
-      col <- input$break_col %||% "Campaign"; sep <- input$break_sep %||% "_"
+      col <- input$break_col %||% "Campaign"; sep <- input$break_sep %||% default_break_separator
       n   <- auto_n_parts(); md <- main_data()
       if (is.null(md) || !col %in% names(md))
         return(tags$p(class = "text-muted small mt-2", "Upload data to see preview."))
@@ -1202,7 +1203,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
         paste(paste0(names(dist_tbl), " part", ifelse(names(dist_tbl) == "1", "", "s"),
                      ": ", as.integer(dist_tbl)), collapse = " | ")
       } else "No values"
-      separators <- c("_", " - ", "--", "|", "/")
+      separators <- c(default_break_separator, "_", "--", "|", "/")
       sep_hits <- vapply(separators, function(s) {
         if (!length(unique_vals)) 0L else sum(lengths(strsplit(unique_vals, s, fixed = TRUE)) > 1)
       }, integer(1))
@@ -1325,7 +1326,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
           list(id = ns("btn_confirm_break"), disabled = FALSE)
         )
       }
-      col        <- input$break_col %||% "Campaign"; sep <- input$break_sep %||% "_"
+      col        <- input$break_col %||% "Campaign"; sep <- input$break_sep %||% default_break_separator
       n          <- isolate(break_n_parts_cache() %||% 2L)
       part_names <- sapply(seq_len(n), function(i)
         trimws(input[[paste0("break_part_", i)]] %||% paste0(col, "_", LETTERS[i])))
@@ -1822,15 +1823,17 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
               part_names_raw <- break_rows$Name[i]  %||% ""
               sep_n_raw      <- break_rows$Splits[i] %||% ""
               part_names <- Filter(nzchar, trimws(strsplit(part_names_raw, "\\|")[[1]]))
-              sep_n      <- Filter(nzchar, trimws(strsplit(sep_n_raw, "\\|")[[1]]))
-              sep     <- if (length(sep_n) >= 1) sep_n[1] else "_"
-              n_parts <- if (length(sep_n) >= 2) as.integer(sep_n[2]) else length(part_names)
+              sep_n      <- strsplit(sep_n_raw, "\\|")[[1]]
+              sep     <- if (length(sep_n) >= 1 && nzchar(sep_n[1])) sep_n[1] else default_break_separator
+              n_parts <- if (length(sep_n) >= 2) as.integer(trimws(sep_n[2])) else length(part_names)
             } else {
-              break_info <- Filter(nzchar, trimws(strsplit(
-                break_rows$BreakInfo[i] %||% "", "\\|")[[1]]))
-              sep     <- if (length(break_info) >= 1) break_info[1] else "_"
-              n_parts <- if (length(break_info) >= 2) as.integer(break_info[2]) else 2L
-              part_names <- if (length(break_info) > 2) break_info[3:length(break_info)]
+              break_info <- strsplit(
+                break_rows$BreakInfo[i] %||% "", "\\|")[[1]]
+              sep     <- if (length(break_info) >= 1 && nzchar(break_info[1])) break_info[1] else default_break_separator
+              n_parts <- if (length(break_info) >= 2) as.integer(trimws(break_info[2])) else 2L
+              part_names <- if (length(break_info) > 2) {
+                Filter(nzchar, trimws(break_info[3:length(break_info)]))
+              }
               else paste0(col, "_", LETTERS[seq_len(n_parts)])
             }
             if (is.na(n_parts) || n_parts < 1L) next

@@ -1625,28 +1625,6 @@ mod_export_server <- function(id, results, data, config, channels,
       standard_cols <- c("VariableSplit", "MainModelVariableName", "Weight",
                          "MinWeight", "MaxWeight", "rank")
 
-      clean_side_split_name <- function(split_nm, cfg = list()) {
-        out <- normalize_export_split(split_nm)
-        prefixes <- unique(trimws(as.character(cfg$varname_include %||% character(0))))
-        prefixes <- prefixes[!is.na(prefixes) & nzchar(prefixes)]
-        prefixes <- prefixes[order(nchar(prefixes), decreasing = TRUE)]
-        if (!length(prefixes)) return(out)
-
-        for (prefix in prefixes) {
-          prefix_pattern <- paste0(
-            "^",
-            stringr::str_replace_all(prefix, "([\\W])", "\\\\\\1"),
-            "_"
-          )
-          out <- stringr::str_replace(
-            out,
-            stringr::regex(prefix_pattern, ignore_case = TRUE),
-            ""
-          )
-        }
-        out
-      }
-
       normalize_mapping <- function(df, nm, cfg = list()) {
         if (is.null(df) || !nrow(df) || !"VariableSplit" %in% names(df)) {
           return(NULL)
@@ -1722,9 +1700,7 @@ mod_export_server <- function(id, results, data, config, channels,
             dplyr::select(dplyr::all_of(standard_cols))
         }
 
-        out %>%
-          dplyr::mutate(VariableSplit = clean_side_split_name(.data$VariableSplit, cfg)) %>%
-          dplyr::select(dplyr::all_of(standard_cols))
+        out %>% dplyr::select(dplyr::all_of(standard_cols))
       }))
 
       result <- if (length(rows)) dplyr::bind_rows(rows) else NULL

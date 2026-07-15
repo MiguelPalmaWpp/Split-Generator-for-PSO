@@ -26,6 +26,7 @@ apply_dimension_breaks <- function(d, dimension_breaks, channel_name = NULL) {
   if (!length(dimension_breaks)) return(d)
   for (brk in dimension_breaks) {
     col <- brk$column; sep <- brk$separator; n <- brk$n_parts
+    missing_part_value <- brk$missing_part_value %||% "Total"
     if (!col %in% names(d)) next
     source_values <- clean_split_part(d[[col]])
     split_values <- strsplit(source_values, sep, fixed = TRUE)
@@ -33,7 +34,7 @@ apply_dimension_breaks <- function(d, dimension_breaks, channel_name = NULL) {
     for (i in seq_len(n)) {
       values <- vapply(split_values, function(p) {
         if (!length(p) || length(p) < i) {
-          "Total"
+          missing_part_value
         } else if (i == n) {
           paste(p[i:length(p)], collapse = sep)
         } else {
@@ -41,7 +42,7 @@ apply_dimension_breaks <- function(d, dimension_breaks, channel_name = NULL) {
         }
       }, character(1))
       values <- clean_split_part(values)
-      values[is.na(values)] <- "Total"
+      values[is.na(values)] <- missing_part_value
       d[[brk$names[i]]] <- values
     }
     d[[col]] <- NULL
@@ -221,7 +222,7 @@ splits_summary <- function(df, type = "activity") {
 # ── apply_single_merge ────────────────────────────────────────────────────
 # New function added to support interactive merging in mod_process.
 # Merges selected splits in the RAG and updates all diagnostic structures.
-apply_single_merge <- function(res, merge_entry, cfg) {
+apply_single_merge <- function(res, merge_entry, cfg, notify = TRUE) {
   new_name        <- merge_entry$new_name
   selected_splits <- unlist(merge_entry$merged)
   selected_splits <- unique(trimws(as.character(selected_splits)))
@@ -382,6 +383,21 @@ apply_single_merge <- function(res, merge_entry, cfg) {
     names(res$rag)[sapply(as.data.frame(res$rag), is.numeric)], id_cols)
   resolved <- resolve_merge_splits(selected_splits, rag_split_names, view_filter)
   rag_cols <- resolved$cols
+  merge_status <- function(applied, missing = character(), ambiguous = character(),
+                           examples = character(), matched = rag_cols) {
+    list(
+      applied = isTRUE(applied),
+      new_name = new_name,
+      view = view_filter,
+      requested = selected_splits,
+      matched = matched,
+      missing = missing,
+      ambiguous = ambiguous,
+      closest_examples = examples,
+      matched_count = length(matched),
+      requested_count = length(unique(selected_splits))
+    )
+  }
 
   if (length(rag_cols) != length(unique(selected_splits))) {
     unresolved <- c(resolved$missing, resolved$ambiguous)
@@ -390,13 +406,22 @@ apply_single_merge <- function(res, merge_entry, cfg) {
     examples <- if (length(unresolved)) {
       paste(closest_split_examples(unresolved[1], resolved$candidates), collapse = " | ")
     } else ""
-    showNotification(
-      paste0(
-        "Merge '", new_name, "' not applied. Missing: ", sample_missing,
-        ". View: ", view_filter,
-        if (nzchar(examples)) paste0(". Closest RAG: ", examples) else ""
-      ),
-      type = "warning", duration = 8)
+    if (isTRUE(notify)) {
+      showNotification(
+        paste0(
+          "Merge '", new_name, "' not applied. Missing: ", sample_missing,
+          ". View: ", view_filter,
+          if (nzchar(examples)) paste0(". Closest RAG: ", examples) else ""
+        ),
+        type = "warning", duration = 8)
+    }
+    attr(res, "merge_status") <- merge_status(
+      applied = FALSE,
+      missing = resolved$missing,
+      ambiguous = resolved$ambiguous,
+      examples = if (length(unresolved)) closest_split_examples(unresolved[1], resolved$candidates) else character(0),
+      matched = rag_cols
+    )
     return(res)
   }
   
@@ -553,13 +578,15 @@ apply_single_merge <- function(res, merge_entry, cfg) {
   }, error = \(e) res$cost_diagnoses)
   new_cost_diag <- normalize_cost_diagnoses(new_cost_diag)
   
-  list(rag            = new_rag,
-       cross_cols     = res$cross_cols,
-       ref_cross      = res$ref_cross,
-       activity_spend = new_act_spend,
-       side_mapping   = new_side_map,
-       act_diagnoses  = new_act_diag,
-       cost_diagnoses = new_cost_diag)
+  out <- list(rag            = new_rag,
+              cross_cols     = res$cross_cols,
+              ref_cross      = res$ref_cross,
+              activity_spend = new_act_spend,
+              side_mapping   = new_side_map,
+              act_diagnoses  = new_act_diag,
+              cost_diagnoses = new_cost_diag)
+  attr(out, "merge_status") <- merge_status(applied = TRUE, matched = rag_cols)
+  out
 }
 
 # ═══════════════════════════════════════════════════════════════════════

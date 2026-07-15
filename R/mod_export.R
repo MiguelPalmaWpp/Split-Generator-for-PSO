@@ -264,6 +264,300 @@ mod_export_server <- function(id, results, data, config, channels,
         dplyr::distinct(.data$VariableSplit, .data$MainModelVariableName, .keep_all = TRUE)
     }
 
+    export_metric_totals_from_rae <- function(d, cfg = list(), gcfg = list(), nm = "") {
+      empty <- list(
+        activity = tibble::tibble(VariableSplit = character(), total_activity = numeric()),
+        spend = tibble::tibble(VariableSplit = character(), total_spend = numeric()),
+        seed = tibble::tibble(
+          VariableSplit = character(), Geography = character(),
+          total_activity = numeric(), total_spend = numeric()
+        )
+      )
+      if (is.null(d) || is.null(d$all_rags) || !"Period" %in% names(d$all_rags) ||
+          !"VariableName" %in% names(d$all_rags)) {
+        return(empty)
+      }
+
+      source_data <- as.data.frame(d$all_rags)
+      source_data$Period <- if (inherits(source_data$Period, "Date")) {
+        source_data$Period
+      } else {
+        parse_period_robust(source_data$Period)
+      }
+      source_data <- source_data[!is.na(source_data$Period), , drop = FALSE]
+      if (!nrow(source_data)) return(empty)
+
+      min_p <- tryCatch(as.Date(cfg$min_period), error = \(e) as.Date(NA))
+      max_p <- tryCatch(as.Date(cfg$max_period), error = \(e) as.Date(NA))
+      if (!is.na(min_p)) source_data <- source_data[source_data$Period >= min_p, , drop = FALSE]
+      if (!is.na(max_p)) source_data <- source_data[source_data$Period <= max_p, , drop = FALSE]
+
+      if (!is.null(d$dates_df) && "Period" %in% names(d$dates_df) && nrow(d$dates_df) > 0) {
+        date_spine <- d$dates_df$Period
+        date_spine <- if (inherits(date_spine, "Date")) date_spine else parse_period_robust(date_spine)
+        date_spine <- date_spine[!is.na(date_spine)]
+        if (length(date_spine)) {
+          source_data <- source_data[
+            source_data$Period >= min(date_spine) &
+              source_data$Period <= max(date_spine), , drop = FALSE
+          ]
+        }
+      }
+      if (!nrow(source_data)) return(empty)
+
+      vi <- cfg$varname_include[nzchar(cfg$varname_include %||% "")]
+      if (length(vi) > 0) {
+        vi <- expand_varname_include_with_spend(
+          unique(source_data$VariableName),
+          vi,
+          cfg$spend_keyword %||% NULL
+        )
+        vi <- unique(trimws(as.character(vi)))
+        vi <- vi[!is.na(vi) & nzchar(vi)]
+      }
+      if (length(vi) > 0) {
+        vn <- trimws(as.character(source_data$VariableName))
+        match_mode <- cfg$varname_match_mode %||%
+          if (identical(cfg$source %||% "", "vof")) "exact" else "prefix"
+        keep <- if (identical(match_mode, "exact")) {
+          tolower(vn) %in% tolower(vi)
+        } else {
+          pattern <- paste(
+            paste0("^", stringr::str_replace_all(vi, "([\\W])", "\\\\\\1")),
+            collapse = "|"
+          )
+          grepl(pattern, vn, ignore.case = TRUE, perl = TRUE)
+        }
+        source_data <- source_data[keep %in% TRUE, , drop = FALSE]
+      }
+      if (!nrow(source_data)) return(empty)
+
+      filter_regex <- function(df, col, pats) {
+        if (!col %in% names(df)) return(df)
+        for (p in pats %||% character(0)) {
+          if (nchar(p %||% "") > 0)
+            df <- df[!grepl(p, df[[col]], ignore.case = TRUE), , drop = FALSE]
+        }
+        df
+      }
+
+      has_geo_overrides <- length(cfg$segment_overrides %||% list()) > 0 &&
+        any(vapply(cfg$segment_overrides %||% list(), function(o) {
+          length(o$geography_exclude %||% character(0)) > 0
+        }, logical(1)))
+
+      source_data <- filter_regex(source_data, "VariableName", cfg$varname_exclude)
+      if (!has_geo_overrides)
+        source_data <- filter_regex(source_data, "Geography", cfg$geography_exclude)
+      source_data <- filter_regex(source_data, "Campaign", cfg$campaign_exclude)
+      source_data <- filter_regex(source_data, "Outlet", cfg$outlet_exclude)
+      source_data <- filter_regex(source_data, "Creative", cfg$creative_exclude)
+
+      if (!is.null(d$schema_metadata) &&
+          !is.null(d$schema_metadata$name_lookup) &&
+          length(d$schema_metadata$useful_long) > 0 &&
+          length(cfg$analytical_varkeys %||% character(0)) > 0) {
+        nl <- d$schema_metadata$name_lookup
+        for (dim in d$schema_metadata$useful_long) {
+          if (!dim %in% names(source_data)) next
+          dim_vals <- get_useful_long_values(cfg$analytical_varkeys, nl, dim)
+          if (length(dim_vals) > 0)
+            source_data <- source_data[source_data[[dim]] %in% dim_vals, , drop = FALSE]
+        }
+      }
+
+      if (has_geo_overrides) {
+        seg_ovr <- Filter(\(o) isTRUE(o$seg == 1L), cfg$segment_overrides %||% list())
+        geo_exc <- if (length(seg_ovr) > 0)
+          seg_ovr[[1]]$geography_exclude %||% character(0)
+        else
+          cfg$geography_exclude %||% character(0)
+        source_data <- filter_regex(source_data, "Geography", geo_exc)
+      }
+      if (!nrow(source_data)) return(empty)
+
+      start_d <- tryCatch(as.Date(gcfg$start_report_date), error = \(e) as.Date(NA))
+      end_d <- tryCatch(as.Date(gcfg$end_report_date), error = \(e) as.Date(NA))
+      update_label <- gcfg$update_label %||% "Focus"
+      if (!is.na(end_d)) source_data <- source_data[source_data$Period <= end_d, , drop = FALSE]
+      if (!nrow(source_data)) return(empty)
+
+      source_data$VariableValue <- suppressWarnings(as.numeric(as.character(source_data$VariableValue)))
+      source_data$VariableValue[is.na(source_data$VariableValue)] <- 0
+
+      source_data <- apply_dimension_breaks(
+        source_data,
+        cfg$dimension_breaks %||% list(),
+        channel_name = cfg$channel_name %||% nm
+      )
+      split_cols_technical <- unique(c("VariableName", cfg$split_columns %||% character(0)))
+      source_data$SplitName <- build_split_name_from_columns(source_data, split_cols_technical)
+
+      period_tag <- rep(NA_character_, nrow(source_data))
+      if (!is.na(start_d))
+        period_tag[source_data$Period < start_d] <- "nonfocus"
+      if (!is.na(start_d) && !is.na(end_d))
+        period_tag[source_data$Period >= start_d & source_data$Period <= end_d] <- "focus"
+      if (is.na(start_d) && !is.na(end_d))
+        period_tag[source_data$Period <= end_d] <- "focus"
+      keep_period <- !is.na(period_tag)
+      source_data <- source_data[keep_period, , drop = FALSE]
+      period_tag <- period_tag[keep_period]
+      if (!nrow(source_data)) return(empty)
+
+      nf_sfx <- {
+        tbr <- cfg$time_break_label %||% ""
+        if (nzchar(tbr)) paste0("Before ", update_label, "|", tbr)
+        else paste0("Before ", update_label)
+      }
+      source_data$VariableSplit <- ifelse(
+        period_tag == "focus",
+        paste0(source_data$SplitName, "_", update_label),
+        paste0(source_data$SplitName, "_", nf_sfx)
+      )
+
+      cross_cols <- gcfg$cross_cols %||% "Geography"
+      cross_id <- intersect(c(cross_cols, "Period"), names(source_data))
+      if (!"Period" %in% cross_id) cross_id <- c(cross_id, "Period")
+      geo_col <- cross_cols[1]
+
+      dt <- data.table::as.data.table(source_data)
+      by_cols <- unique(c(cross_id, "VariableSplit"))
+      agg <- dt[, .(Value = sum(VariableValue, na.rm = TRUE)), by = by_cols]
+      if (!nrow(agg)) return(empty)
+
+      is_local_by_split <- agg[, {
+        local_period <- vapply(split(Value, Period), function(x) {
+          nz <- x[!is.na(x) & x > 0]
+          length(nz) >= 2 && diff(range(nz)) / max(nz) > 0.001
+        }, logical(1))
+        .(is_local = any(local_period))
+      }, by = VariableSplit]
+
+      period_totals <- merge(agg, is_local_by_split, by = "VariableSplit", all.x = TRUE)
+      period_totals <- period_totals[, .(
+        PeriodTotal = if (isTRUE(is_local[1])) {
+          sum(Value, na.rm = TRUE)
+        } else {
+          pos <- Value[!is.na(Value) & Value > 0]
+          if (length(pos)) max(pos) else 0
+        },
+        is_local = isTRUE(is_local[1])
+      ), by = .(VariableSplit, Period)]
+
+      totals <- period_totals[, .(
+        total = sum(PeriodTotal, na.rm = TRUE),
+        is_local = isTRUE(is_local[1])
+      ), by = VariableSplit]
+
+      act_kw <- cfg$activity_keyword %||% ""
+      spend_kw <- cfg$spend_keyword %||% ""
+      act_rows <- if (nzchar(act_kw)) {
+        totals[grepl(act_kw, VariableSplit, ignore.case = TRUE)]
+      } else totals[0]
+      spend_rows <- if (nzchar(spend_kw)) {
+        totals[grepl(spend_kw, VariableSplit, ignore.case = TRUE)]
+      } else totals[0]
+
+      seed_activity <- if (nrow(act_rows)) {
+        tibble::tibble(
+          VariableSplit = act_rows$VariableSplit,
+          total_activity = act_rows$total,
+          is_local = act_rows$is_local
+        )
+      } else tibble::tibble(VariableSplit = character(), total_activity = numeric(), is_local = logical())
+
+      activity <- seed_activity %>%
+        dplyr::select(VariableSplit, total_activity)
+
+      spend <- if (nrow(spend_rows)) {
+        tibble::tibble(
+          VariableSplit = spend_rows$VariableSplit,
+          total_spend = spend_rows$total
+        )
+      } else tibble::tibble(VariableSplit = character(), total_spend = numeric())
+
+      seed <- seed_activity %>%
+        dplyr::filter(!grepl("_Before(\\s+|_)", .data$VariableSplit, ignore.case = TRUE)) %>%
+        dplyr::mutate(
+          key = stringr::str_remove_all(.data$VariableSplit, stringr::regex(act_kw, ignore_case = TRUE))
+        )
+      if (nrow(seed)) {
+        spend_focus <- spend %>%
+          dplyr::filter(!grepl("_Before(\\s+|_)", .data$VariableSplit, ignore.case = TRUE)) %>%
+          dplyr::mutate(
+            key = stringr::str_remove_all(.data$VariableSplit, stringr::regex(spend_kw, ignore_case = TRUE))
+          ) %>%
+          dplyr::select(key, total_spend)
+        seed <- seed %>%
+          dplyr::left_join(spend_focus, by = "key") %>%
+          dplyr::select(-key)
+      } else {
+        seed$total_spend <- numeric(0)
+      }
+
+      if (geo_col %in% names(agg) && nrow(seed)) {
+        local_splits <- seed$VariableSplit[seed$is_local %in% TRUE]
+        geo_totals <- agg[VariableSplit %in% local_splits, .(
+          total_activity = sum(Value, na.rm = TRUE)
+        ), by = c("VariableSplit", geo_col)]
+        if (nrow(geo_totals)) {
+          setnames(geo_totals, geo_col, "Geography")
+          geo_spend <- if (nzchar(spend_kw) && nrow(spend_rows)) {
+            spend_focus_names <- spend$VariableSplit[
+              !grepl("_Before(\\s+|_)", spend$VariableSplit, ignore.case = TRUE)
+            ]
+            spend_geo <- agg[VariableSplit %in% spend_focus_names, .(
+              total_spend = sum(Value, na.rm = TRUE)
+            ), by = c("VariableSplit", geo_col)]
+            if (nrow(spend_geo)) {
+              setnames(spend_geo, geo_col, "Geography")
+              as.data.frame(spend_geo) %>%
+                dplyr::mutate(
+                  key = stringr::str_remove_all(
+                    .data$VariableSplit,
+                    stringr::regex(spend_kw, ignore_case = TRUE)
+                  )
+                ) %>%
+                dplyr::select(key, Geography, total_spend)
+            } else {
+              tibble::tibble(key = character(), Geography = character(), total_spend = numeric())
+            }
+          } else {
+            tibble::tibble(key = character(), Geography = character(), total_spend = numeric())
+          }
+          seed_local <- as.data.frame(geo_totals) %>%
+            dplyr::mutate(
+              key = stringr::str_remove_all(
+                .data$VariableSplit,
+                stringr::regex(act_kw, ignore_case = TRUE)
+              )
+            ) %>%
+            dplyr::left_join(geo_spend, by = c("key", "Geography")) %>%
+            dplyr::select(-key)
+          seed_national <- seed %>%
+            dplyr::filter(!.data$VariableSplit %in% local_splits) %>%
+            dplyr::mutate(Geography = NA_character_) %>%
+            dplyr::select(VariableSplit, Geography, total_activity, total_spend)
+          seed <- dplyr::bind_rows(seed_local, seed_national)
+        } else {
+          seed <- seed %>% dplyr::mutate(Geography = NA_character_)
+        }
+      } else if (nrow(seed)) {
+        seed <- seed %>% dplyr::mutate(Geography = NA_character_)
+      }
+
+      if (!"Geography" %in% names(seed))
+        seed$Geography <- NA_character_
+      if (!"total_spend" %in% names(seed))
+        seed$total_spend <- NA_real_
+
+      seed <- seed %>%
+        dplyr::select(VariableSplit, Geography, total_activity, total_spend)
+
+      list(activity = activity, spend = spend, seed = seed)
+    }
+
     final_activity_splits <- function(res, cfg = list(), nm = "") {
       if (is.null(res)) {
         return(tibble::tibble(
@@ -439,6 +733,170 @@ mod_export_server <- function(id, results, data, config, channels,
       )
     }
 
+    build_canonical_export_totals <- function(rae_totals, merge_resolved) {
+      empty_component <- tibble::tibble(
+        VariableSplit = character(),
+        Component_Activity = numeric(),
+        Component_Spend = numeric()
+      )
+      empty_final <- tibble::tibble(
+        VariableSplit = character(),
+        Activity = numeric(),
+        Spend = numeric()
+      )
+      empty_seed <- tibble::tibble(
+        VariableSplit = character(),
+        Geography = character(),
+        total_activity = numeric(),
+        total_spend = numeric()
+      )
+      empty <- list(
+        component_focus_totals = empty_component,
+        final_focus_totals = empty_final,
+        seed_focus_totals = empty_seed,
+        merge_map = tibble::tibble(MergedSplitName = character(), ComponentSplit = character())
+      )
+
+      component_seed <- rae_totals$seed %||% NULL
+      if (is.null(component_seed) || !nrow(component_seed) ||
+          !"VariableSplit" %in% names(component_seed)) {
+        return(empty)
+      }
+      component_seed <- as.data.frame(component_seed)
+      if (!"Geography" %in% names(component_seed)) component_seed$Geography <- NA_character_
+      if (!"total_activity" %in% names(component_seed)) component_seed$total_activity <- 0
+      if (!"total_spend" %in% names(component_seed)) component_seed$total_spend <- 0
+      component_seed$VariableSplit <- normalize_export_split(component_seed$VariableSplit)
+      component_seed$Geography <- as.character(component_seed$Geography)
+      component_seed$total_activity <- suppressWarnings(as.numeric(component_seed$total_activity))
+      component_seed$total_spend <- suppressWarnings(as.numeric(component_seed$total_spend))
+      component_seed$total_activity[is.na(component_seed$total_activity)] <- 0
+      component_seed$total_spend[is.na(component_seed$total_spend)] <- 0
+      component_seed <- component_seed[
+        !is.na(component_seed$VariableSplit) &
+          nzchar(component_seed$VariableSplit) &
+          !grepl("_Before(\\s+|_)", component_seed$VariableSplit, ignore.case = TRUE),
+        , drop = FALSE
+      ]
+      if (!nrow(component_seed)) return(empty)
+
+      component_focus <- component_seed %>%
+        dplyr::group_by(.data$VariableSplit) %>%
+        dplyr::summarise(
+          Component_Activity = sum(.data$total_activity, na.rm = TRUE),
+          Component_Spend = sum(.data$total_spend, na.rm = TRUE),
+          .groups = "drop"
+        )
+
+      merge_map <- merge_resolved$map %||%
+        tibble::tibble(MergedSplitName = character(), ComponentSplit = character())
+      if (!is.null(merge_map) && nrow(merge_map)) {
+        merge_map <- as.data.frame(merge_map)
+        merge_map$MergedSplitName <- normalize_export_split(merge_map$MergedSplitName)
+        merge_map$ComponentSplit <- normalize_export_split(merge_map$ComponentSplit)
+        merge_map <- merge_map[
+          !is.na(merge_map$MergedSplitName) &
+            nzchar(merge_map$MergedSplitName) &
+            !grepl("_Before(\\s+|_)", merge_map$MergedSplitName, ignore.case = TRUE) &
+            merge_map$ComponentSplit %in% component_seed$VariableSplit,
+          c("MergedSplitName", "ComponentSplit"),
+          drop = FALSE
+        ]
+        merge_map <- dplyr::distinct(tibble::as_tibble(merge_map),
+                                     .data$ComponentSplit, .keep_all = TRUE)
+      } else {
+        merge_map <- tibble::tibble(MergedSplitName = character(), ComponentSplit = character())
+      }
+
+      final_seed <- component_seed %>%
+        dplyr::left_join(merge_map, by = c("VariableSplit" = "ComponentSplit")) %>%
+        dplyr::mutate(
+          VariableSplit = dplyr::coalesce(.data$MergedSplitName, .data$VariableSplit)
+        ) %>%
+        dplyr::select(-dplyr::any_of("MergedSplitName")) %>%
+        dplyr::group_by(.data$VariableSplit, .data$Geography) %>%
+        dplyr::summarise(
+          total_activity = sum(.data$total_activity, na.rm = TRUE),
+          total_spend = sum(.data$total_spend, na.rm = TRUE),
+          .groups = "drop"
+        ) %>%
+        dplyr::filter(.data$total_activity > 0)
+
+      final_focus <- final_seed %>%
+        dplyr::group_by(.data$VariableSplit) %>%
+        dplyr::summarise(
+          Activity = sum(.data$total_activity, na.rm = TRUE),
+          Spend = sum(.data$total_spend, na.rm = TRUE),
+          .groups = "drop"
+        )
+
+      list(
+        component_focus_totals = component_focus,
+        final_focus_totals = final_focus,
+        seed_focus_totals = final_seed,
+        merge_map = merge_map
+      )
+    }
+
+    empty_export_metric_totals <- function() {
+      list(
+        activity = tibble::tibble(VariableSplit = character(), total_activity = numeric()),
+        spend = tibble::tibble(VariableSplit = character(), total_spend = numeric()),
+        seed = tibble::tibble(
+          VariableSplit = character(), Geography = character(),
+          total_activity = numeric(), total_spend = numeric()
+        )
+      )
+    }
+
+    ensure_channel_export_payload <- function(item, d, gcfg) {
+      if (is.null(item)) return(item)
+      if (!is.null(item$rae_totals) && !is.null(item$canonical_totals) &&
+          !is.null(item$merge_resolved)) return(item)
+
+      has_processed_splits <- !is.null(item$res) &&
+        (nrow(item$final %||% tibble::tibble()) > 0 ||
+           nrow(item$pre_act %||% tibble::tibble()) > 0)
+      item$merge_resolved <- if (isTRUE(has_processed_splits) &&
+                                 length(extract_export_merges(item$cfg %||% list()))) {
+        resolve_export_merge_map(
+          item$cfg %||% list(),
+          item$final %||% tibble::tibble(),
+          item$pre_act %||% tibble::tibble()
+        )
+      } else {
+        list(
+          map = tibble::tibble(MergedSplitName = character(), ComponentSplit = character()),
+          issues = character(0)
+        )
+      }
+
+      item$rae_totals <- if (isTRUE(has_processed_splits)) {
+        export_metric_totals_from_rae(d, item$cfg %||% list(), gcfg %||% list(), item$name %||% "")
+      } else {
+        empty_export_metric_totals()
+      }
+      item$canonical_totals <- build_canonical_export_totals(
+        item$rae_totals,
+        item$merge_resolved %||% list(
+          map = tibble::tibble(MergedSplitName = character(), ComponentSplit = character()),
+          issues = character(0)
+        )
+      )
+      item
+    }
+
+    ensure_export_payload <- function(snapshot) {
+      if (is.null(snapshot) || is.null(snapshot$export_data)) return(snapshot)
+      snapshot$export_data <- lapply(
+        snapshot$export_data,
+        ensure_channel_export_payload,
+        d = snapshot$data,
+        gcfg = snapshot$config
+      )
+      snapshot
+    }
+
     build_channel_summary_item <- function(nm, res, cfg_ch, final_splits, d, gcfg) {
       if (is.null(res)) {
         return(list(name = nm, processed = FALSE, has_warning = FALSE,
@@ -589,7 +1047,8 @@ mod_export_server <- function(id, results, data, config, channels,
     build_file_dims <- function(export_data, d, ch_list) {
       total_splits <- sum(vapply(export_data, function(x) nrow(x$final), integer(1)))
       total_composition_rows <- sum(vapply(export_data, function(x) {
-        nrow((x$merge_resolved %||% list(map = tibble::tibble()))$map)
+        merges <- extract_export_merges(x$cfg %||% list())
+        sum(vapply(merges, function(m) length(m$Components %||% character(0)), integer(1)))
       }, integer(1)))
 
       in_vars <- if (!is.null(d$details) &&
@@ -613,9 +1072,10 @@ mod_export_server <- function(id, results, data, config, channels,
 
       nonfocus_n <- if (!is.null(d$side_mapping_nonfocus))
         nrow(d$side_mapping_nonfocus) else 0L
-      seed_has_geo <- !is.null(d$channels_rois) && "Geography" %in% names(d$channels_rois)
-      seed_roi_cols <- if (!is.null(d$channels_rois)) {
-        setdiff(names(d$channels_rois)[sapply(d$channels_rois, is.numeric)],
+      rois_for_dims <- clean_roi_columns(d$channels_rois)
+      seed_has_geo <- !is.null(rois_for_dims) && "Geography" %in% names(rois_for_dims)
+      seed_roi_cols <- if (!is.null(rois_for_dims)) {
+        setdiff(names(rois_for_dims)[sapply(rois_for_dims, is.numeric)],
                 c("MainModelVariableName", "Channel"))
       } else character(0)
       seed_cols <- 6L + as.integer(seed_has_geo) + length(seed_roi_cols)
@@ -650,15 +1110,6 @@ mod_export_server <- function(id, results, data, config, channels,
         if (!nrow(pre_act)) pre_act <- final
         final_cost <- final_spend_splits(res, cfg, nm)
         pre_cost <- pre_merge_spend_splits(clean, cfg, nm)
-        merge_resolved <- if (!is.null(res) && nrow(final) && length(extract_export_merges(cfg))) {
-          resolve_export_merge_map(cfg, final, pre_act)
-        } else {
-          list(
-            map = tibble::tibble(MergedSplitName = character(),
-                                 ComponentSplit = character()),
-            issues = character(0)
-          )
-        }
         list(
           name = nm,
           res = res,
@@ -668,7 +1119,9 @@ mod_export_server <- function(id, results, data, config, channels,
           pre_act = pre_act,
           final_cost = final_cost,
           pre_cost = pre_cost,
-          merge_resolved = merge_resolved
+          merge_resolved = NULL,
+          rae_totals = NULL,
+          canonical_totals = NULL
         )
       })
       names(export_data) <- names(ch_list)
@@ -684,13 +1137,6 @@ mod_export_server <- function(id, results, data, config, channels,
         )
       })
 
-      merge_issues <- unique(unlist(lapply(export_data, function(x) {
-        issues <- x$merge_resolved$issues %||% character(0)
-        if (!length(issues)) return(character(0))
-        paste0(x$name, ": ", issues)
-      }), use.names = FALSE))
-      merge_issues <- merge_issues[!is.na(merge_issues) & nzchar(merge_issues)]
-
       snap <- list(
         data = d,
         config = gcfg,
@@ -699,7 +1145,7 @@ mod_export_server <- function(id, results, data, config, channels,
         clean_results = clean_list,
         export_data = export_data,
         channel_summary = channel_items,
-        merge_issues = list(count = length(merge_issues), names = merge_issues),
+        merge_issues = list(count = 0L, names = character(0)),
         file_dims = build_file_dims(export_data, d, ch_list)
       )
       if (isTRUE(getOption("pso.export.profile", FALSE)) ||
@@ -751,6 +1197,35 @@ mod_export_server <- function(id, results, data, config, channels,
       )
     })
 
+    is_nonfocus_split <- function(x) {
+      grepl("_Before(\\s+|_)", as.character(x), ignore.case = TRUE)
+    }
+
+    focus_splits_for_export_item <- function(item) {
+      splits <- item$final$VariableSplit %||% character(0)
+      splits <- splits[!is.na(splits) & nzchar(trimws(splits))]
+      unique(splits[!is_nonfocus_split(splits)])
+    }
+
+    focus_geos_for_export_item <- function(item, gcfg) {
+      focus_splits <- focus_splits_for_export_item(item)
+      r <- item$res
+      if (is.null(r) || is.null(r$rag) || !length(focus_splits)) return(character(0))
+      rag <- as.data.frame(r$rag)
+      geo_col <- (r$cross_cols %||% gcfg$cross_cols %||% "Geography")[1]
+      if (!geo_col %in% names(rag)) return(character(0))
+      focus_cols <- intersect(focus_splits, names(rag))
+      if (!length(focus_cols)) return(character(0))
+      has_focus <- rowSums(rag[, focus_cols, drop = FALSE], na.rm = TRUE) > 0
+      sort(unique(trimws(as.character(rag[[geo_col]][has_focus]))))
+    }
+
+    clean_roi_columns <- function(df) {
+      if (is.null(df)) return(df)
+      names(df) <- trimws(gsub("^\ufeff", "", names(df), perl = TRUE))
+      df
+    }
+
     compact_names <- function(x, max_n = 4) {
       x <- unique(x[!is.na(x) & nzchar(trimws(x))])
       if (!length(x)) return("")
@@ -761,9 +1236,9 @@ mod_export_server <- function(id, results, data, config, channels,
 
     roi_issue_summary <- reactive({
       snap <- export_snapshot()
-      roi_df <- snap$data$channels_rois
-      res_list <- snap$results
-      if (is.null(roi_df) || !length(res_list)) {
+      roi_df <- clean_roi_columns(snap$data$channels_rois)
+      export_data <- snap$export_data
+      if (is.null(roi_df) || !length(export_data)) {
         return(list(count = 0L, names = character(0)))
       }
       if (!"MainModelVariableName" %in% names(roi_df)) {
@@ -781,7 +1256,8 @@ mod_export_server <- function(id, results, data, config, channels,
           geo_val = if (has_geo_col) trimws(as.character(Geography %||% "")) else ""
         )
 
-      all_mvs <- dplyr::bind_rows(lapply(names(res_list), function(nm) {
+      all_mvs <- dplyr::bind_rows(lapply(names(export_data), function(nm) {
+        if (!length(focus_splits_for_export_item(export_data[[nm]]))) return(NULL)
         cfg <- snap$channels[[nm]]
         mv <- cfg$model_variable %||% ""
         if (!nzchar(mv)) return(NULL)
@@ -802,13 +1278,8 @@ mod_export_server <- function(id, results, data, config, channels,
           nat_entry <- ch_roi[!nzchar(ch_roi$geo_val), , drop = FALSE]
           if (!nrow(geo_entries) && nrow(nat_entry) > 0) next
 
-          r <- res_list[[nm]]
           gcfg <- snap$config
-          geo_col <- (r$cross_cols %||% gcfg$cross_cols %||% "Geography")[1]
-          rag_geos <- if (!is.null(r) && !is.null(r$rag) &&
-                           geo_col %in% names(as.data.frame(r$rag))) {
-            sort(unique(as.data.frame(r$rag)[[geo_col]]))
-          } else character(0)
+          rag_geos <- focus_geos_for_export_item(export_data[[nm]], gcfg)
           if (length(setdiff(rag_geos, trimws(geo_entries$geo_val))) > 0) {
             missing <- c(missing, nm)
           }
@@ -907,9 +1378,9 @@ mod_export_server <- function(id, results, data, config, channels,
         ),
         if (!rois_missing && (roi_issues$count %||% 0L) > 0L) list(
           severity = "warn", icon = "chart-line",
-          title = paste0(roi_issues$count, " ROI coverage warning",
+          title = paste0(roi_issues$count, " focus ROI coverage warning",
                          if (roi_issues$count != 1) "s" else ""),
-          detail = "Some channels or geographies are missing ROI coverage.",
+          detail = "Some focus-period channels or geographies are missing ROI coverage.",
           names = roi_issues$names
         )
       ))
@@ -1126,7 +1597,7 @@ mod_export_server <- function(id, results, data, config, channels,
 
     output$roi_coverage <- renderUI({
       req(data()$channels_rois)
-      roi_df <- data()$channels_rois
+      roi_df <- clean_roi_columns(data()$channels_rois)
 
       if (!"MainModelVariableName" %in% names(roi_df))
         return(div(class = "roi-box-error",
@@ -1135,8 +1606,8 @@ mod_export_server <- function(id, results, data, config, channels,
                                  class = "roi-error-msg"))))
 
       snap <- export_snapshot()
-      res_list <- snap$results
-      if (!length(res_list)) return(NULL)
+      export_data <- snap$export_data
+      if (!length(export_data)) return(NULL)
 
       has_geo_col  <- "Geography" %in% names(roi_df)
       normalize_mv <- function(x)
@@ -1145,7 +1616,8 @@ mod_export_server <- function(id, results, data, config, channels,
       roi_num_cols <- setdiff(names(roi_df)[sapply(roi_df, is.numeric)],
                               c("MainModelVariableName"))
 
-      all_mvs <- dplyr::bind_rows(lapply(names(res_list), function(nm) {
+      all_mvs <- dplyr::bind_rows(lapply(names(export_data), function(nm) {
+        if (!length(focus_splits_for_export_item(export_data[[nm]]))) return(NULL)
         cfg <- snap$channels[[nm]]; mv <- cfg$model_variable %||% ""
         if (!nzchar(mv)) return(NULL)
         tibble::tibble(Channel = nm, MainModelVariableName = mv,
@@ -1162,10 +1634,8 @@ mod_export_server <- function(id, results, data, config, channels,
         n_warn    <- 0L
         ch_blocks <- lapply(seq_len(nrow(all_mvs)), function(i) {
           nm      <- all_mvs$Channel[i]; mv_n <- all_mvs$mv_norm[i]
-          r       <- res_list[[nm]]; gcfg <- snap$config
-          geo_col <- (r$cross_cols %||% gcfg$cross_cols %||% "Geography")[1]
-          rag_geos <- if (!is.null(r) && !is.null(r$rag))
-            sort(unique(as.data.frame(r$rag)[[geo_col]])) else character(0)
+          gcfg <- snap$config
+          rag_geos <- focus_geos_for_export_item(export_data[[nm]], gcfg)
           ch_roi      <- roi_norm[roi_norm$mv_norm == mv_n, , drop = FALSE]
           geo_entries <- ch_roi[nzchar(ch_roi$geo_val), , drop = FALSE]
           nat_entry   <- ch_roi[!nzchar(ch_roi$geo_val), , drop = FALSE]
@@ -1211,9 +1681,9 @@ mod_export_server <- function(id, results, data, config, channels,
           }
         })
         summary_bar <- if (n_warn == 0)
-          div(class = "roi-box-ok mb-2",
-              div(class = "card-header-inner",
-                  tags$span(paste0("All ", nrow(all_mvs), " channel(s) have ROI coverage."),
+              div(class = "roi-box-ok mb-2",
+                  div(class = "card-header-inner",
+                  tags$span(paste0("All ", nrow(all_mvs), " focus channel(s) have ROI coverage."),
                             class = "roi-ok-msg")))
         else
           div(class = "roi-box-warn mb-2",
@@ -1232,7 +1702,7 @@ mod_export_server <- function(id, results, data, config, channels,
         if (n_missing == 0) {
           div(class = "roi-box-ok",
               div(class = "card-header-inner",
-                  tags$span(paste0("All ", n_total, " channel(s) matched with ROI values."),
+                  tags$span(paste0("All ", n_total, " focus channel(s) matched with ROI values."),
                             class = "roi-ok-msg")))
         } else {
           missing_rows <- checked %>% dplyr::filter(!.has_roi) %>%
@@ -1242,7 +1712,7 @@ mod_export_server <- function(id, results, data, config, channels,
               div(class = "card-header-between mb-2",
                   div(class = "card-header-inner",
                       tags$strong(paste0(n_missing, " of ", n_total,
-                                         " channel(s) have no ROI"), class = "roi-warn-title")),
+                                         " focus channel(s) have no ROI"), class = "roi-warn-title")),
                   tags$span(paste0(n_matched, "/", n_total, " matched"),
                             class = "badge-roi-count")),
               div(class = "roi-warn-list",
@@ -1406,6 +1876,12 @@ mod_export_server <- function(id, results, data, config, channels,
         r   <- res_list[[nm]]
         cfg <- channels_list[[nm]]
         if (is.null(r) || is.null(r$rag)) return(NULL)
+        roi_file <- clean_roi_columns(d$channels_rois)
+        snap_ch <- NULL
+        if (!is.null(snapshot) && !is.null(snapshot$export_data) &&
+            !is.null(snapshot$export_data[[nm]])) {
+          snap_ch <- ensure_channel_export_payload(snapshot$export_data[[nm]], d, gcfg)
+        }
 
         rag_df     <- as.data.frame(r$rag)
         cross_cols <- r$cross_cols %||% gcfg$cross_cols %||% "Geography"
@@ -1418,7 +1894,7 @@ mod_export_server <- function(id, results, data, config, channels,
         split_order_str <- paste(cfg$split_columns %||% "VariableName", collapse = "|")
 
         channel_from_roi <- {
-          rois <- d$channels_rois
+          rois <- roi_file
           if (!is.null(rois) &&
               all(c("MainModelVariableName", "Channel") %in% names(rois))) {
             mv       <- cfg$model_variable %||% nm
@@ -1429,9 +1905,41 @@ mod_export_server <- function(id, results, data, config, channels,
           } else nm
         }
 
+        metric_seed <- if (!is.null(snap_ch) &&
+                           !is.null(snap_ch$canonical_totals) &&
+                           nrow(snap_ch$canonical_totals$seed_focus_totals %||% tibble::tibble()) > 0) {
+          snap_ch$canonical_totals$seed_focus_totals
+        } else if (!is.null(snap_ch) &&
+                   !is.null(snap_ch$rae_totals)) {
+          snap_ch$rae_totals$seed
+        } else {
+          export_metric_totals_from_rae(d, cfg, gcfg, nm)$seed
+        }
+        if (!is.null(metric_seed) && nrow(metric_seed) > 0) {
+          has_geo_roi_col <- !is.null(roi_file) &&
+            "Geography" %in% names(roi_file)
+          result <- metric_seed
+          if (!"Geography" %in% names(result))
+            result$Geography <- NA_character_
+          if (!has_geo_roi_col && "Geography" %in% names(result))
+            result$Geography <- NA_character_
+          if (!"total_spend" %in% names(result))
+            result$total_spend <- NA_real_
+          result <- result %>%
+            dplyr::filter(.data$total_activity > 0) %>%
+            dplyr::mutate(
+              Channel = channel_from_roi,
+              MainModelVariableName = cfg$model_variable %||% NA_character_,
+              SplitOrder = split_order_str
+            ) %>%
+            dplyr::select(VariableSplit, Geography, total_activity, total_spend,
+                          Channel, MainModelVariableName, SplitOrder)
+          if (nrow(result)) return(result)
+        }
+
         all_split_cols <- setdiff(names(rag_df)[sapply(rag_df, is.numeric)], id_in_rag)
-        final_splits <- if (!is.null(snapshot$export_data[[nm]])) {
-          snapshot$export_data[[nm]]$final
+        final_splits <- if (!is.null(snap_ch)) {
+          snap_ch$final
         } else {
           final_activity_splits(r, cfg, nm)
         }
@@ -1453,8 +1961,8 @@ mod_export_server <- function(id, results, data, config, channels,
         } else rag_df
 
         periods <- cs_period$Period
-        has_geo_roi_col <- !is.null(d$channels_rois) &&
-          "Geography" %in% names(d$channels_rois)
+        has_geo_roi_col <- !is.null(roi_file) &&
+          "Geography" %in% names(roi_file)
 
         if (has_geo_roi_col && geo_col %in% names(cs_period)) {
           geo_vals <- sort(unique(cs_period[[geo_col]]))
@@ -1532,19 +2040,41 @@ mod_export_server <- function(id, results, data, config, channels,
         act_df <- dplyr::select(act_df, -Geography)
 
       seed_roi_cols <- character(0)
-      if (!is.null(d$channels_rois) && nrow(d$channels_rois) > 0) {
+      roi_file <- clean_roi_columns(d$channels_rois)
+      if (!is.null(roi_file) && nrow(roi_file) > 0) {
         tryCatch({
-          roi_df <- d$channels_rois
+          roi_df <- roi_file
           if (!"MainModelVariableName" %in% names(roi_df))
             return(format_seed_for_indices(act_df))
-          roi_num_cols <- setdiff(names(roi_df)[sapply(roi_df, is.numeric)], names(act_df))
+
+          roi_meta_cols <- c(
+            "MainModelVariableName", "Channel", "Geography",
+            "Sourced VariableName", "VariableSplit", "SplitOrder"
+          )
+          roi_named_cols <- names(roi_df)[
+            stringr::str_detect(names(roi_df), stringr::regex("\\bROI\\b|ROI", ignore_case = TRUE))
+          ]
+          roi_numeric_cols <- names(roi_df)[sapply(roi_df, is.numeric)]
+          roi_num_cols <- unique(c(roi_named_cols, roi_numeric_cols))
+          roi_num_cols <- setdiff(roi_num_cols, union(roi_meta_cols, names(act_df)))
           if (!length(roi_num_cols))
             return(format_seed_for_indices(act_df))
+
+          for (roi_col in roi_num_cols) {
+            if (!is.numeric(roi_df[[roi_col]])) {
+              roi_df[[roi_col]] <- suppressWarnings(as.numeric(
+                gsub("%", "", gsub(",", "", as.character(roi_df[[roi_col]])))
+              ))
+            }
+          }
           seed_roi_cols <- roi_num_cols
 
-          normalize_mv <- function(x)
-            trimws(stringr::str_remove(as.character(x),
-                                       stringr::regex("(_Total)+$", ignore_case = TRUE)))
+          normalize_roi_key <- function(x) {
+            x <- trimws(as.character(x %||% ""))
+            x <- stringr::str_remove(x, stringr::regex("(_Total)+$", ignore_case = TRUE))
+            x <- stringr::str_squish(x)
+            tolower(x)
+          }
           has_geo_col <- "Geography" %in% names(roi_df)
           src_col     <- "Sourced VariableName"
           has_src_col <- src_col %in% names(roi_df) &&
@@ -1554,30 +2084,24 @@ mod_export_server <- function(id, results, data, config, channels,
 
           roi_norm <- roi_df %>%
             dplyr::mutate(
-              mv_norm = normalize_mv(MainModelVariableName),
+              mv_norm = normalize_roi_key(MainModelVariableName),
               geo_val = if (has_geo_col) trimws(as.character(Geography %||% "")) else "",
               sv_val  = if (has_src_col)
                 trimws(as.character(.data[[src_col]] %||% "")) else "")
 
           roi_by_mv <- split(roi_norm, roi_norm$mv_norm, drop = TRUE)
 
-          matched_rois <- lapply(seq_len(nrow(act_df)), function(i) {
-            mv_norm <- normalize_mv(act_df$MainModelVariableName[i] %||% "")
-            geo_val <- if (is.null(act_df$Geography[i]) || is.na(act_df$Geography[i])) ""
-            else trimws(as.character(act_df$Geography[i]))
-            vs <- trimws(as.character(act_df$VariableSplit[i]))
+          pick_roi <- function(cands, geo_val, vs) {
+            if (is.null(cands) || !nrow(cands)) return(NULL)
 
-            cands <- roi_by_mv[[mv_norm]]
-            if (is.null(cands) || !nrow(cands)) return(empty_roi)
-
-            if (nzchar(geo_val)) {
+            if (nzchar(geo_val) && "geo_val" %in% names(cands)) {
               m1 <- cands[cands$geo_val == geo_val, , drop = FALSE]
               if (nrow(m1) > 0) return(as.list(m1[1, roi_num_cols, drop = FALSE]))
             }
             if (has_src_col) {
               sv_cands <- cands[nzchar(cands$sv_val), , drop = FALSE]
               if (nrow(sv_cands) > 0) {
-                pm <- startsWith(vs, sv_cands$sv_val)
+                pm <- startsWith(tolower(vs), tolower(sv_cands$sv_val))
                 if (any(pm)) {
                   best <- sv_cands[pm, , drop = FALSE]
                   best <- best[which.max(nchar(best$sv_val)), , drop = FALSE]
@@ -1587,6 +2111,23 @@ mod_export_server <- function(id, results, data, config, channels,
             }
             m3 <- cands[!nzchar(cands$geo_val) & !nzchar(cands$sv_val), , drop = FALSE]
             if (nrow(m3) > 0) return(as.list(m3[1, roi_num_cols, drop = FALSE]))
+            NULL
+          }
+
+          matched_rois <- lapply(seq_len(nrow(act_df)), function(i) {
+            mv_norm <- normalize_roi_key(act_df$MainModelVariableName[i] %||% "")
+            geo_val <- if ("Geography" %in% names(act_df) &&
+                           !is.null(act_df$Geography[i]) &&
+                           !is.na(act_df$Geography[i])) {
+              trimws(as.character(act_df$Geography[i]))
+            } else {
+              ""
+            }
+            vs <- trimws(as.character(act_df$VariableSplit[i]))
+
+            hit <- pick_roi(roi_by_mv[[mv_norm]], geo_val, vs)
+            if (!is.null(hit)) return(hit)
+
             empty_roi
           })
 
@@ -1784,7 +2325,7 @@ mod_export_server <- function(id, results, data, config, channels,
       }
 
       channel_from_roi <- function(nm, cfg) {
-        rois <- if (!is.null(d)) d$channels_rois else NULL
+        rois <- if (!is.null(d)) clean_roi_columns(d$channels_rois) else NULL
         if (!is.null(rois) &&
             all(c("MainModelVariableName", "Channel") %in% names(rois))) {
           mv <- cfg$model_variable %||% nm
@@ -1800,7 +2341,15 @@ mod_export_server <- function(id, results, data, config, channels,
         res <- res_list[[nm]]
         clean <- clean_list[[nm]] %||% list()
         cfg <- channels_list[[nm]] %||% list()
-        snap_ch <- snapshot$export_data[[nm]] %||% NULL
+        snap_ch <- NULL
+        if (!is.null(snapshot) && !is.null(snapshot$export_data) &&
+            !is.null(snapshot$export_data[[nm]])) {
+          snap_ch <- ensure_channel_export_payload(
+            snapshot$export_data[[nm]],
+            d,
+            snapshot$config %||% list()
+          )
+        }
         final <- if (!is.null(snap_ch)) snap_ch$final else final_activity_splits(res, cfg, nm)
         if (!nrow(final)) return(NULL)
 
@@ -1816,14 +2365,42 @@ mod_export_server <- function(id, results, data, config, channels,
         }
         merge_map <- resolved$map
         lineage <- merge_map
-        if (!nrow(lineage)) return(NULL)
 
         ch_name <- channel_from_roi(nm, cfg)
         mmv <- cfg$model_variable %||% nm
-        lookup_component_activity <- make_metric_lookup(pre_act, "total_activity", cfg)
-        lookup_component_spend <- make_metric_lookup(pre_cost, "total_spend", cfg)
-        lookup_merged_activity <- make_metric_lookup(final, "total_activity", cfg)
-        lookup_merged_spend <- make_metric_lookup(current_cost, "total_spend", cfg)
+        canonical <- if (!is.null(snap_ch)) snap_ch$canonical_totals else NULL
+        if (!is.null(canonical) &&
+            nrow(canonical$component_focus_totals %||% tibble::tibble()) > 0 &&
+            nrow(canonical$final_focus_totals %||% tibble::tibble()) > 0) {
+          lineage <- canonical$merge_map
+          if (!nrow(lineage)) return(NULL)
+          component_metrics <- canonical$component_focus_totals %>%
+            dplyr::rename(
+              total_activity = Component_Activity,
+              total_spend = Component_Spend
+            )
+          final_metrics <- canonical$final_focus_totals %>%
+            dplyr::rename(
+              total_activity = Activity,
+              total_spend = Spend
+            )
+        } else {
+          if (!nrow(lineage)) return(NULL)
+          metric_pre_act <- if (!is.null(snap_ch) && !is.null(snap_ch$rae_totals))
+            snap_ch$rae_totals$activity else pre_act
+          metric_pre_cost <- if (!is.null(snap_ch) && !is.null(snap_ch$rae_totals))
+            snap_ch$rae_totals$spend else pre_cost
+          component_metrics <- dplyr::full_join(
+            metric_pre_act %>% dplyr::select(VariableSplit, total_activity),
+            metric_pre_cost %>% dplyr::select(VariableSplit, total_spend),
+            by = "VariableSplit"
+          )
+          final_metrics <- component_metrics
+        }
+        lookup_component_activity <- make_metric_lookup(component_metrics, "total_activity", cfg)
+        lookup_component_spend <- make_metric_lookup(component_metrics, "total_spend", cfg)
+        lookup_merged_activity <- make_metric_lookup(final_metrics, "total_activity", cfg)
+        lookup_merged_spend <- make_metric_lookup(final_metrics, "total_spend", cfg)
 
         lineage %>%
           dplyr::mutate(
@@ -1894,6 +2471,11 @@ mod_export_server <- function(id, results, data, config, channels,
         clean_snap    <- snap$clean_results
         channels_snap <- snap$channels
         gcfg_snap     <- snap$config
+        heavy_snap    <- NULL
+        get_heavy_snap <- function() {
+          if (is.null(heavy_snap)) heavy_snap <<- ensure_export_payload(snap)
+          heavy_snap
+        }
 
         withProgress(message = "Building export files...", value = 0, {
 
@@ -1929,8 +2511,9 @@ mod_export_server <- function(id, results, data, config, channels,
 
           incProgress(0.20, message = "Seed for Indices...")
           tryCatch({
+            payload_snap <- get_heavy_snap()
             df <- build_activity_rois(d_snap, res_snap, channels_snap, gcfg_snap,
-                                      snapshot = snap)
+                                      snapshot = payload_snap)
             if (!is.null(df) && nrow(df) > 0) {
               f <- file.path(tmp_dir, export_file_names$seed_indices)
               readr::write_csv(df, f, na = ""); written <- c(written, f)
@@ -1940,8 +2523,9 @@ mod_export_server <- function(id, results, data, config, channels,
 
           incProgress(0.20, message = "Split Composition...")
           tryCatch({
+            payload_snap <- get_heavy_snap()
             df <- build_split_composition(res_snap, clean_snap, channels_snap, d_snap,
-                                          snapshot = snap)
+                                          snapshot = payload_snap)
             if (!is.null(df) && nrow(df) > 0) {
               f <- file.path(tmp_dir, export_file_names$split_composition)
               readr::write_csv(df, f, na = ""); written <- c(written, f)
@@ -1951,7 +2535,7 @@ mod_export_server <- function(id, results, data, config, channels,
 
           incProgress(0.15, message = "Channel configuration...")
           tryCatch({
-            df <- export_channels_csv(channels_snap)
+            df <- export_channels_csv(channels_snap, config())
             if (!is.null(df) && nrow(df) > 0) {
               f <- file.path(tmp_dir, export_file_names$channel_config)
               readr::write_csv(df, f, na = ""); written <- c(written, f)

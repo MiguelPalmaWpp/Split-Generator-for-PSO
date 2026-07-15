@@ -302,9 +302,10 @@ read_main_data <- function(path, ext) {
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── export_channels_csv ────────────────────────────────────────────────────
-export_channels_csv <- function(channels) {
+export_channels_csv <- function(channels, global_config = NULL) {
   if (!length(channels)) return(data.frame())
   rows <- list()
+  update_label <- global_config$update_label %||% ""
   for (nm in names(channels)) {
     cfg <- channels[[nm]]
     rows <- c(rows, list(tibble::tibble(
@@ -315,7 +316,12 @@ export_channels_csv <- function(channels) {
       Splits     = "",
       ActivityKeyword = cfg$activity_keyword %||% "",
       SpendKeyword    = cfg$spend_keyword %||% "",
-      VarNameInclude  = paste(cfg$varname_include %||% character(0), collapse = " ||| ")
+      VarNameInclude  = paste(cfg$varname_include %||% character(0), collapse = " ||| "),
+      UpdateLabel = update_label,
+      TimeBreakLabel = cfg$time_break_label %||% "",
+      ConfigVersion = "2",
+      BreakMissingPartValue = cfg$break_missing_part_value %||% "Total",
+      BreakDefaultSeparator = cfg$break_default_separator %||% " - "
     )))
     for (b in cfg$dimension_breaks %||% list()) {
       rows <- c(rows, list(tibble::tibble(
@@ -326,7 +332,12 @@ export_channels_csv <- function(channels) {
         Splits     = paste(c(b$separator, b$n_parts), collapse = "|"),
         ActivityKeyword = "",
         SpendKeyword    = "",
-        VarNameInclude  = ""
+        VarNameInclude  = "",
+        UpdateLabel = "",
+        TimeBreakLabel = "",
+        ConfigVersion = "",
+        BreakMissingPartValue = b$missing_part_value %||% cfg$break_missing_part_value %||% "Total",
+        BreakDefaultSeparator = cfg$break_default_separator %||% " - "
       )))
     }
     for (m in cfg$saved_merges %||% list()) {
@@ -339,7 +350,12 @@ export_channels_csv <- function(channels) {
         Splits     = paste(unlist(m$merged), collapse = " ||| "),
         ActivityKeyword = "",
         SpendKeyword    = "",
-        VarNameInclude  = ""
+        VarNameInclude  = "",
+        UpdateLabel = "",
+        TimeBreakLabel = "",
+        ConfigVersion = "",
+        BreakMissingPartValue = "",
+        BreakDefaultSeparator = ""
       )))
     }
   }

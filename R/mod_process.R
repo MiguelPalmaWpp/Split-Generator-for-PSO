@@ -50,6 +50,7 @@ mod_process_ui <- function(id) {
                   uiOutput(ns("threshold_ui")),
                   uiOutput(ns("merge_plan_toolbar")),
                   uiOutput(ns("merge_toolbar")),
+                  uiOutput(ns("config_merge_report")),
                   DTOutput(ns("diag_act"))),
         nav_panel("Spend",       DTOutput(ns("diag_cost"))),
         nav_panel("Total Check", DTOutput(ns("diag_check")))
@@ -168,10 +169,13 @@ mod_process_server <- function(id, data, config, channels,
         paste(cfg$varname_include %||% character(0), collapse = "|"),
         cfg$activity_keyword %||% "",
         cfg$spend_keyword %||% "",
+        cfg$time_break_label %||% "",
+        cfg$break_missing_part_value %||% "Total",
         paste(cfg$split_columns %||% character(0), collapse = "|"),
         paste(vapply(cfg$dimension_breaks %||% list(), function(b)
           paste(b$column %||% "", b$separator %||% "",
-                b$n_parts %||% "", paste(b$names %||% character(0), collapse = "~"),
+                b$n_parts %||% "", b$missing_part_value %||% "",
+                paste(b$names %||% character(0), collapse = "~"),
                 sep = ":"), character(1)), collapse = "|"),
         paste(vapply(cfg$saved_merges %||% list(), function(m)
           paste(m$new_name %||% "", isTRUE(m$active),
@@ -329,7 +333,9 @@ mod_process_server <- function(id, data, config, channels,
         processed <- !is.null(results_store[[nm]])
         stale     <- nm %in% stale_names()
         failed    <- !is.null(process_errors[[nm]])
-        n_merges  <- length(get_log(nm))
+        merge_log <- get_log(nm)
+        n_merges  <- sum(vapply(merge_log, \(m) isTRUE(m$applied %||% TRUE), logical(1)))
+        n_review  <- sum(vapply(merge_log, \(m) identical(m$status %||% "", "needs_review"), logical(1)))
         is_sel    <- identical(input$channel_select, nm)
         saved_m   <- channels()[[nm]]$saved_merges %||% list()
         n_saved   <- sum(vapply(saved_m, \(m) isTRUE(m$active), logical(1)))
@@ -349,6 +355,8 @@ mod_process_server <- function(id, data, config, channels,
                 tags$span("Processed", class = "badge-ready"),
               if (processed && n_merges > 0)
                 tags$span(paste0(n_merges, "m"), class = "badge-merge-count"),
+              if (processed && n_review > 0)
+                tags$span("Merge review", class = "badge-stale"),
               if (n_saved > 0)
                 tags$span(paste0(n_saved, " saved"), class = "badge-saved",
                           title = paste0(n_saved,
@@ -375,7 +383,7 @@ mod_process_server <- function(id, data, config, channels,
         if (!length(cfg_data)) {
           readr::write_csv(data.frame(), file); return()
         }
-        df <- export_channels_csv(cfg_data)
+        df <- export_channels_csv(cfg_data, config())
         if (nrow(df) > 0 && "Type" %in% names(df)) {
           cfg_idx <- which(trimws(df$Type) == "Config")
           if (length(cfg_idx) > 0) {
@@ -496,6 +504,7 @@ mod_process_server <- function(id, data, config, channels,
       if (!is.null(res_stored)) {
         active_saved <- Filter(\(m) isTRUE(m$active), cfg$saved_merges %||% list())
         n_applied <- 0L
+        config_merge_report <- list()
         
         clean_store[[nm]] <- res_stored
         
@@ -504,33 +513,64 @@ mod_process_server <- function(id, data, config, channels,
                                         " merge(s) from config..."),
                        value = 0.5, {
                           for (m in active_saved) {
-                            rag_before <- names(res_stored$rag)
-                            merged_names <- unlist(m$merged %||% character(0))
                             res_stored <- tryCatch(
-                              apply_single_merge(res_stored, m, cfg),
-                              error = function(e) res_stored)
-                            if (m$new_name %in% names(res_stored$rag) &&
-                                length(intersect(merged_names, rag_before)) > 0)
+                              apply_single_merge(res_stored, m, cfg, notify = FALSE),
+                              error = function(e) {
+                                tmp <- res_stored
+                                attr(tmp, "merge_status") <- list(
+                                  applied = FALSE,
+                                  new_name = m$new_name %||% "",
+                                  view = m$view %||% "focus",
+                                  requested = unlist(m$merged %||% character(0)),
+                                  matched = character(0),
+                                  missing = unlist(m$merged %||% character(0)),
+                                  ambiguous = character(0),
+                                  closest_examples = character(0),
+                                  matched_count = 0L,
+                                  requested_count = length(unlist(m$merged %||% character(0)))
+                                )
+                                tmp
+                              })
+                            status <- attr(res_stored, "merge_status") %||% list(
+                              applied = FALSE,
+                              new_name = m$new_name %||% "",
+                              view = m$view %||% "focus",
+                              requested = unlist(m$merged %||% character(0)),
+                              matched = character(0),
+                              missing = unlist(m$merged %||% character(0)),
+                              ambiguous = character(0),
+                              closest_examples = character(0),
+                              matched_count = 0L,
+                              requested_count = length(unlist(m$merged %||% character(0)))
+                            )
+                            status$source <- "config"
+                            status$status <- if (isTRUE(status$applied)) "applied" else "needs_review"
+                            config_merge_report <- c(config_merge_report, list(status))
+                            if (isTRUE(status$applied))
                               n_applied <- n_applied + 1L
                           }
                         })
         }
         
         set_res(nm, res_stored); set_orig(nm, res_stored)
-        set_log(nm, list());     set_hist(nm, list())
+        set_log(nm, config_merge_report); set_hist(nm, list())
         set_error(nm, NULL)
         result_signatures[[nm]] <- channel_signature(cfg)
         
+        n_review <- length(config_merge_report) - n_applied
         msg <- paste0(nm, " processed",
-                      if (n_applied > 0)
-                        paste0(" + ", n_applied, " merge(s) from config") else "")
+                      if (length(config_merge_report) > 0)
+                        paste0("; ", n_applied, "/", length(config_merge_report),
+                               " config merge(s) applied",
+                               if (n_review > 0) paste0(", ", n_review, " need review") else "")
+                      else "")
         if (isTRUE(getOption("pso.profile", FALSE))) {
           elapsed <- round((proc.time() - t_channel)[["elapsed"]], 3)
           message("[mod_process] ", nm, " processed in ", elapsed, "s")
         }
         showNotification(msg,
-                         type = "message",
-                         duration = 4)
+                         type = if (n_review > 0) "warning" else "message",
+                         duration = if (n_review > 0) 8 else 4)
         rm(res_stored, rags_nm)
         if (isTRUE(do_gc)) gc(verbose = FALSE, full = FALSE)
       }
@@ -543,69 +583,13 @@ mod_process_server <- function(id, data, config, channels,
       imported <- imported[imported %in% names(channels())]
       if (!length(imported)) return()
 
-      if (isTRUE(is_batch_processing())) {
-        showNotification(
-          paste0("Config applied to ", length(imported),
-                 " channel(s). Processing is already running; use Reprocess Changed when it finishes."),
-          type = "warning", duration = 8)
-        return()
-      }
-
-      d <- data()
-      gcfg <- config()
-      missing_ready <- c(
-        if (is.null(d$all_rags)) "RAE Datafile",
-        if (is.null(d$analytical)) "Analytical Dataset",
-        if (is.null(d$dates_df)) "dates",
-        if (is.null(gcfg$start_report_date) || is.null(gcfg$end_report_date)) "Global Parameters",
-        if (is.null(gcfg$cross_cols)) "cross-sections"
-      )
-      if (length(missing_ready)) {
-        results_trigger(isolate(results_trigger()) + 1L)
-        showNotification(
-          paste0("Config applied, but auto-processing was skipped. Missing: ",
-                 paste(missing_ready, collapse = ", "),
-                 ". The imported channels need reprocess."),
-          type = "warning", duration = 10)
-        return()
-      }
-
-      n_ok <- 0L
-      n_err <- 0L
-      t_start <- proc.time()
-      is_batch_processing(TRUE)
-      on.exit({
-        is_batch_processing(FALSE)
-        results_trigger(isolate(results_trigger()) + 1L)
-      }, add = TRUE)
-
-      withProgress(message = paste0("Auto-processing ", length(imported),
-                                    " imported channel(s)..."),
-                   value = 0, {
-                     for (i in seq_along(imported)) {
-                       nm <- imported[[i]]
-                       setProgress((i - 1) / length(imported),
-                                   message = paste0("(", i, "/", length(imported), ") ", nm))
-                       before_err <- process_errors[[nm]]
-                       run_one(nm, do_gc = FALSE)
-                       after_err <- process_errors[[nm]]
-                       if (is.null(after_err)) n_ok <- n_ok + 1L
-                       else if (!identical(before_err, after_err) || !is.null(after_err)) n_err <- n_err + 1L
-                     }
-                     setProgress(1, message = "Done")
-                   })
-      gc(verbose = FALSE, full = TRUE)
-
-      elapsed <- round((proc.time() - t_start)[["elapsed"]], 1)
-      batch_summary_state(list(processed = n_ok, already_done = 0L,
-                               skipped = 0L, failed = n_err,
-                               elapsed = elapsed))
       showNotification(
-        paste0("Config applied. Auto-processed ", n_ok, " channel(s)",
-               if (n_err > 0) paste0("; ", n_err, " failed") else "",
-               " in ", elapsed, "s."),
-        type = if (n_err > 0) "warning" else "message",
-        duration = 7)
+        paste0("Config imported for ", length(imported),
+               " channel(s). Review Channels, then process when ready."),
+        type = "message",
+        duration = 7
+      )
+      results_trigger(isolate(results_trigger()) + 1L)
     }, ignoreInit = TRUE)
     
     observeEvent(input$btn_one, {
@@ -750,24 +734,59 @@ mod_process_server <- function(id, data, config, channels,
                          active_saved <- Filter(\(m) isTRUE(m$active), cfg$saved_merges %||% list())
                          clean_store[[nm]] <- res_stored
                          n_applied <- 0L
+                         config_merge_report <- list()
                          
                           if (length(active_saved) > 0) {
                             for (m in active_saved) {
-                              rag_before <- names(res_stored$rag)
-                              merged_names <- unlist(m$merged %||% character(0))
-                              res_stored <- tryCatch(apply_single_merge(res_stored, m, cfg),
-                                                     error = function(e) res_stored)
-                              if (m$new_name %in% names(res_stored$rag) &&
-                                  length(intersect(merged_names, rag_before)) > 0)
+                              res_stored <- tryCatch(
+                                apply_single_merge(res_stored, m, cfg, notify = FALSE),
+                                error = function(e) {
+                                  tmp <- res_stored
+                                  attr(tmp, "merge_status") <- list(
+                                    applied = FALSE,
+                                    new_name = m$new_name %||% "",
+                                    view = m$view %||% "focus",
+                                    requested = unlist(m$merged %||% character(0)),
+                                    matched = character(0),
+                                    missing = unlist(m$merged %||% character(0)),
+                                    ambiguous = character(0),
+                                    closest_examples = character(0),
+                                    matched_count = 0L,
+                                    requested_count = length(unlist(m$merged %||% character(0)))
+                                  )
+                                  tmp
+                                })
+                              status <- attr(res_stored, "merge_status") %||% list(
+                                applied = FALSE,
+                                new_name = m$new_name %||% "",
+                                view = m$view %||% "focus",
+                                requested = unlist(m$merged %||% character(0)),
+                                matched = character(0),
+                                missing = unlist(m$merged %||% character(0)),
+                                ambiguous = character(0),
+                                closest_examples = character(0),
+                                matched_count = 0L,
+                                requested_count = length(unlist(m$merged %||% character(0)))
+                              )
+                              status$source <- "config"
+                              status$status <- if (isTRUE(status$applied)) "applied" else "needs_review"
+                              config_merge_report <- c(config_merge_report, list(status))
+                              if (isTRUE(status$applied))
                                 n_applied <- n_applied + 1L
                             }
-                           if (n_applied > 0)
-                             info_msgs <- c(info_msgs, paste0(nm, ": ", n_applied, " merge(s)"))
+                           if (length(config_merge_report) > 0) {
+                             n_review <- length(config_merge_report) - n_applied
+                             info_msgs <- c(info_msgs, paste0(
+                               nm, ": ", n_applied, "/", length(config_merge_report),
+                               " config merge(s)",
+                               if (n_review > 0) paste0(" (", n_review, " review)") else ""
+                             ))
+                           }
                          }
                          
                          results_store[[nm]]   <- res_stored
                          original_store[[nm]]  <- res_stored
-                         merge_log_store[[nm]] <- list()
+                         merge_log_store[[nm]] <- config_merge_report
                          history_store[[nm]]   <- list()
                          process_errors[[nm]]  <- NULL
                          result_signatures[[nm]] <- channel_signature(cfg)
@@ -1359,6 +1378,54 @@ mod_process_server <- function(id, data, config, channels,
               actionButton(session$ns("btn_clear"),
                            tagList(icon("xmark"), " Clear"),
                            class = "btn-outline-secondary btn-sm w-100"))))
+    })
+
+    output$config_merge_report <- renderUI({
+      results_trigger()
+      nm <- input$channel_select
+      if (!valid_nm(nm) || is.null(results_store[[nm]])) return(NULL)
+      logs <- get_log(nm)
+      cfg_logs <- Filter(\(x) identical(x$source %||% "", "config"), logs)
+      if (!length(cfg_logs)) return(NULL)
+      n_ok <- sum(vapply(cfg_logs, \(x) isTRUE(x$applied), logical(1)))
+      n_review <- length(cfg_logs) - n_ok
+      review <- Filter(\(x) !isTRUE(x$applied), cfg_logs)
+      detail_rows <- lapply(utils::head(review, 4), function(x) {
+        missing <- c(x$missing %||% character(0), x$ambiguous %||% character(0))
+        missing <- missing[!is.na(missing) & nzchar(missing)]
+        examples <- x$closest_examples %||% character(0)
+        div(
+          class = "config-merge-report-row",
+          tags$strong(x$new_name %||% "Unnamed merge"),
+          tags$span(class = "text-muted",
+                    paste0("Matched ", x$matched_count %||% 0L, "/",
+                           x$requested_count %||% 0L,
+                           if (nzchar(x$view %||% "")) paste0(" | ", x$view) else "")),
+          if (length(missing))
+            tags$small(class = "text-muted",
+                       paste0("Missing: ", paste(utils::head(missing, 3), collapse = " | "),
+                              if (length(missing) > 3) paste0(" +", length(missing) - 3, " more") else "")),
+          if (length(examples))
+            tags$small(class = "text-muted",
+                       paste0("Closest: ", paste(utils::head(examples, 3), collapse = " | ")))
+        )
+      })
+      div(
+        class = paste("config-merge-report", if (n_review > 0) "review" else "ok"),
+        div(class = "config-merge-report-head",
+            tags$strong(if (n_review > 0) "Merge application report" else "Config reproduced"),
+            tags$span(class = if (n_review > 0) "badge-stale" else "badge-ready",
+                      paste0(n_ok, "/", length(cfg_logs), " applied"))),
+        if (n_review > 0)
+          tagList(
+            tags$p(class = "text-muted small mb-1",
+                   "Some saved merges did not match the generated splits for this run."),
+            detail_rows
+          )
+        else
+          tags$p(class = "text-muted small mb-0",
+                 "All saved config merges matched generated splits.")
+      )
     })
     
     observeEvent(input$diag_act_rows_selected, {

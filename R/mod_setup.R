@@ -227,6 +227,7 @@ mod_setup_server <- function(id) {
 
       recognized_items <- lapply(intersect(base_file_kinds, names(rv$file_meta)), function(kind) {
         meta <- rv$file_meta[[kind]]
+        contract <- loaded_file_contract_text(kind)
         list(
           main = paste0(meta$name, " -> ", base_file_labels[[kind]]),
           sub  = paste0(
@@ -235,7 +236,8 @@ mod_setup_server <- function(id) {
             if (!is.null(meta$rows)) paste0(" | ", format(meta$rows, big.mark = ","), " rows") else "",
             if (!is.null(meta$cols)) paste0(" | ", format(meta$cols, big.mark = ","), " cols") else "",
             " | via ", meta$source,
-            " | ", meta$loaded_at
+            " | ", meta$loaded_at,
+            if (nzchar(contract)) paste0(" | ", contract) else ""
           )
         )
       })
@@ -305,8 +307,10 @@ mod_setup_server <- function(id) {
     })
 
     read_csv_header <- function(path, nrows = 5) {
-      data.table::fread(path, nrows = nrows, data.table = FALSE,
-                        stringsAsFactors = FALSE, showProgress = FALSE)
+      clean_data_columns(
+        data.table::fread(path, nrows = nrows, data.table = FALSE,
+                          stringsAsFactors = FALSE, showProgress = FALSE)
+      )
     }
 
     read_first_rdata_object <- function(path) {
@@ -353,6 +357,35 @@ mod_setup_server <- function(id) {
     required_files_ready <- function() {
       !is.null(rv$main_data) && !is.null(rv$analytical) &&
         !is.null(rv$vof_data) && !is.null(rv$details)
+    }
+
+    loaded_file_contract_text <- function(kind) {
+      df <- switch(kind,
+                   main = rv$main_data,
+                   analytical = rv$analytical,
+                   vof = rv$vof_data,
+                   details = rv$details_raw,
+                   rois = rv$channels_rois,
+                   NULL)
+      if (is.null(df)) return("")
+      req_cols <- switch(kind,
+                         main = REQUIRED_COLS,
+                         analytical = "Period",
+                         vof = c("AnalyticalVariableName", "MainModelVariableName", "MinPeriod", "MaxPeriod"),
+                         details = model_details_required_cols,
+                         rois = "MainModelVariableName",
+                         character(0))
+      opt_cols <- switch(kind,
+                         vof = c("Geography", "Geographies", "Metric", "Effect", "MediaChannel", "SubChannel"),
+                         rois = c("ROI", "Geography", "Sourced VariableName", "Channel"),
+                         character(0))
+      contract <- column_contract(df, req_cols, opt_cols)
+      present <- c(contract$present_required, contract$present_optional)
+      missing <- contract$missing_required
+      txt <- paste0("keys: ", paste(head(present, 5), collapse = ", "))
+      if (length(present) > 5) txt <- paste0(txt, " +", length(present) - 5)
+      if (length(missing)) txt <- paste0(txt, " | missing: ", paste(missing, collapse = ", "))
+      txt
     }
 
     batch_summary_badge <- function(label, count, type = "neutral") {
@@ -524,6 +557,7 @@ mod_setup_server <- function(id) {
     load_main_base <- function(file_row, preloaded = NULL, source = "manual") {
       ext <- tools::file_ext(file_row$name)
       df <- preloaded %||% read_main_data(file_row$datapath, ext)
+      df <- clean_data_columns(df)
       if (!validate_required_cols(df, "RAE Datafile")) return(FALSE)
       rv$main_data <- df
       set_file_meta("main", file_row, nrow(rv$main_data), ncol(rv$main_data), source)
@@ -585,6 +619,7 @@ mod_setup_server <- function(id) {
 
     load_analytical_base <- function(file_row, preloaded = NULL, source = "manual") {
       df <- preloaded %||% read_first_rdata_object(file_row$datapath)
+      df <- clean_data_columns(df)
       df <- df[, !duplicated(names(df), fromLast = TRUE)]
       sig <- validate_analytical_signature(df)
       if (!isTRUE(sig$ok)) {
@@ -623,6 +658,7 @@ mod_setup_server <- function(id) {
         as.data.frame(data.table::fread(file_row$datapath, data.table = FALSE,
                                         stringsAsFactors = FALSE,
                                         showProgress = FALSE))
+      vof_raw <- clean_data_columns(vof_raw)
       req_fixed <- c("AnalyticalVariableName", "MainModelVariableName",
                      "MinPeriod", "MaxPeriod")
       miss_vof <- setdiff(req_fixed, names(vof_raw))
@@ -648,6 +684,7 @@ mod_setup_server <- function(id) {
       details_raw <- preloaded %||%
         data.table::fread(file_row$datapath, data.table = FALSE,
                           showProgress = FALSE)
+      details_raw <- clean_data_columns(details_raw)
       sig <- validate_model_details_signature(details_raw)
       if (!isTRUE(sig$ok)) {
         showNotification(sig$reason,
@@ -676,6 +713,7 @@ mod_setup_server <- function(id) {
         else
           data.table::fread(file_row$datapath, data.table = FALSE, showProgress = FALSE)
       }
+      rv$channels_rois <- clean_data_columns(rv$channels_rois)
       sig <- validate_rois_signature(rv$channels_rois)
       if (!isTRUE(sig$ok)) {
         rv$channels_rois <- NULL
@@ -695,7 +733,7 @@ mod_setup_server <- function(id) {
       nm  <- stringr::str_to_lower(file_row$name)
 
       if (ext == "zip") {
-        df <- read_main_data(file_row$datapath, ext)
+        df <- clean_data_columns(read_main_data(file_row$datapath, ext))
         return(list(kind = "main", data = df,
                     reason = "ZIP file read as RAE Datafile"))
       }
@@ -703,6 +741,7 @@ mod_setup_server <- function(id) {
       if (ext == "rdata") {
         obj <- read_first_rdata_object(file_row$datapath)
         if (is.data.frame(obj)) {
+          obj <- clean_data_columns(obj)
           sig <- validate_analytical_signature(obj)
           if (isTRUE(sig$ok))
             return(list(kind = "analytical", data = obj,
@@ -715,7 +754,7 @@ mod_setup_server <- function(id) {
       }
 
       if (ext %in% c("xlsx", "xls")) {
-        df <- readxl::read_excel(file_row$datapath, n_max = 5)
+        df <- clean_data_columns(readxl::read_excel(file_row$datapath, n_max = 5))
         sig <- validate_rois_signature(df)
         if (isTRUE(sig$ok))
           return(list(kind = "rois", data = NULL,

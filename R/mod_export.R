@@ -6,16 +6,18 @@ mod_export_ui <- function(id) {
   ns <- NS(id)
   div(
     uiOutput(ns("summary_strip")),
-    layout_columns(
-      col_widths = c(4, 8),
+    div(
+      class = "export-main-layout",
       card(
-        class = "h-100",
+        class = "export-channel-panel",
         card_header(div(class = "card-header-inner",
                         icon("circle-check", class = "icon-blue-sm"),
                         "Channel Status")),
         uiOutput(ns("channel_status"))
       ),
-      tagList(
+      div(
+        class = "export-right-stack",
+        uiOutput(ns("scwa_workaround")),
         card(
           class = "export-package-panel",
           card_header(div(
@@ -29,7 +31,8 @@ mod_export_ui <- function(id) {
           div(class = "export-contents-pad", uiOutput(ns("export_contents"))),
           uiOutput(ns("roi_coverage")),
           hr(class = "hr-export"),
-          uiOutput(ns("download_section")))
+          uiOutput(ns("download_section"))
+        )
       )
     )
   )
@@ -47,6 +50,45 @@ mod_export_server <- function(id, results, data, config, channels,
       split_composition = "Split Composition.csv",
       channel_config = "Channel Config.csv"
     )
+    scwa_flags <- reactiveVal(setNames(logical(0), character(0)))
+    scwa_channel_cache <- reactiveValues(keys = character(0), values = list())
+
+    profile_export <- function(label, expr) {
+      if (isTRUE(getOption("pso.export.profile", FALSE)) ||
+          isTRUE(getOption("pso.profile", FALSE))) {
+        elapsed <- system.time(out <- force(expr))
+        message(sprintf("[mod_export] %s built in %.3fs", label, elapsed[["elapsed"]]))
+        out
+      } else {
+        force(expr)
+      }
+    }
+
+    scwa_cache_get <- function(key) {
+      keys <- scwa_channel_cache$keys %||% character(0)
+      idx <- match(key, keys)
+      if (is.na(idx)) return(NULL)
+      list(hit = TRUE, value = (scwa_channel_cache$values %||% list())[[idx]])
+    }
+
+    scwa_cache_set <- function(key, value, max_items = 12L) {
+      keys <- scwa_channel_cache$keys %||% character(0)
+      values <- scwa_channel_cache$values %||% list()
+      idx <- match(key, keys)
+      if (!is.na(idx)) {
+        keys <- keys[-idx]
+        values <- values[-idx]
+      }
+      keys <- c(key, keys)
+      values <- c(list(value), values)
+      if (length(keys) > max_items) {
+        keys <- keys[seq_len(max_items)]
+        values <- values[seq_len(max_items)]
+      }
+      scwa_channel_cache$keys <- keys
+      scwa_channel_cache$values <- values
+      invisible(value)
+    }
 
     normalize_export_split <- function(x) {
       trimws(as.character(x))
@@ -389,6 +431,10 @@ mod_export_server <- function(id, results, data, config, channels,
         source_data,
         cfg$dimension_breaks %||% list(),
         channel_name = cfg$channel_name %||% nm
+      )
+      source_data <- apply_dimension_aliases(
+        source_data,
+        cfg$dimension_aliases %||% list()
       )
       split_cols_technical <- unique(c("VariableName", cfg$split_columns %||% character(0)))
       source_data$SplitName <- build_split_name_from_columns(source_data, split_cols_technical)
@@ -1087,74 +1133,80 @@ mod_export_server <- function(id, results, data, config, channels,
                                                  cols = 6L) else NULL,
         activity    = if (total_splits > 0) list(rows = total_splits, cols = seed_cols) else NULL,
         composition = if (total_composition_rows > 0) {
-          list(rows = total_composition_rows, cols = 9L)
+          list(rows = total_composition_rows, cols = 10L)
         } else NULL,
         config      = if (n_ch > 0) list(rows = n_ch, cols = NULL) else NULL
       )
     }
 
     export_snapshot <- reactive({
-      t0 <- Sys.time()
-      res_list <- results()
-      clean_list <- clean_results()
-      ch_list <- channels()
-      d <- data()
-      gcfg <- config()
+      profile_export("snapshot", {
+        res_list <- results()
+        clean_list <- clean_results()
+        ch_list <- channels()
+        d <- data()
+        gcfg <- config()
 
-      export_data <- lapply(names(ch_list), function(nm) {
-        res <- res_list[[nm]]
-        clean <- clean_list[[nm]] %||% list()
-        cfg <- ch_list[[nm]] %||% list()
-        final <- final_activity_splits(res, cfg, nm)
-        pre_act <- pre_merge_activity_splits(clean, cfg, nm)
-        if (!nrow(pre_act)) pre_act <- final
-        final_cost <- final_spend_splits(res, cfg, nm)
-        pre_cost <- pre_merge_spend_splits(clean, cfg, nm)
+        export_data <- lapply(names(ch_list), function(nm) {
+          res <- res_list[[nm]]
+          clean <- clean_list[[nm]] %||% list()
+          cfg <- ch_list[[nm]] %||% list()
+          final <- final_activity_splits(res, cfg, nm)
+          pre_act <- pre_merge_activity_splits(clean, cfg, nm)
+          if (!nrow(pre_act)) pre_act <- final
+          final_cost <- final_spend_splits(res, cfg, nm)
+          pre_cost <- pre_merge_spend_splits(clean, cfg, nm)
+          list(
+            name = nm,
+            res = res,
+            clean = clean,
+            cfg = cfg,
+            final = final,
+            pre_act = pre_act,
+            final_cost = final_cost,
+            pre_cost = pre_cost,
+            merge_resolved = NULL,
+            rae_totals = NULL,
+            canonical_totals = NULL
+          )
+        })
+        names(export_data) <- names(ch_list)
+
+        channel_items <- lapply(names(ch_list), function(nm) {
+          build_channel_summary_item(
+            nm = nm,
+            res = res_list[[nm]],
+            cfg_ch = ch_list[[nm]] %||% list(),
+            final_splits = export_data[[nm]]$final,
+            d = d,
+            gcfg = gcfg
+          )
+        })
+
         list(
-          name = nm,
-          res = res,
-          clean = clean,
-          cfg = cfg,
-          final = final,
-          pre_act = pre_act,
-          final_cost = final_cost,
-          pre_cost = pre_cost,
-          merge_resolved = NULL,
-          rae_totals = NULL,
-          canonical_totals = NULL
+          data = d,
+          config = gcfg,
+          channels = ch_list,
+          results = res_list,
+          clean_results = clean_list,
+          export_data = export_data,
+          channel_summary = channel_items,
+          merge_issues = list(count = 0L, names = character(0)),
+          file_dims = build_file_dims(export_data, d, ch_list)
         )
       })
-      names(export_data) <- names(ch_list)
-
-      channel_items <- lapply(names(ch_list), function(nm) {
-        build_channel_summary_item(
-          nm = nm,
-          res = res_list[[nm]],
-          cfg_ch = ch_list[[nm]] %||% list(),
-          final_splits = export_data[[nm]]$final,
-          d = d,
-          gcfg = gcfg
-        )
-      })
-
-      snap <- list(
-        data = d,
-        config = gcfg,
-        channels = ch_list,
-        results = res_list,
-        clean_results = clean_list,
-        export_data = export_data,
-        channel_summary = channel_items,
-        merge_issues = list(count = 0L, names = character(0)),
-        file_dims = build_file_dims(export_data, d, ch_list)
-      )
-      if (isTRUE(getOption("pso.export.profile", FALSE)) ||
-          isTRUE(getOption("pso.profile", FALSE))) {
-        elapsed <- round(as.numeric(difftime(Sys.time(), t0, units = "secs")), 3)
-        message("[mod_export] snapshot built in ", elapsed, "s")
-      }
-      snap
     })
+
+    export_heavy_payload <- reactive({
+      profile_export("heavy payload", {
+        ensure_export_payload(export_snapshot())
+      })
+    })
+
+    observeEvent(export_snapshot(), {
+      scwa_channel_cache$keys <- character(0)
+      scwa_channel_cache$values <- list()
+    }, ignoreInit = TRUE)
 
     export_merge_issue_summary <- reactive({
       export_snapshot()$merge_issues
@@ -1221,9 +1273,20 @@ mod_export_server <- function(id, results, data, config, channels,
     }
 
     clean_roi_columns <- function(df) {
-      if (is.null(df)) return(df)
-      names(df) <- trimws(gsub("^\ufeff", "", names(df), perl = TRUE))
-      df
+      clean_data_columns(df)
+    }
+
+    export_channel_label <- function(nm, cfg = list(), d = NULL) {
+      rois <- if (!is.null(d)) clean_roi_columns(d$channels_rois) else NULL
+      if (!is.null(rois) &&
+          all(c("MainModelVariableName", "Channel") %in% names(rois))) {
+        mv <- cfg$model_variable %||% nm
+        rows_roi <- rois[trimws(as.character(rois$MainModelVariableName)) ==
+                           trimws(as.character(mv)), "Channel", drop = TRUE]
+        rows_roi <- rows_roi[!is.na(rows_roi) & nzchar(trimws(as.character(rows_roi)))]
+        if (length(rows_roi)) return(trimws(as.character(rows_roi[1])))
+      }
+      cfg$media_channel %||% cfg$channel_name %||% nm
     }
 
     compact_names <- function(x, max_n = 4) {
@@ -1233,6 +1296,30 @@ mod_export_server <- function(id, results, data, config, channels,
       if (length(x) > max_n) out <- paste0(out, " +", length(x) - max_n, " more")
       out
     }
+
+    scwa_key <- function(channel, main_model_variable, merged_split) {
+      paste(
+        normalize_export_split(channel),
+        normalize_export_split(main_model_variable),
+        normalize_export_split(merged_split),
+        sep = " || "
+      )
+    }
+
+    scwa_is_checked <- function(channel, main_model_variable, merged_split) {
+      flags <- scwa_flags()
+      key <- scwa_key(channel, main_model_variable, merged_split)
+      isTRUE(unname(flags[[key]]))
+    }
+
+    observeEvent(input$scwa_toggle, {
+      event <- input$scwa_toggle
+      key <- normalize_export_split(event$key %||% "")
+      if (!nzchar(key)) return()
+      flags <- scwa_flags()
+      flags[[key]] <- isTRUE(event$value)
+      scwa_flags(flags)
+    }, ignoreInit = TRUE)
 
     roi_issue_summary <- reactive({
       snap <- export_snapshot()
@@ -1312,7 +1399,10 @@ mod_export_server <- function(id, results, data, config, channels,
         } else NA_character_
       }, character(1), USE.NAMES = FALSE)
       zero_names <- zero_names[!is.na(zero_names)]
-      merge_issues <- export_merge_issue_summary()
+      merge_issues <- list(
+        count = proc$merge_review %||% 0L,
+        names = proc$merge_review_names %||% character(0)
+      )
       rois_missing <- is.null(snap$data$channels_rois)
       roi_issues <- roi_issue_summary()
 
@@ -2271,6 +2361,11 @@ mod_export_server <- function(id, results, data, config, channels,
                                         snapshot = NULL) {
       if (!length(res_list)) return(NULL)
 
+      is_focus_split_name <- function(x) {
+        x <- normalize_export_split(x)
+        !is.na(x) & nzchar(x) & !grepl("_Before(\\s+|_)", x, ignore.case = TRUE)
+      }
+
       metric_split_variants <- function(split_nm, cfg = list()) {
         split_nm <- normalize_export_split(split_nm)
         split_nm <- split_nm[!is.na(split_nm) & nzchar(split_nm)]
@@ -2337,7 +2432,7 @@ mod_export_server <- function(id, results, data, config, channels,
         nm
       }
 
-      rows <- Filter(Negate(is.null), lapply(names(res_list), function(nm) {
+      rows <- Filter(Negate(is.null), lapply(names(channels_list), function(nm) {
         res <- res_list[[nm]]
         clean <- clean_list[[nm]] %||% list()
         cfg <- channels_list[[nm]] %||% list()
@@ -2366,13 +2461,18 @@ mod_export_server <- function(id, results, data, config, channels,
         merge_map <- resolved$map
         lineage <- merge_map
 
-        ch_name <- channel_from_roi(nm, cfg)
+        ch_name <- export_channel_label(nm, cfg, d)
         mmv <- cfg$model_variable %||% nm
         canonical <- if (!is.null(snap_ch)) snap_ch$canonical_totals else NULL
         if (!is.null(canonical) &&
             nrow(canonical$component_focus_totals %||% tibble::tibble()) > 0 &&
             nrow(canonical$final_focus_totals %||% tibble::tibble()) > 0) {
           lineage <- canonical$merge_map
+          lineage <- lineage %>%
+            dplyr::filter(
+              is_focus_split_name(.data$MergedSplitName),
+              is_focus_split_name(.data$ComponentSplit)
+            )
           if (!nrow(lineage)) return(NULL)
           component_metrics <- canonical$component_focus_totals %>%
             dplyr::rename(
@@ -2385,6 +2485,11 @@ mod_export_server <- function(id, results, data, config, channels,
               total_spend = Spend
             )
         } else {
+          lineage <- lineage %>%
+            dplyr::filter(
+              is_focus_split_name(.data$MergedSplitName),
+              is_focus_split_name(.data$ComponentSplit)
+            )
           if (!nrow(lineage)) return(NULL)
           metric_pre_act <- if (!is.null(snap_ch) && !is.null(snap_ch$rae_totals))
             snap_ch$rae_totals$activity else pre_act
@@ -2394,9 +2499,14 @@ mod_export_server <- function(id, results, data, config, channels,
             metric_pre_act %>% dplyr::select(VariableSplit, total_activity),
             metric_pre_cost %>% dplyr::select(VariableSplit, total_spend),
             by = "VariableSplit"
-          )
+          ) %>%
+            dplyr::filter(is_focus_split_name(.data$VariableSplit))
           final_metrics <- component_metrics
         }
+        component_metrics <- component_metrics %>%
+          dplyr::filter(is_focus_split_name(.data$VariableSplit))
+        final_metrics <- final_metrics %>%
+          dplyr::filter(is_focus_split_name(.data$VariableSplit))
         lookup_component_activity <- make_metric_lookup(component_metrics, "total_activity", cfg)
         lookup_component_spend <- make_metric_lookup(component_metrics, "total_spend", cfg)
         lookup_merged_activity <- make_metric_lookup(final_metrics, "total_activity", cfg)
@@ -2451,10 +2561,196 @@ mod_export_server <- function(id, results, data, config, channels,
           Component_Activity,
           Component_Pct,
           Component_Spend,
-          Merged_Activity,
-          Merged_Spend
+          `Total Activity` = Merged_Activity,
+          `Total Spend` = Merged_Spend
         )
     }
+
+    apply_scwa_flags <- function(df, flags = scwa_flags()) {
+      if (is.null(df) || !nrow(df)) return(df)
+      checked_scwa_keys <- names(flags)[flags]
+      df %>%
+        dplyr::mutate(
+          SCWA = scwa_key(.data$Channel, .data$MainModelVariableName, .data$MergedSplitName) %in%
+            checked_scwa_keys
+        )
+    }
+
+    scwa_channel_choices <- reactive({
+      snap <- export_snapshot()
+      candidates <- names(Filter(function(item) {
+        cfg <- item$cfg %||% list()
+        length(extract_export_merges(cfg)) > 0 &&
+          nrow(item$final %||% tibble::tibble()) > 0
+      }, snap$export_data %||% list()))
+
+      if (!length(candidates)) {
+        return(c("Select a channel..." = ""))
+      }
+
+      labels <- vapply(candidates, function(nm) {
+        export_channel_label(nm, snap$channels[[nm]] %||% list(), snap$data)
+      }, character(1))
+      labels <- make.unique(labels, sep = " - ")
+      c("Select a channel..." = "", stats::setNames(candidates, labels))
+    })
+
+    scwa_split_composition <- reactive({
+      nm <- input$scwa_channel_filter %||% ""
+      if (!nzchar(nm)) return(NULL)
+      snap <- export_snapshot()
+      if (!nm %in% names(snap$channels)) return(NULL)
+      cache_key <- paste0("scwa::", nm)
+      cached <- scwa_cache_get(cache_key)
+      if (!is.null(cached) && isTRUE(cached$hit)) return(cached$value)
+      payload <- profile_export(paste0("SCWA channel ", nm), {
+        single_snap <- snap
+        single_snap$channels <- snap$channels[nm]
+        single_snap$results <- snap$results[nm]
+        single_snap$clean_results <- snap$clean_results[nm]
+        single_snap$export_data <- snap$export_data[nm]
+        ensure_export_payload(single_snap)
+      })
+      out <- build_split_composition(
+        payload$results,
+        payload$clean_results,
+        payload$channels,
+        payload$data,
+        snapshot = payload
+      )
+      scwa_cache_set(cache_key, out)
+      out
+    })
+
+    output$scwa_workaround <- renderUI({
+      channel_choices <- scwa_channel_choices()
+      current_channel <- input$scwa_channel_filter %||% ""
+      if (!current_channel %in% unname(channel_choices)) current_channel <- ""
+      df <- scwa_split_composition()
+      flags <- isolate(scwa_flags())
+      df <- apply_scwa_flags(df, flags)
+      df <- if (!is.null(df)) as.data.frame(df) else NULL
+
+      if (length(channel_choices) <= 1L) {
+        return(div(class = "scwa-card scwa-card-empty",
+                   div(class = "scwa-card-head",
+                       div(class = "card-header-inner",
+                           icon("wand-magic-sparkles", class = "icon-blue-sm"),
+                           tags$strong("Splits Composition Workaround (SCWA)"))),
+                   div(class = "scwa-empty",
+                       icon("code-branch", class = "scwa-empty-icon"),
+                       tags$span("No focus merges available for workaround review."))))
+      }
+
+      if (!nzchar(current_channel)) {
+        rows_ui <- div(class = "scwa-empty scwa-empty-compact",
+                       icon("circle-info", class = "scwa-empty-icon"),
+                       tags$span("Select a channel to load workaround review."))
+        n_merges <- 0L
+        n_marked <- 0L
+      } else if (is.null(df) || !nrow(df)) {
+        rows_ui <- div(class = "scwa-empty scwa-empty-compact",
+                       tags$span("No focus merges available for the selected channel."))
+        n_merges <- 0L
+        n_marked <- 0L
+      } else {
+        summary <- df %>%
+          dplyr::group_by(.data$Channel, .data$MainModelVariableName, .data$MergedSplitName) %>%
+          dplyr::summarise(
+            NumberOfSplits = dplyr::n_distinct(.data$ComponentSplit),
+            TotalActivity = {
+              vals <- .data$`Total Activity`[!is.na(.data$`Total Activity`)]
+              if (length(vals)) max(vals) else 0
+            },
+            TotalSpend = {
+              vals <- .data$`Total Spend`[!is.na(.data$`Total Spend`)]
+              if (length(vals)) max(vals) else 0
+            },
+            SCWA = any(.data$SCWA, na.rm = TRUE),
+            .groups = "drop"
+          ) %>%
+          dplyr::arrange(.data$Channel, .data$MainModelVariableName, .data$MergedSplitName)
+
+        n_merges <- nrow(summary)
+        n_marked <- sum(summary$SCWA, na.rm = TRUE)
+
+        rows_ui <- tagList(lapply(seq_len(nrow(summary)), function(i) {
+          row <- summary[i, , drop = FALSE]
+          key <- scwa_key(row$Channel, row$MainModelVariableName, row$MergedSplitName)
+          comps <- df[
+            df$Channel == row$Channel &
+              df$MainModelVariableName == row$MainModelVariableName &
+              df$MergedSplitName == row$MergedSplitName,
+            , drop = FALSE
+          ]
+          comps <- comps %>%
+            dplyr::arrange(dplyr::desc(.data$Component_Activity), .data$ComponentSplit)
+
+          tags$details(class = "scwa-row",
+            tags$summary(class = "scwa-summary",
+              div(class = "scwa-main",
+                  tags$span("+", class = "scwa-expand"),
+                  tags$span(row$MergedSplitName, class = "scwa-merge-name"),
+                  tags$span(paste(row$Channel, row$MainModelVariableName, sep = " | "),
+                            class = "scwa-merge-meta")),
+              div(class = "scwa-metrics",
+                  tags$span(class = "scwa-pill", paste0(row$NumberOfSplits, " splits")),
+                  tags$span(class = "scwa-metric",
+                            tags$strong(format(round(row$TotalActivity, 2), big.mark = ",")),
+                            tags$small(" Activity")),
+                  tags$span(class = "scwa-metric",
+                            tags$strong(format(round(row$TotalSpend, 2), big.mark = ",")),
+                            tags$small(" Spend")),
+                  tags$label(class = "scwa-check",
+                    tags$input(
+                      type = "checkbox",
+                      checked = if (isTRUE(row$SCWA)) "checked" else NULL,
+                      `data-key` = key,
+                      onclick = "event.stopPropagation();",
+                      onchange = sprintf(
+                        "event.stopPropagation(); var card=this.closest('.scwa-card'); if(card){var total=card.querySelectorAll('.scwa-check input').length; var marked=card.querySelectorAll('.scwa-check input:checked').length; var count=card.querySelector('.scwa-count'); if(count){count.textContent=marked + '/' + total + ' marked';}} Shiny.setInputValue('%s', {key: this.dataset.key, value: this.checked, nonce: Math.random()}, {priority: 'event'});",
+                        session$ns("scwa_toggle")
+                      )
+                    ),
+                    tags$span("Need workaround")
+                  ))),
+            div(class = "scwa-components",
+                div(class = "scwa-components-head",
+                    tags$span("Component split"),
+                    tags$span("Activity"),
+                    tags$span("Spend"),
+                    tags$span("Pct")),
+                tagList(lapply(seq_len(nrow(comps)), function(j) {
+                  comp <- comps[j, , drop = FALSE]
+                  div(class = "scwa-component-row",
+                      tags$span(comp$ComponentSplit, class = "scwa-component-name"),
+                      tags$span(format(round(comp$Component_Activity, 2), big.mark = ",")),
+                      tags$span(format(round(comp$Component_Spend, 2), big.mark = ",")),
+                      tags$span(ifelse(is.na(comp$Component_Pct), "",
+                                       paste0(round(comp$Component_Pct, 2), "%"))))
+                })))
+          )
+        }))
+      }
+
+      div(class = "scwa-card",
+          div(class = "scwa-card-head",
+              div(class = "card-header-inner",
+                  icon("wand-magic-sparkles", class = "icon-blue-sm"),
+                  tags$strong("Splits Composition Workaround (SCWA)")),
+              tags$span(paste0(n_marked, "/", n_merges, " marked"),
+                        class = "scwa-count")),
+          div(class = "scwa-filters",
+              div(class = "scwa-filter",
+                  tags$label("Channel"),
+                  selectInput(session$ns("scwa_channel_filter"), NULL,
+                              choices = channel_choices, selected = current_channel,
+                              width = "100%"))),
+          div(class = "scwa-table-head",
+              tags$span("Merged split"),
+              tags$span("Review")),
+          div(class = "scwa-list", rows_ui))
+    })
 
     output$dl_zip <- downloadHandler(
       filename = function()
@@ -2473,7 +2769,7 @@ mod_export_server <- function(id, results, data, config, channels,
         gcfg_snap     <- snap$config
         heavy_snap    <- NULL
         get_heavy_snap <- function() {
-          if (is.null(heavy_snap)) heavy_snap <<- ensure_export_payload(snap)
+          if (is.null(heavy_snap)) heavy_snap <<- export_heavy_payload()
           heavy_snap
         }
 
@@ -2526,6 +2822,7 @@ mod_export_server <- function(id, results, data, config, channels,
             payload_snap <- get_heavy_snap()
             df <- build_split_composition(res_snap, clean_snap, channels_snap, d_snap,
                                           snapshot = payload_snap)
+            df <- apply_scwa_flags(df)
             if (!is.null(df) && nrow(df) > 0) {
               f <- file.path(tmp_dir, export_file_names$split_composition)
               readr::write_csv(df, f, na = ""); written <- c(written, f)

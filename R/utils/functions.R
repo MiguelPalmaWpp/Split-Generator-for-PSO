@@ -92,8 +92,31 @@ parse_period <- parse_period_robust
 # SCHEMA INFERENCE HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 
-# ── clean_names ────────────────────────────────────────────────────────────
-clean_names <- function(x) trimws(x)
+# ── shared column contracts ────────────────────────────────────────────────
+clean_names <- function(x) {
+  x <- as.character(x)
+  x <- gsub("^\ufeff", "", x, perl = TRUE)
+  trimws(x)
+}
+
+clean_data_columns <- function(df) {
+  if (is.null(df)) return(df)
+  names(df) <- clean_names(names(df))
+  df
+}
+
+column_contract <- function(df, required = character(), optional = character()) {
+  cols <- clean_names(names(if (is.null(df)) data.frame() else df))
+  required <- clean_names(required)
+  optional <- clean_names(optional)
+  list(
+    present_required = intersect(required, cols),
+    missing_required = setdiff(required, cols),
+    present_optional = intersect(optional, cols),
+    missing_optional = setdiff(optional, cols),
+    columns = cols
+  )
+}
 
 # ── is_weekly_like ─────────────────────────────────────────────────────────
 is_weekly_like <- function(dates) {
@@ -302,6 +325,19 @@ read_main_data <- function(path, ext) {
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── export_channels_csv ────────────────────────────────────────────────────
+apply_dimension_aliases <- function(d, dimension_aliases) {
+  if (!length(dimension_aliases)) return(d)
+  for (als in dimension_aliases) {
+    source <- trimws(as.character(als$source %||% ""))
+    alias <- trimws(as.character(als$alias %||% ""))
+    if (!nzchar(source) || !nzchar(alias) || identical(source, alias)) next
+    if (!source %in% names(d)) next
+    if (alias %in% names(d) && !identical(alias, source)) next
+    d[[alias]] <- d[[source]]
+  }
+  d
+}
+
 export_channels_csv <- function(channels, global_config = NULL) {
   if (!length(channels)) return(data.frame())
   rows <- list()
@@ -321,7 +357,9 @@ export_channels_csv <- function(channels, global_config = NULL) {
       TimeBreakLabel = cfg$time_break_label %||% "",
       ConfigVersion = "2",
       BreakMissingPartValue = cfg$break_missing_part_value %||% "Total",
-      BreakDefaultSeparator = cfg$break_default_separator %||% " - "
+      BreakDefaultSeparator = cfg$break_default_separator %||% " - ",
+      RenameSource = "",
+      RenameAlias = ""
     )))
     for (b in cfg$dimension_breaks %||% list()) {
       rows <- c(rows, list(tibble::tibble(
@@ -337,7 +375,28 @@ export_channels_csv <- function(channels, global_config = NULL) {
         TimeBreakLabel = "",
         ConfigVersion = "",
         BreakMissingPartValue = b$missing_part_value %||% cfg$break_missing_part_value %||% "Total",
-        BreakDefaultSeparator = cfg$break_default_separator %||% " - "
+        BreakDefaultSeparator = cfg$break_default_separator %||% " - ",
+        RenameSource = "",
+        RenameAlias = ""
+      )))
+    }
+    for (als in cfg$dimension_aliases %||% list()) {
+      rows <- c(rows, list(tibble::tibble(
+        Channel    = nm,
+        Type       = "Rename",
+        SplitOrder = als$source %||% "",
+        Name       = als$alias %||% "",
+        Splits     = "",
+        ActivityKeyword = "",
+        SpendKeyword    = "",
+        VarNameInclude  = "",
+        UpdateLabel = "",
+        TimeBreakLabel = "",
+        ConfigVersion = "",
+        BreakMissingPartValue = "",
+        BreakDefaultSeparator = "",
+        RenameSource = als$source %||% "",
+        RenameAlias = als$alias %||% ""
       )))
     }
     for (m in cfg$saved_merges %||% list()) {
@@ -355,12 +414,21 @@ export_channels_csv <- function(channels, global_config = NULL) {
         TimeBreakLabel = "",
         ConfigVersion = "",
         BreakMissingPartValue = "",
-        BreakDefaultSeparator = ""
+        BreakDefaultSeparator = "",
+        RenameSource = "",
+        RenameAlias = ""
       )))
     }
   }
   if (!length(rows)) return(data.frame())
-  dplyr::bind_rows(rows)
+  out <- dplyr::bind_rows(rows)
+  cfg_order <- c(
+    "Channel", "Type", "SplitOrder", "Name", "RenameSource", "RenameAlias",
+    "Splits", "ActivityKeyword", "SpendKeyword", "VarNameInclude",
+    "UpdateLabel", "TimeBreakLabel", "ConfigVersion",
+    "BreakMissingPartValue", "BreakDefaultSeparator"
+  )
+  dplyr::select(out, dplyr::any_of(cfg_order), dplyr::everything())
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -509,6 +577,11 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
                               channels_rois = NULL, cross_cols = "Geography",
                               keyword_dict = MEDIA_KEYWORD_DICT,
                               schema_metadata = NULL) {
+  main_data <- clean_data_columns(main_data)
+  analytical <- clean_data_columns(analytical)
+  vof_df <- clean_data_columns(vof_df)
+  model_details <- clean_data_columns(model_details)
+  channels_rois <- clean_data_columns(channels_rois)
   
   channels <- list()
   geo_col  <- cross_cols[1]
@@ -585,8 +658,20 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
   roi_lookup <- NULL
   if (!is.null(channels_rois) &&
       "MainModelVariableName" %in% names(channels_rois)) {
-    roi_num <- setdiff(names(channels_rois)[sapply(channels_rois, is.numeric)],
-                       "MainModelVariableName")
+    roi_meta <- c("MainModelVariableName", "Channel", "Geography",
+                  "Sourced VariableName", "VariableSplit", "SplitOrder")
+    roi_num <- names(channels_rois)[
+      stringr::str_detect(names(channels_rois), stringr::regex("\\bROI\\b|ROI", ignore_case = TRUE)) |
+        vapply(channels_rois, is.numeric, logical(1))
+    ]
+    roi_num <- setdiff(unique(roi_num), roi_meta)
+    for (roi_col in roi_num) {
+      if (!is.numeric(channels_rois[[roi_col]])) {
+        channels_rois[[roi_col]] <- suppressWarnings(as.numeric(
+          gsub("%", "", gsub(",", "", as.character(channels_rois[[roi_col]])))
+        ))
+      }
+    }
     if (length(roi_num))
       roi_lookup <- channels_rois %>%
         dplyr::select(MainModelVariableName, dplyr::all_of(roi_num)) %>%
@@ -1282,6 +1367,7 @@ process_channel_legacy <- function(all_rags,
     
     d <- apply_dimension_breaks(d, dimension_breaks,
                                 channel_name = cfg$channel_name)
+    d <- apply_dimension_aliases(d, cfg$dimension_aliases %||% list())
     d <- data.table::as.data.table(d)
     
     # Keep VariableName in the technical split key so activity/spend detection

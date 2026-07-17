@@ -1958,6 +1958,21 @@ mod_process_server <- function(id, data, config, channels,
         failed <- names(errs)[!vapply(errs, is.null, logical(1))]
         processed <- ch_names[ch_names %in% names(res)]
         stale <- stale_names()
+        merge_logs <- reactiveValuesToList(merge_log_store)
+        merge_review_names <- unique(unlist(lapply(names(merge_logs), function(nm) {
+          logs <- merge_logs[[nm]] %||% list()
+          needs_review <- vapply(logs, function(m) {
+            identical(m$status %||% "", "needs_review")
+          }, logical(1))
+          if (!any(needs_review)) return(character(0))
+          bad <- logs[needs_review]
+          paste0(nm, ": ", vapply(bad, function(m) {
+            m$new_name %||% m$name %||% "Unnamed merge"
+          }, character(1)))
+        }), use.names = FALSE))
+        merge_review_names <- merge_review_names[
+          !is.na(merge_review_names) & nzchar(merge_review_names)
+        ]
         list(
           total           = length(ch_names),
           processed       = length(processed),
@@ -1966,6 +1981,8 @@ mod_process_server <- function(id, data, config, channels,
           failed_names    = intersect(ch_names, failed),
           stale           = length(intersect(ch_names, stale)),
           stale_names     = intersect(ch_names, stale),
+          merge_review    = length(merge_review_names),
+          merge_review_names = merge_review_names,
           batch_running   = isTRUE(is_batch_processing()),
           last_batch      = batch_summary_state()
         )

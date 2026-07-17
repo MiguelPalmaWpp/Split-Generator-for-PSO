@@ -50,6 +50,19 @@ apply_dimension_breaks <- function(d, dimension_breaks, channel_name = NULL) {
   d
 }
 
+apply_dimension_aliases <- function(d, dimension_aliases) {
+  if (!length(dimension_aliases)) return(d)
+  for (als in dimension_aliases) {
+    source <- trimws(as.character(als$source %||% ""))
+    alias <- trimws(as.character(als$alias %||% ""))
+    if (!nzchar(source) || !nzchar(alias) || identical(source, alias)) next
+    if (!source %in% names(d)) next
+    if (alias %in% names(d) && !identical(alias, source)) next
+    d[[alias]] <- d[[source]]
+  }
+  d
+}
+
 build_split_name_from_columns <- function(d, split_cols, fallback_col = "VariableName") {
   split_cols_present <- intersect(split_cols, names(d))
   if (!length(split_cols_present) && fallback_col %in% names(d))
@@ -769,6 +782,7 @@ process_channel <- function(all_rags,
     
     d <- apply_dimension_breaks(d, dimension_breaks,
                                 channel_name = cfg$channel_name)
+    d <- apply_dimension_aliases(d, cfg$dimension_aliases %||% list())
     d <- data.table::as.data.table(d)
     
     # Keep VariableName in the technical split key so activity/spend detection

@@ -1882,6 +1882,11 @@ mod_process_server <- function(id, data, config, channels,
           options = list(initComplete = dt_blue_callback, dom = "t"),
           rownames = FALSE))
       }
+
+      model_side <- model_side %>%
+        group_by(across(all_of(tc_cross_id_join))) %>%
+        summarise(ModelTotal = sum(ModelTotal, na.rm = TRUE), .groups = "drop") %>%
+        filter(ModelTotal > 0)
       
       check_df <- model_side %>%
         left_join(splits_side, by = tc_cross_id_join) %>%

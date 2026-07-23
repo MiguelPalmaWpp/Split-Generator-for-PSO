@@ -1074,6 +1074,11 @@ mod_export_server <- function(id, results, data, config, channels,
           join_cols <- intersect(cross_id, intersect(names(model_side), names(splits_side)))
           if (!length(join_cols)) return(FALSE)
 
+          model_side <- model_side %>%
+            dplyr::group_by(dplyr::across(dplyr::all_of(join_cols))) %>%
+            dplyr::summarise(ModelTotal = sum(ModelTotal, na.rm = TRUE), .groups = "drop") %>%
+            dplyr::filter(ModelTotal > 0)
+
           check_df <- model_side %>%
             dplyr::left_join(splits_side, by = join_cols) %>%
             dplyr::mutate(

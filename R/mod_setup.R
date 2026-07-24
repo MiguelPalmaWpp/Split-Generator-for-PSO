@@ -610,6 +610,9 @@ mod_setup_server <- function(id) {
     }
 
     validate_rois_signature <- function(df) {
+      if (!"MainModelVariableName" %in% names(df)) {
+        return(list(ok = FALSE, reason = "ROIs by Channel must contain MainModelVariableName"))
+      }
       roi_cols <- names(df)[stringr::str_detect(names(df), stringr::regex("\\bROI\\b", ignore_case = TRUE))]
       if (!length(roi_cols)) {
         return(list(ok = FALSE, reason = "ROIs by Channel must contain an ROI column"))
@@ -719,6 +722,24 @@ mod_setup_server <- function(id) {
         rv$channels_rois <- NULL
         showNotification(sig$reason, type = "error", duration = 10)
         return(FALSE)
+      }
+      if (!is.null(rv$main_data)) {
+        roi_cols <- names(rv$channels_rois)[
+          stringr::str_detect(names(rv$channels_rois), stringr::regex("\\bROI\\b|ROI", ignore_case = TRUE))
+        ]
+        supported_meta <- c("MainModelVariableName", "Channel", "Geography",
+                            "Sourced VariableName", "VariableSplit", "SplitOrder", roi_cols)
+        candidate_keys <- setdiff(names(rv$channels_rois), supported_meta)
+        unknown_keys <- setdiff(candidate_keys, names(rv$main_data))
+        unknown_keys <- unknown_keys[!vapply(rv$channels_rois[unknown_keys], is.numeric, logical(1))]
+        if (length(unknown_keys)) {
+          showNotification(
+            paste0("ROI key column(s) not found in RAE and ignored: ",
+                   paste(head(unknown_keys, 5), collapse = ", "),
+                   if (length(unknown_keys) > 5) " ..." else ""),
+            type = "warning", duration = 12
+          )
+        }
       }
       set_file_meta("rois", file_row, nrow(rv$channels_rois), ncol(rv$channels_rois), source)
       if (!identical(source, "batch")) {

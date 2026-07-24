@@ -690,20 +690,45 @@ SHINY NOTIFICATIONS — top-right below header
 */
 .shiny-notification-panel {
 top:    120px  !important;   
-right:   20px  !important;
+right:   24px  !important;
 bottom:  auto  !important;   
 left:    auto  !important;
-width:   340px !important;
+width:   min(520px, calc(100vw - 48px)) !important;
 z-index: 9999  !important;   
 }
 
 .shiny-notification {
-border-radius: 7px    !important;
-font-size:     13px   !important;
+border-radius: 8px    !important;
+font-size:     14px   !important;
+line-height:   1.35   !important;
 border:        none   !important;
 box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15) !important;
-margin-bottom: 8px    !important;
+margin-bottom: 10px   !important;
+padding:       14px 16px !important;
 animation: slideInRight 0.2s ease;
+}
+
+.shiny-notification .shiny-notification-content {
+font-size: 14px !important;
+line-height: 1.35 !important;
+}
+
+.shiny-notification strong {
+font-size: 14px !important;
+font-weight: 700 !important;
+}
+
+.shiny-notification ul {
+margin-bottom: 0 !important;
+margin-top: 6px !important;
+padding-left: 18px !important;
+}
+
+.shiny-notification li {
+font-size: 13px !important;
+line-height: 1.35 !important;
+margin-bottom: 4px !important;
+word-break: break-word !important;
 }
 
 @keyframes slideInRight {

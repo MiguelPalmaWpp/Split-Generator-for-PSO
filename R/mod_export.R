@@ -462,6 +462,10 @@ mod_export_server <- function(id, results, data, config, channels,
         paste0(source_data$SplitName, "_", nf_sfx)
       )
 
+      roi_file_for_keys <- clean_roi_columns(d$channels_rois)
+      roi_seed_key_cols <- roi_rae_key_columns(roi_file_for_keys, source_data)
+      roi_seed_key_cols <- setdiff(roi_seed_key_cols, "Geography")
+
       cross_cols <- gcfg$cross_cols %||% "Geography"
       cross_id <- intersect(c(cross_cols, "Period"), names(source_data))
       if (!"Period" %in% cross_id) cross_id <- c(cross_id, "Period")
@@ -598,8 +602,32 @@ mod_export_server <- function(id, results, data, config, channels,
       if (!"total_spend" %in% names(seed))
         seed$total_spend <- NA_real_
 
+      if (nrow(seed)) {
+        activity_meta_source <- source_data[
+          period_tag == "focus" &
+            grepl(act_kw, source_data$VariableSplit, ignore.case = TRUE),
+          , drop = FALSE
+        ]
+        if (nrow(activity_meta_source)) {
+          activity_meta_source$`Sourced VariableName` <- activity_meta_source$VariableName
+          meta_cols <- unique(c("Sourced VariableName", roi_seed_key_cols))
+          meta_cols <- intersect(meta_cols, names(activity_meta_source))
+          if (length(meta_cols)) {
+            meta_dt <- data.table::as.data.table(activity_meta_source[, c("VariableSplit", meta_cols), drop = FALSE])
+            split_meta <- meta_dt[, lapply(.SD, function(x) {
+              vals <- unique(trimws(as.character(x)))
+              vals <- vals[!is.na(vals) & nzchar(vals)]
+              if (length(vals) == 1L) vals[1] else NA_character_
+            }), by = VariableSplit, .SDcols = meta_cols]
+            seed <- seed %>%
+              dplyr::left_join(as.data.frame(split_meta), by = "VariableSplit")
+          }
+        }
+      }
+
       seed <- seed %>%
-        dplyr::select(VariableSplit, Geography, total_activity, total_spend)
+        dplyr::select(VariableSplit, Geography, total_activity, total_spend,
+                      dplyr::any_of(c("Sourced VariableName", roi_seed_key_cols)))
 
       list(activity = activity, spend = spend, seed = seed)
     }
@@ -818,6 +846,15 @@ mod_export_server <- function(id, results, data, config, channels,
       component_seed$total_spend <- suppressWarnings(as.numeric(component_seed$total_spend))
       component_seed$total_activity[is.na(component_seed$total_activity)] <- 0
       component_seed$total_spend[is.na(component_seed$total_spend)] <- 0
+      seed_meta_cols <- setdiff(
+        names(component_seed),
+        c("VariableSplit", "Geography", "total_activity", "total_spend")
+      )
+      stable_seed_meta <- function(x) {
+        vals <- unique(trimws(as.character(x)))
+        vals <- vals[!is.na(vals) & nzchar(vals)]
+        if (length(vals) == 1L) vals[[1]] else NA_character_
+      }
       component_seed <- component_seed[
         !is.na(component_seed$VariableSplit) &
           nzchar(component_seed$VariableSplit) &
@@ -864,6 +901,7 @@ mod_export_server <- function(id, results, data, config, channels,
         dplyr::summarise(
           total_activity = sum(.data$total_activity, na.rm = TRUE),
           total_spend = sum(.data$total_spend, na.rm = TRUE),
+          dplyr::across(dplyr::all_of(seed_meta_cols), stable_seed_meta),
           .groups = "drop"
         ) %>%
         dplyr::filter(.data$total_activity > 0)
@@ -1279,6 +1317,39 @@ mod_export_server <- function(id, results, data, config, channels,
 
     clean_roi_columns <- function(df) {
       clean_data_columns(df)
+    }
+
+    roi_value_columns <- function(roi_df) {
+      if (is.null(roi_df) || !nrow(roi_df)) return(character(0))
+      roi_named_cols <- names(roi_df)[
+        stringr::str_detect(names(roi_df), stringr::regex("\\bROI\\b|ROI", ignore_case = TRUE))
+      ]
+      if (length(roi_named_cols)) return(unique(roi_named_cols))
+      roi_meta_cols <- c("MainModelVariableName", "Channel", "Geography",
+                         "Sourced VariableName", "VariableSplit", "SplitOrder")
+      setdiff(names(roi_df)[vapply(roi_df, is.numeric, logical(1))], roi_meta_cols)
+    }
+
+    roi_rae_key_columns <- function(roi_df, rae_df) {
+      if (is.null(roi_df) || is.null(rae_df)) return(character(0))
+      roi_cols <- roi_value_columns(roi_df)
+      reserved <- c("MainModelVariableName", "Channel", "VariableSplit", "SplitOrder",
+                    "Period", "VariableName", "VariableValue", roi_cols)
+      keys <- intersect(names(roi_df), names(rae_df))
+      setdiff(keys, reserved)
+    }
+
+    normalize_roi_text <- function(x) {
+      x <- trimws(as.character(x %||% ""))
+      x <- stringr::str_squish(x)
+      tolower(x)
+    }
+
+    normalize_roi_mv <- function(x) {
+      normalize_roi_text(stringr::str_remove(
+        as.character(x %||% ""),
+        stringr::regex("(_Total)+$", ignore_case = TRUE)
+      ))
     }
 
     export_channel_label <- function(nm, cfg = list(), d = NULL) {
@@ -1943,6 +2014,13 @@ mod_export_server <- function(id, results, data, config, channels,
       format_seed_for_indices <- function(df, roi_cols = character(0)) {
         if (is.null(df) || !nrow(df)) return(df)
 
+        internal_match_cols <- setdiff(
+          c("Sourced VariableName",
+            roi_rae_key_columns(clean_roi_columns(d$channels_rois), d$all_rags)),
+          "Geography"
+        )
+        df <- dplyr::select(df, -dplyr::any_of(setdiff(internal_match_cols, roi_cols)))
+
         if ("total_activity" %in% names(df))
           df <- dplyr::rename(df, Activity = total_activity)
         if ("total_spend" %in% names(df))
@@ -2013,6 +2091,11 @@ mod_export_server <- function(id, results, data, config, channels,
         if (!is.null(metric_seed) && nrow(metric_seed) > 0) {
           has_geo_roi_col <- !is.null(roi_file) &&
             "Geography" %in% names(roi_file)
+          roi_match_cols <- setdiff(
+            c("Sourced VariableName", roi_rae_key_columns(roi_file, d$all_rags)),
+            "Geography"
+          )
+          roi_match_cols <- intersect(roi_match_cols, names(metric_seed))
           result <- metric_seed
           if (!"Geography" %in% names(result))
             result$Geography <- NA_character_
@@ -2028,7 +2111,8 @@ mod_export_server <- function(id, results, data, config, channels,
               SplitOrder = split_order_str
             ) %>%
             dplyr::select(VariableSplit, Geography, total_activity, total_spend,
-                          Channel, MainModelVariableName, SplitOrder)
+                          Channel, MainModelVariableName, SplitOrder,
+                          dplyr::any_of(roi_match_cols))
           if (nrow(result)) return(result)
         }
 
@@ -2142,16 +2226,7 @@ mod_export_server <- function(id, results, data, config, channels,
           if (!"MainModelVariableName" %in% names(roi_df))
             return(format_seed_for_indices(act_df))
 
-          roi_meta_cols <- c(
-            "MainModelVariableName", "Channel", "Geography",
-            "Sourced VariableName", "VariableSplit", "SplitOrder"
-          )
-          roi_named_cols <- names(roi_df)[
-            stringr::str_detect(names(roi_df), stringr::regex("\\bROI\\b|ROI", ignore_case = TRUE))
-          ]
-          roi_numeric_cols <- names(roi_df)[sapply(roi_df, is.numeric)]
-          roi_num_cols <- unique(c(roi_named_cols, roi_numeric_cols))
-          roi_num_cols <- setdiff(roi_num_cols, union(roi_meta_cols, names(act_df)))
+          roi_num_cols <- roi_value_columns(roi_df)
           if (!length(roi_num_cols))
             return(format_seed_for_indices(act_df))
 
@@ -2164,73 +2239,155 @@ mod_export_server <- function(id, results, data, config, channels,
           }
           seed_roi_cols <- roi_num_cols
 
-          normalize_roi_key <- function(x) {
-            x <- trimws(as.character(x %||% ""))
-            x <- stringr::str_remove(x, stringr::regex("(_Total)+$", ignore_case = TRUE))
-            x <- stringr::str_squish(x)
-            tolower(x)
+          src_col <- "Sourced VariableName"
+          has_src_col <- src_col %in% names(roi_df) && src_col %in% names(act_df)
+          has_geo_col <- "Geography" %in% names(roi_df) && "Geography" %in% names(act_df)
+          roi_long_cols <- roi_rae_key_columns(roi_df, d$all_rags)
+          roi_long_cols <- intersect(roi_long_cols, names(act_df))
+          roi_long_cols <- setdiff(roi_long_cols, "Geography")
+          unknown_roi_keys <- setdiff(
+            setdiff(names(roi_df), c("MainModelVariableName", "Channel", "Geography",
+                                     "Sourced VariableName", "VariableSplit", "SplitOrder",
+                                     roi_num_cols)),
+            names(d$all_rags %||% data.frame())
+          )
+          unknown_roi_keys <- unknown_roi_keys[!vapply(roi_df[unknown_roi_keys], is.numeric, logical(1))]
+          if (length(unknown_roi_keys)) {
+            showNotification(
+              paste0("ROI key column(s) not found in RAE and ignored: ",
+                     paste(head(unknown_roi_keys, 5), collapse = ", "),
+                     if (length(unknown_roi_keys) > 5) " ..." else ""),
+              type = "warning", duration = 12
+            )
           }
-          has_geo_col <- "Geography" %in% names(roi_df)
-          src_col     <- "Sourced VariableName"
-          has_src_col <- src_col %in% names(roi_df) &&
-            any(!is.na(roi_df[[src_col]]) &
-                  nzchar(trimws(as.character(roi_df[[src_col]]))), na.rm = TRUE)
           empty_roi <- setNames(as.list(rep(NA_real_, length(roi_num_cols))), roi_num_cols)
 
           roi_norm <- roi_df %>%
             dplyr::mutate(
-              mv_norm = normalize_roi_key(MainModelVariableName),
-              geo_val = if (has_geo_col) trimws(as.character(Geography %||% "")) else "",
-              sv_val  = if (has_src_col)
-                trimws(as.character(.data[[src_col]] %||% "")) else "")
+              mv_norm = normalize_roi_mv(MainModelVariableName),
+              geo_val = if ("Geography" %in% names(roi_df))
+                normalize_roi_text(Geography) else "",
+              sv_val = if (src_col %in% names(roi_df))
+                normalize_roi_text(.data[[src_col]]) else ""
+            )
+          for (key_col in roi_long_cols) {
+            roi_norm[[paste0(".key_", key_col)]] <- normalize_roi_text(roi_norm[[key_col]])
+          }
 
           roi_by_mv <- split(roi_norm, roi_norm$mv_norm, drop = TRUE)
+          ambiguous_matches <- character(0)
+          row_value <- function(row, col) {
+            if (!col %in% names(row)) return("")
+            val <- row[[col]]
+            if (!length(val)) return("")
+            val[[1]]
+          }
+          named_value <- function(x, nm, default = "") {
+            if (!length(nm) || is.na(nm) || !nzchar(nm)) return(default)
+            if (is.null(x) || !nm %in% names(x)) return(default)
+            val <- x[[nm]]
+            if (!length(val) || is.na(val[[1]])) return(default)
+            val[[1]]
+          }
+          roi_candidates_for_mv <- function(mv_norm) {
+            if (!length(mv_norm) || is.na(mv_norm[[1]]) || !nzchar(mv_norm[[1]])) return(NULL)
+            mv_norm <- mv_norm[[1]]
+            if (!mv_norm %in% names(roi_by_mv)) return(NULL)
+            roi_by_mv[[mv_norm]]
+          }
 
-          pick_roi <- function(cands, geo_val, vs) {
+          pick_roi <- function(cands, row) {
             if (is.null(cands) || !nrow(cands)) return(NULL)
 
-            if (nzchar(geo_val) && "geo_val" %in% names(cands)) {
-              m1 <- cands[cands$geo_val == geo_val, , drop = FALSE]
-              if (nrow(m1) > 0) return(as.list(m1[1, roi_num_cols, drop = FALSE]))
-            }
-            if (has_src_col) {
-              sv_cands <- cands[nzchar(cands$sv_val), , drop = FALSE]
-              if (nrow(sv_cands) > 0) {
-                pm <- startsWith(tolower(vs), tolower(sv_cands$sv_val))
-                if (any(pm)) {
-                  best <- sv_cands[pm, , drop = FALSE]
-                  best <- best[which.max(nchar(best$sv_val)), , drop = FALSE]
-                  return(as.list(best[1, roi_num_cols, drop = FALSE]))
+            row_src <- if (has_src_col) normalize_roi_text(row_value(row, src_col)) else ""
+            row_geo <- if (has_geo_col) normalize_roi_text(row_value(row, "Geography")) else ""
+            row_keys <- stats::setNames(
+              vapply(roi_long_cols, function(k) normalize_roi_text(row_value(row, k)), character(1)),
+              roi_long_cols
+            )
+            key_sets <- list(
+              c(if (has_src_col) "sv_val", paste0(".key_", roi_long_cols),
+                if (has_geo_col) "geo_val"),
+              c(if (has_src_col) "sv_val", paste0(".key_", roi_long_cols)),
+              c(if (has_src_col) "sv_val"),
+              character(0)
+            )
+            key_sets <- unique(lapply(key_sets, unique))
+
+            match_one_level <- function(keys) {
+              subset <- cands
+              if (!length(keys)) {
+                specific_cols <- c("sv_val", "geo_val", paste0(".key_", roi_long_cols))
+                specific_cols <- intersect(specific_cols, names(subset))
+                if (length(specific_cols)) {
+                  specific_matrix <- vapply(specific_cols, function(k) {
+                    nzchar(subset[[k]])
+                  }, logical(nrow(subset)))
+                  if (is.null(dim(specific_matrix))) {
+                    specific_matrix <- matrix(specific_matrix, ncol = 1L)
+                  }
+                  general <- subset[rowSums(specific_matrix) == 0, , drop = FALSE]
+                  if (nrow(general)) subset <- general
                 }
+                return(subset)
               }
+              for (key in keys) {
+                row_val <- switch(
+                  key,
+                  sv_val = row_src,
+                  geo_val = row_geo,
+                  {
+                    source_col <- sub("^\\.key_", "", key)
+                    named_value(row_keys, source_col)
+                  }
+                )
+                if (!nzchar(row_val) || !key %in% names(subset)) return(subset[0, , drop = FALSE])
+                subset <- subset[nzchar(subset[[key]]) & subset[[key]] == row_val, , drop = FALSE]
+                if (!nrow(subset)) return(subset)
+              }
+              subset
             }
-            m3 <- cands[!nzchar(cands$geo_val) & !nzchar(cands$sv_val), , drop = FALSE]
-            if (nrow(m3) > 0) return(as.list(m3[1, roi_num_cols, drop = FALSE]))
+
+            for (keys in key_sets) {
+              hit <- match_one_level(keys)
+              if (!nrow(hit)) next
+              hit <- dplyr::distinct(hit, dplyr::across(dplyr::all_of(roi_num_cols)), .keep_all = TRUE)
+              if (nrow(hit) == 1L) return(as.list(hit[1, roi_num_cols, drop = FALSE]))
+              ambiguous_matches <<- c(ambiguous_matches, paste0(row$Channel, " -> ", row$VariableSplit))
+              return(NULL)
+            }
             NULL
           }
 
           matched_rois <- lapply(seq_len(nrow(act_df)), function(i) {
-            mv_norm <- normalize_roi_key(act_df$MainModelVariableName[i] %||% "")
-            geo_val <- if ("Geography" %in% names(act_df) &&
-                           !is.null(act_df$Geography[i]) &&
-                           !is.na(act_df$Geography[i])) {
-              trimws(as.character(act_df$Geography[i]))
-            } else {
-              ""
-            }
-            vs <- trimws(as.character(act_df$VariableSplit[i]))
-
-            hit <- pick_roi(roi_by_mv[[mv_norm]], geo_val, vs)
+            row <- act_df[i, , drop = FALSE]
+            mv_norm <- normalize_roi_mv(row$MainModelVariableName %||% "")
+            hit <- pick_roi(roi_candidates_for_mv(mv_norm), row)
             if (!is.null(hit)) return(hit)
-
             empty_roi
           })
 
           act_df <- dplyr::bind_cols(act_df, dplyr::bind_rows(matched_rois))
 
+          if (length(ambiguous_matches)) {
+            showNotification(
+              tagList(
+                tags$strong(paste0(length(unique(ambiguous_matches)), " ambiguous ROI match(es):")),
+                tags$ul(class = "mt-1 ps-3 small",
+                        lapply(head(unique(ambiguous_matches), 5), tags$li),
+                        if (length(unique(ambiguous_matches)) > 5)
+                          tags$li(paste0("... and ", length(unique(ambiguous_matches)) - 5, " more")))
+              ),
+              type = "warning", duration = 15
+            )
+          }
+
+          drop_match_cols <- setdiff(c(src_col, roi_long_cols), "Geography")
+          act_df <- dplyr::select(act_df, -dplyr::any_of(drop_match_cols))
+
           unmatched <- act_df %>%
             dplyr::filter(dplyr::if_any(dplyr::all_of(roi_num_cols), is.na)) %>%
-            dplyr::select(dplyr::any_of(c("Channel", "MainModelVariableName", "Geography"))) %>%
+            dplyr::select(dplyr::any_of(c("Channel", "MainModelVariableName", "Geography", "VariableSplit"))) %>%
             dplyr::distinct() %>%
             dplyr::arrange(Channel)
 

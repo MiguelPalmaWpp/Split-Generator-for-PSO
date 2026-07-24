@@ -673,7 +673,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
                                  stringr::regex("(_Total)+$", ignore_case = TRUE)))
     }
 
-    lookup_roi <- function(model_var, fallback = NULL) {
+    lookup_roi <- function(model_var, fallback = NULL, cfg = NULL) {
       rois <- tryCatch(clean_data_columns(data()$channels_rois), error = \(e) NULL)
       if (is.null(rois) || !"MainModelVariableName" %in% names(rois)) {
         return(list(value = NA_real_, channel = NA_character_))
@@ -695,6 +695,40 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
           vapply(rows, is.numeric, logical(1))
       ]
       roi_num <- setdiff(unique(roi_num), roi_meta)
+      roi_key_cols <- tryCatch({
+        md <- data()$all_rags
+        reserved <- c(roi_meta, roi_num, "VariableName", "VariableValue", "Period")
+        setdiff(intersect(names(rows), names(md)), reserved)
+      }, error = \(e) character(0))
+
+      if (!is.null(cfg) && "Sourced VariableName" %in% names(rows)) {
+        vi <- unique(trimws(as.character(cfg$varname_include %||% character(0))))
+        vi <- vi[!is.na(vi) & nzchar(vi)]
+        if (length(vi)) {
+          src_vals <- trimws(as.character(rows[["Sourced VariableName"]]))
+          src_rows <- rows[tolower(src_vals) %in% tolower(vi), , drop = FALSE]
+          if (nrow(src_rows)) rows <- src_rows
+        }
+      }
+
+      if (!is.null(cfg) && length(roi_key_cols)) {
+        sm <- tryCatch(data()$schema_metadata, error = \(e) NULL)
+        nl <- sm$name_lookup
+        useful_long <- sm$useful_long %||% character(0)
+        for (key_col in intersect(roi_key_cols, useful_long)) {
+          dim_vals <- tryCatch(
+            get_useful_long_values(cfg$analytical_varkeys %||% character(0), nl, key_col),
+            error = \(e) character(0)
+          )
+          dim_vals <- unique(trimws(as.character(dim_vals)))
+          dim_vals <- dim_vals[!is.na(dim_vals) & nzchar(dim_vals)]
+          if (!length(dim_vals)) next
+          row_vals <- trimws(as.character(rows[[key_col]]))
+          matched <- rows[tolower(row_vals) %in% tolower(dim_vals), , drop = FALSE]
+          if (nrow(matched)) rows <- matched
+        }
+      }
+
       for (roi_col in roi_num) {
         if (!is.numeric(rows[[roi_col]])) {
           rows[[roi_col]] <- suppressWarnings(as.numeric(
@@ -719,8 +753,9 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
 
     effective_roi <- function(cfg, fallback = NULL) {
       stored <- cfg$roi %||% NA_real_
-      if (!is.na(stored)) return(stored)
-      lookup_roi(cfg$model_variable %||% fallback, fallback)$value
+      resolved <- lookup_roi(cfg$model_variable %||% fallback, fallback, cfg)$value
+      if (!is.na(resolved)) return(resolved)
+      stored
     }
     
     get_varname_include_fallback <- function(nm) {
@@ -1054,7 +1089,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
             tags$span(paste0(" +", n - 5, " more"), class = "text-muted small")))
       }
       
-      roi_info <- lookup_roi(cfg$model_variable %||% rv$selected, rv$selected)
+      roi_info <- lookup_roi(cfg$model_variable %||% rv$selected, rv$selected, cfg)
       roi_ch <- roi_info$channel
       roi_val <- effective_roi(cfg, rv$selected)
       

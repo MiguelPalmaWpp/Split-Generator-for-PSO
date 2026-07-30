@@ -1,4 +1,5 @@
 ui <- page_fluid(
+  title = 'Splits Generator Deep Dives',
   theme   = wpp_theme,
   padding = 0,
   lang    = "en",

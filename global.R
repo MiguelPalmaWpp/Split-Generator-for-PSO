@@ -83,7 +83,7 @@ wpp_logo <- function(height = "74px", opacity = 1) {
 
 app_center <- tags$div(
   class = "navbar-center-block",
-  tags$span("Splits Generation for Deep Dives", class = "app-main-title"),
+  tags$span("Splits Generator for Deep Dives", class = "app-main-title"),
   tags$span("By Advanced Analytics Colombia", class = "app-subtitle")
 )
 

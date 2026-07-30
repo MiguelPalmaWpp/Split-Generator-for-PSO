@@ -56,9 +56,10 @@ MFF_DIMS_STD             <- c("Geography", "Product", "Campaign", "Outlet", "Cre
 
 MEDIA_KEYWORD_DICT <- list(
   activity = c(
-    "Impressions", "Clicks", "GRPs", "Views", "Reach",
-    "Streams", "Visits", "Conversions", "Engagements",
-    "Opens", "Installs", "Leads"
+    "Impressions", "Clicks", "GRPs", "Views", "Reach", "Streams", "Visits",
+    "Conversions", "Engagements", "Opens", "Installs", "Leads", "Circulation",
+    "Circulations", "Delivered", "Sendouts", "Sendout", "GRP", "Attendance", 
+    "Sents", "Sent"
   ),
   spend = c("Spend", "Cost", "Investment", "Budget")
 )
@@ -82,7 +83,7 @@ wpp_logo <- function(height = "74px", opacity = 1) {
 
 app_center <- tags$div(
   class = "navbar-center-block",
-  tags$span("Split Generation for PSO", class = "app-main-title"),
+  tags$span("Splits Generation for Deep Dives", class = "app-main-title"),
   tags$span("By Advanced Analytics Colombia", class = "app-subtitle")
 )
 

@@ -59,7 +59,7 @@ MEDIA_KEYWORD_DICT <- list(
     "Impressions", "Clicks", "GRPs", "Views", "Reach", "Streams", "Visits",
     "Conversions", "Engagements", "Opens", "Installs", "Leads", "Circulation",
     "Circulations", "Delivered", "Sendouts", "Sendout", "GRP", "Attendance", 
-    "Sents", "Sent"
+    "Sents", "Sent", "Spend", "Cost"
   ),
   spend = c("Spend", "Cost", "Investment", "Budget")
 )

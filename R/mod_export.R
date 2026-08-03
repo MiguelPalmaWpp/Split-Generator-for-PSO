@@ -828,21 +828,43 @@ mod_export_server <- function(id, results, data, config, channels,
     }
 
     final_spend_splits <- function(res, cfg = list(), nm = "") {
-      diag <- summarize_split_diagnostics(res$cost_diagnoses, nm, cfg) %>%
-        dplyr::select(VariableSplit, MainModelVariableName, total_spend) %>%
-        dplyr::filter(!is.na(.data$total_spend) & .data$total_spend > 0) %>%
+      final <- spend_splits_from_rag(res, cfg, nm)
+      if (!nrow(final)) {
+        return(
+          summarize_split_diagnostics(res$cost_diagnoses, nm, cfg) %>%
+            dplyr::select(VariableSplit, MainModelVariableName, total_spend) %>%
+            dplyr::filter(!is.na(.data$total_spend) & .data$total_spend > 0) %>%
+            dplyr::distinct(VariableSplit, MainModelVariableName, .keep_all = TRUE)
+        )
+      }
+
+      diag_meta <- summarize_split_diagnostics(res$cost_diagnoses, nm, cfg) %>%
+        dplyr::select(VariableSplit, MainModelVariableName, total_spend.diag = total_spend) %>%
+        dplyr::distinct(VariableSplit, .keep_all = TRUE)
+      if (nrow(diag_meta) > 0) {
+        final <- final %>%
+          dplyr::left_join(diag_meta, by = "VariableSplit", suffix = c("", ".diag")) %>%
+          dplyr::mutate(
+            MainModelVariableName = dplyr::coalesce(
+              .data$MainModelVariableName.diag,
+              .data$MainModelVariableName
+            ),
+            total_spend = dplyr::coalesce(.data$total_spend, .data$total_spend.diag)
+          ) %>%
+          dplyr::select(-dplyr::any_of(c("MainModelVariableName.diag", "total_spend.diag")))
+      }
+
+      final %>%
         dplyr::distinct(VariableSplit, MainModelVariableName, .keep_all = TRUE)
-      if (nrow(diag)) return(diag)
-      spend_splits_from_rag(res, cfg, nm)
     }
 
     pre_merge_spend_splits <- function(clean, cfg = list(), nm = "") {
-      diag <- summarize_split_diagnostics(clean$cost_diagnoses, nm, cfg) %>%
+      pre <- spend_splits_from_rag(clean, cfg, nm)
+      if (nrow(pre)) return(pre)
+      summarize_split_diagnostics(clean$cost_diagnoses, nm, cfg) %>%
         dplyr::select(VariableSplit, MainModelVariableName, total_spend) %>%
         dplyr::filter(!is.na(.data$total_spend) & .data$total_spend > 0) %>%
         dplyr::distinct(VariableSplit, MainModelVariableName, .keep_all = TRUE)
-      if (nrow(diag)) return(diag)
-      spend_splits_from_rag(clean, cfg, nm)
     }
 
     extract_export_merges <- function(cfg) {
@@ -2892,6 +2914,9 @@ mod_export_server <- function(id, results, data, config, channels,
         lookup_component_spend <- make_metric_lookup(component_metrics, "total_spend", cfg)
         lookup_merged_activity <- make_metric_lookup(final_metrics, "total_activity", cfg)
         lookup_merged_spend <- make_metric_lookup(final_metrics, "total_spend", cfg)
+        channel_metric <- normalize_model_metric(
+          res$model_metric %||% cfg$model_metric %||% "activity"
+        )
 
         lineage %>%
           dplyr::mutate(
@@ -2916,8 +2941,16 @@ mod_export_server <- function(id, results, data, config, channels,
               .data$Merged_Spend
             ),
             Component_Pct = dplyr::if_else(
-              .data$Merged_Activity > 0,
-              round(.data$Component_Activity / .data$Merged_Activity * 100, 2),
+              if (identical(channel_metric, "spend")) {
+                .data$Merged_Spend > 0
+              } else {
+                .data$Merged_Activity > 0
+              },
+              if (identical(channel_metric, "spend")) {
+                round(.data$Component_Spend / .data$Merged_Spend * 100, 2)
+              } else {
+                round(.data$Component_Activity / .data$Merged_Activity * 100, 2)
+              },
               NA_real_
             )
           )

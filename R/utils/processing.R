@@ -138,8 +138,15 @@ build_model_total <- function(analytical, cross_id, model_variables,
   base
 }
 
+normalize_model_metric <- function(x, default = "activity") {
+  x <- tolower(trimws(as.character(x %||% default)[1]))
+  if (is.na(x) || !nzchar(x)) return(default)
+  if (x %in% c("spend", "cost", "investment", "budget")) "spend" else "activity"
+}
+
 build_activity_spend <- function(act_all, cost_all, cfg) {
-  if (nrow(act_all) == 0 || !"VariableSplit" %in% names(act_all))
+  if ((nrow(act_all) == 0 || !"VariableSplit" %in% names(act_all)) &&
+      (nrow(cost_all) == 0 || !"VariableSplit" %in% names(cost_all)))
     return(tibble())
   cost_key <- if (nrow(cost_all) > 0 && "VariableSplit" %in% names(cost_all))
     cost_all %>%
@@ -149,22 +156,31 @@ build_activity_spend <- function(act_all, cost_all, cfg) {
   else
     tibble(key = character(), total_spend = numeric(),
            VariableSplit_c = character())
-  act_all %>%
-    select(VariableSplit, total_activity, model_var) %>%
-    mutate(key = str_remove_all(VariableSplit,
-                                regex(cfg$activity_keyword,
-                                      ignore_case = TRUE))) %>%
-    left_join(cost_key, by = "key") %>%
-    mutate(Channel               = cfg$channel_name,
+  if (nrow(act_all) > 0 && "VariableSplit" %in% names(act_all)) {
+    return(act_all %>%
+      select(VariableSplit, total_activity, model_var) %>%
+      mutate(key = str_remove_all(VariableSplit,
+                                  regex(cfg$activity_keyword,
+                                        ignore_case = TRUE))) %>%
+      left_join(cost_key, by = "key") %>%
+      mutate(Channel               = cfg$channel_name,
+             MainModelVariableName = model_var) %>%
+      select(VariableSplit, total_activity, total_spend,
+             Channel, MainModelVariableName))
+  }
+  cost_all %>%
+    select(VariableSplit, total_spend, model_var) %>%
+    mutate(total_activity = NA_real_,
+           Channel = cfg$channel_name,
            MainModelVariableName = model_var) %>%
     select(VariableSplit, total_activity, total_spend,
            Channel, MainModelVariableName)
 }
 
-build_side_mapping <- function(act_all) {
-  if (nrow(act_all) == 0 || !"VariableSplit" %in% names(act_all))
+build_side_mapping <- function(metric_all) {
+  if (nrow(metric_all) == 0 || !"VariableSplit" %in% names(metric_all))
     return(tibble())
-  act_all %>%
+  metric_all %>%
     select(VariableSplit, model_var) %>%
     mutate(MainModelVariableName = model_var,
            Weight    = 1, MinWeight = 0.5, MaxWeight = 2,
@@ -244,6 +260,9 @@ apply_single_merge <- function(res, merge_entry, cfg, notify = TRUE) {
   view_filter     <- merge_entry$view %||% "focus"
   act_kw          <- cfg$activity_keyword %||% "Impressions"
   spend_kw        <- cfg$spend_keyword    %||% "Spend"
+  merge_metric    <- normalize_model_metric(merge_entry$metric %||%
+                                             cfg$model_metric %||% "activity")
+  is_spend_merge  <- identical(merge_metric, "spend")
 
   normalize_cost_diagnoses <- function(df) {
     needed <- list(
@@ -402,6 +421,7 @@ apply_single_merge <- function(res, merge_entry, cfg, notify = TRUE) {
       applied = isTRUE(applied),
       new_name = new_name,
       view = view_filter,
+      metric = merge_metric,
       requested = selected_splits,
       matched = matched,
       missing = missing,
@@ -591,13 +611,23 @@ apply_single_merge <- function(res, merge_entry, cfg, notify = TRUE) {
   }, error = \(e) res$cost_diagnoses)
   new_cost_diag <- normalize_cost_diagnoses(new_cost_diag)
   
+  model_metric <- normalize_model_metric(merge_metric %||% cfg$model_metric %||% "activity")
+  model_diagnoses <- if (identical(model_metric, "spend")) new_cost_diag else new_act_diag
+  model_side_map <- if (identical(model_metric, "spend")) {
+    build_side_mapping(new_cost_diag)
+  } else {
+    new_side_map
+  }
+
   out <- list(rag            = new_rag,
               cross_cols     = res$cross_cols,
               ref_cross      = res$ref_cross,
               activity_spend = new_act_spend,
-              side_mapping   = new_side_map,
+              side_mapping   = model_side_map,
               act_diagnoses  = new_act_diag,
-              cost_diagnoses = new_cost_diag)
+              cost_diagnoses = new_cost_diag,
+              model_diagnoses = model_diagnoses,
+              model_metric = model_metric)
   attr(out, "merge_status") <- merge_status(applied = TRUE, matched = rag_cols)
   out
 }
@@ -939,15 +969,19 @@ process_channel <- function(all_rags,
   }
   
   pb("Done.", 1.0)
+  model_metric <- normalize_model_metric(cfg$model_metric %||% "activity")
+  model_diagnoses <- if (identical(model_metric, "spend")) cost_all else act_all
   
   list(
     rag            = rag,
     cross_cols     = cross_cols,
     ref_cross      = ref_cross_key,
     activity_spend = build_activity_spend(act_all, cost_all, cfg),
-    side_mapping   = build_side_mapping(act_all),
+    side_mapping   = build_side_mapping(model_diagnoses),
     act_diagnoses  = act_all,
-    cost_diagnoses = cost_all
+    cost_diagnoses = cost_all,
+    model_diagnoses = model_diagnoses,
+    model_metric = model_metric
   )
 }
 

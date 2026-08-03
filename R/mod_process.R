@@ -11,6 +11,7 @@ mod_process_ui <- function(id) {
       card(
         card_header("Run Processing"),
         selectInput(ns("channel_select"), "Select Channel", choices = NULL),
+        uiOutput(ns("model_metric_ui")),
         actionButton(ns("btn_one"), "Process Selected",
                      class = "btn-success btn-sm w-100 mb-2"),
         actionButton(ns("btn_all"), "Process All",
@@ -96,6 +97,46 @@ mod_process_server <- function(id, data, config, channels,
     
     valid_nm <- function(nm)
       !is.null(nm) && length(nm) == 1 && !is.na(nm) && nzchar(nm)
+
+    metric_label <- function(metric) {
+      if (identical(normalize_model_metric(metric), "spend")) "Spend/Cost" else "Activity"
+    }
+
+    active_model_metric <- reactive({
+      nm <- input$channel_select
+      cfg <- if (valid_nm(nm)) channels()[[nm]] else NULL
+      normalize_model_metric(input$model_metric %||% cfg$model_metric %||% "activity")
+    })
+
+    metric_total_col <- function(metric) {
+      if (identical(normalize_model_metric(metric), "spend")) "total_spend" else "total_activity"
+    }
+
+    metric_pct_col <- function(metric) {
+      if (identical(normalize_model_metric(metric), "spend")) "pct_total_spend" else "pct_total_activity"
+    }
+
+    output$model_metric_ui <- renderUI({
+      nm <- input$channel_select
+      if (!valid_nm(nm)) return(NULL)
+      cfg <- channels()[[nm]] %||% list()
+      selected <- normalize_model_metric(input$model_metric %||% cfg$model_metric %||% "activity")
+      div(class = "filter-bar mb-2",
+          tags$span(tags$strong("Model metric:", class = "filter-bar-label")),
+          radioButtons(session$ns("model_metric"), NULL,
+                       choices = c("Activity" = "activity", "Spend/Cost" = "spend"),
+                       selected = selected, inline = TRUE))
+    })
+
+    observeEvent(input$channel_select, {
+      nm <- input$channel_select
+      if (!valid_nm(nm)) return()
+      cfg <- channels()[[nm]] %||% list()
+      updateRadioButtons(session, "model_metric",
+                         selected = normalize_model_metric(cfg$model_metric %||% "activity"))
+      tryCatch(DT::dataTableProxy(session$ns("diag_act")) %>% DT::selectRows(NULL),
+               error = function(e) NULL)
+    }, ignoreInit = TRUE)
 
     channel_source_data <- function(all_rags, cfg) {
       if (is.null(all_rags) || is.null(cfg) || !"VariableName" %in% names(all_rags))
@@ -894,8 +935,15 @@ mod_process_server <- function(id, data, config, channels,
       has_data <- (!is.null(res$act_diagnoses) && nrow(res$act_diagnoses) > 0) ||
         (!is.null(res$rag) && nrow(res$rag) > 0)
       if (is.null(res) || !has_data) return(NULL)
-      n_focus <- tryCatch(nrow(build_current_act_data("focus")), error = \(e) 0L)
-      n_nf    <- tryCatch(nrow(build_current_act_data("nonfocus")), error = \(e) 0L)
+      metric_for_counts <- normalize_model_metric(input$model_metric %||% (channels()[[nm]] %||% list())$model_metric %||% "activity")
+      n_focus <- tryCatch(
+        nrow(if (identical(metric_for_counts, "spend")) build_current_spend_from_rag(res, channels()[[nm]] %||% list(), "focus") else build_current_act_data("focus")),
+        error = \(e) 0L
+      )
+      n_nf <- tryCatch(
+        nrow(if (identical(metric_for_counts, "spend")) build_current_spend_from_rag(res, channels()[[nm]] %||% list(), "nonfocus") else build_current_act_data("nonfocus")),
+        error = \(e) 0L
+      )
       div(class = "filter-bar",
           tags$span(icon("filter", class = "icon-blue-sm"),
                     tags$strong(" View:", class = "filter-bar-label")),
@@ -975,10 +1023,24 @@ mod_process_server <- function(id, data, config, channels,
       build_current_act_data(input$period_filter %||% "focus")
     }) %>% bindCache(input$channel_select, input$period_filter, results_trigger())
 
-    build_current_spend_from_rag <- function(res, cfg) {
+    build_current_spend_from_rag <- function(res, cfg, filter_val = "focus") {
       if (is.null(res) || is.null(res$rag)) return(empty_spend_diag())
       rag_df <- as.data.frame(res$rag)
       if (!nrow(rag_df)) return(empty_spend_diag())
+
+      if ("Period" %in% names(rag_df)) {
+        gcfg <- config()
+        start_d <- suppressWarnings(as.Date(gcfg$start_report_date))
+        end_d <- suppressWarnings(as.Date(gcfg$end_report_date))
+        rag_df$Period <- as.Date(rag_df$Period, origin = "1970-01-01")
+        if (!is.na(start_d) && !is.na(end_d)) {
+          rag_df <- switch(filter_val,
+                           "focus" = rag_df[rag_df$Period >= start_d & rag_df$Period <= end_d, ],
+                           "nonfocus" = rag_df[rag_df$Period < start_d, ],
+                           rag_df)
+          if (!nrow(rag_df)) return(empty_spend_diag())
+        }
+      }
 
       spend_kw <- cfg$spend_keyword %||% "Spend"
       id_cols <- intersect(c(res$cross_cols %||% character(0),
@@ -1021,26 +1083,41 @@ mod_process_server <- function(id, data, config, channels,
       if (is.null(cost_df) || nrow(cost_df) == 0 ||
           !"VariableSplit" %in% names(cost_df) ||
           !"total_spend" %in% names(cost_df)) {
-        return(build_current_spend_from_rag(res, cfg))
+        return(build_current_spend_from_rag(res, cfg, input$period_filter %||% "focus"))
+      }
+      if ("period" %in% names(cost_df)) {
+        cost_df <- cost_df %>% filter(.data$period == (input$period_filter %||% "focus"))
       }
       out <- cost_df %>%
         filter(!is.na(total_spend) & total_spend > 0) %>%
         select(-any_of(c("seg", "period", "model_var"))) %>%
         mutate(across(where(is.numeric), \(x) round(x, 4)))
-      if (!nrow(out)) build_current_spend_from_rag(res, cfg) else out
-    }) %>% bindCache(input$channel_select, results_trigger())
+      if (!nrow(out)) build_current_spend_from_rag(res, cfg, input$period_filter %||% "focus") else out
+    }) %>% bindCache(input$channel_select, input$period_filter, results_trigger())
+
+    current_model_data <- reactive({
+      metric <- active_model_metric()
+      if (identical(metric, "spend")) current_spend_data() else current_act_data()
+    }) %>% bindCache(input$channel_select, input$model_metric, input$period_filter, results_trigger())
     
     # ── Activity KPIs ──────────────────────────────────────────────────────
     output$activity_kpis <- renderUI({
       results_trigger()
       nm <- input$channel_select
       if (!valid_nm(nm) || is.null(results_store[[nm]])) return(NULL)
-      df <- current_act_data(); if (nrow(df) == 0) return(NULL)
+      metric <- active_model_metric()
+      total_col <- metric_total_col(metric)
+      pct_col <- metric_pct_col(metric)
+      df <- current_model_data(); if (nrow(df) == 0 || !total_col %in% names(df)) return(NULL)
+      if (!pct_col %in% names(df)) {
+        grand <- sum(df[[total_col]], na.rm = TRUE)
+        df[[pct_col]] <- round(df[[total_col]] / pmax(grand, 1) * 100, 4)
+      }
       threshold     <- input$threshold_pct %||% 1
       total_splits  <- nrow(df)
-      above_thresh  <- sum(df$pct_total_activity >= threshold, na.rm = TRUE)
-      below_thresh  <- sum(df$pct_total_activity <  threshold, na.rm = TRUE)
-      channel_total <- sum(df$total_activity, na.rm = TRUE)
+      above_thresh  <- sum(df[[pct_col]] >= threshold, na.rm = TRUE)
+      below_thresh  <- sum(df[[pct_col]] <  threshold, na.rm = TRUE)
+      channel_total <- sum(df[[total_col]], na.rm = TRUE)
       kpis <- list(
         list(label = "Total splits",    value = total_splits,
              icon = "layer-group", box_class = "kpi-box kpi-box-blue",
@@ -1051,7 +1128,7 @@ mod_process_server <- function(id, data, config, channels,
         list(label = paste0("Below ", threshold, "% (review)"), value = below_thresh,
              icon = "arrow-down", box_class = "kpi-box kpi-box-red",
              icon_class = "kpi-icon-red"),
-        list(label = "Channel total",   value = fmt_compact(channel_total),
+        list(label = paste(metric_label(metric), "total"), value = fmt_compact(channel_total),
              icon = "chart-bar",  box_class = "kpi-box kpi-box-blue",
              icon_class = "kpi-icon-blue")
       )
@@ -1119,7 +1196,7 @@ mod_process_server <- function(id, data, config, channels,
         paste0("merge_plan_", nm, "_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
       },
       content = function(file) {
-        df <- tryCatch(isolate(current_act_data()), error = function(e) NULL)
+        df <- tryCatch(isolate(current_model_data()), error = function(e) NULL)
         if (is.null(df) || nrow(df) == 0) {
           write.csv(data.frame(VariableSplit = character(), Split = character(),
                                MergeName    = character()),
@@ -1181,7 +1258,7 @@ mod_process_server <- function(id, data, config, channels,
     hydrate_plan_variable_split <- function(plan) {
       if (is.null(plan) || !"Split" %in% names(plan)) return(plan)
 
-      df <- tryCatch(isolate(current_act_data()), error = function(e) NULL)
+      df <- tryCatch(isolate(current_model_data()), error = function(e) NULL)
       if (is.null(df) || !nrow(df) || !"VariableSplit" %in% names(df)) return(plan)
 
       lookup <- df %>%
@@ -1256,11 +1333,13 @@ mod_process_server <- function(id, data, config, channels,
           selected_splits <- selected_splits[!is.na(selected_splits)]
           act_kw   <- cfg$activity_keyword %||% "Impressions"
           spend_kw <- cfg$spend_keyword    %||% "Spend"
+          merge_metric <- active_model_metric()
+          metric_diag <- if (identical(merge_metric, "spend")) res$cost_diagnoses else res$act_diagnoses
           
           if (!length(selected_splits)) next
-          matching_periods <- if (!is.null(res$act_diagnoses) &&
-                                  all(c("VariableSplit", "period") %in% names(res$act_diagnoses))) {
-            unique(res$act_diagnoses$period[res$act_diagnoses$VariableSplit %in% selected_splits])
+          matching_periods <- if (!is.null(metric_diag) &&
+                                  all(c("VariableSplit", "period") %in% names(metric_diag))) {
+            unique(metric_diag$period[metric_diag$VariableSplit %in% selected_splits])
           } else character(0)
           matching_periods <- matching_periods[!is.na(matching_periods) & nzchar(matching_periods)]
           merge_view <- if (view_filter %in% matching_periods) {
@@ -1278,9 +1357,12 @@ mod_process_server <- function(id, data, config, channels,
                              type = "warning", duration = 5); next
           }
           
-          spend_splits   <- str_replace_all(selected_splits, regex(act_kw, ignore_case = TRUE), spend_kw)
-          new_spend_name <- str_replace_all(merge_name, regex(act_kw, ignore_case = TRUE), spend_kw)
-          if (new_spend_name == merge_name) new_spend_name <- paste0(merge_name, "_", spend_kw)
+          spend_splits   <- if (identical(merge_metric, "spend")) selected_splits else
+            str_replace_all(selected_splits, regex(act_kw, ignore_case = TRUE), spend_kw)
+          new_spend_name <- if (identical(merge_metric, "spend")) merge_name else
+            str_replace_all(merge_name, regex(act_kw, ignore_case = TRUE), spend_kw)
+          if (new_spend_name == merge_name && !identical(merge_metric, "spend"))
+            new_spend_name <- paste0(merge_name, "_", spend_kw)
           cost_splits <- if (!is.null(res$cost_diagnoses) &&
                              "VariableSplit" %in% names(res$cost_diagnoses))
             res$cost_diagnoses$VariableSplit else character(0)
@@ -1288,14 +1370,16 @@ mod_process_server <- function(id, data, config, channels,
           
           merge_entry <- list(new_name = merge_name, merged = as.list(selected_splits),
                               view = merge_view, spend_merged = as.list(matching_cost),
-                              new_spend_name = new_spend_name)
+                              new_spend_name = new_spend_name, metric = merge_metric)
           res     <- apply_single_merge(res, merge_entry, cfg)
           new_log <- c(new_log, list(list(
             merged = selected_splits, new_name = merge_name, view = merge_view,
-            spend_merged = matching_cost, new_spend_name = new_spend_name)))
+            spend_merged = matching_cost, new_spend_name = new_spend_name,
+            metric = merge_metric)))
           new_saved <- c(new_saved, list(list(
             merged = as.list(selected_splits), new_name = merge_name, view = merge_view,
             spend_merged = as.list(matching_cost), new_spend_name = new_spend_name,
+            metric = merge_metric,
             active = TRUE, saved_at = format(Sys.time(), "%Y-%m-%d %H:%M"))))
         }
       })
@@ -1331,7 +1415,7 @@ mod_process_server <- function(id, data, config, channels,
         return(tags$p(class = "text-muted small mb-2",
                       icon("hand-pointer"), " Select rows in the table to merge splits."))
       
-      df             <- current_act_data()
+      df             <- current_model_data()
       selected       <- selected[selected <= nrow(df)]
       if (length(selected) < 2)
         return(tags$p(class = "text-muted small mb-2",
@@ -1348,11 +1432,21 @@ mod_process_server <- function(id, data, config, channels,
                       paste0(parts$prefix, "...", parts$suffix)))
       else NULL
       
-      combined <- df %>%
-        filter(VariableSplit %in% selected_names) %>%
-        summarise(act   = sum(total_activity,     na.rm = TRUE),
-                  pct   = sum(pct_total_activity, na.rm = TRUE),
-                  weeks = max(num_weeks_activity, na.rm = TRUE))
+      total_col <- metric_total_col(active_model_metric())
+      pct_col <- metric_pct_col(active_model_metric())
+      selected_df <- df %>% filter(VariableSplit %in% selected_names)
+      wk_col <- intersect(c("num_weeks_activity", "num_weeks_spend"), names(selected_df))[1]
+      weeks_val <- if (length(wk_col) && !is.na(wk_col)) {
+        finite_weeks <- selected_df[[wk_col]][is.finite(selected_df[[wk_col]])]
+        if (length(finite_weeks)) max(finite_weeks, na.rm = TRUE) else NA_real_
+      } else {
+        NA_real_
+      }
+      combined <- tibble::tibble(
+        act = sum(selected_df[[total_col]], na.rm = TRUE),
+        pct = if (pct_col %in% names(selected_df)) sum(selected_df[[pct_col]], na.rm = TRUE) else NA_real_,
+        weeks = weeks_val
+      )
       
       div(class = "merge-toolbar-box",
           layout_columns(
@@ -1431,7 +1525,7 @@ mod_process_server <- function(id, data, config, channels,
     observeEvent(input$diag_act_rows_selected, {
       selected <- input$diag_act_rows_selected %||% integer(0)
       if (length(selected) < 2) return()
-      df <- tryCatch(current_act_data(), error = \(e) NULL)
+      df <- tryCatch(current_model_data(), error = \(e) NULL)
       if (is.null(df) || nrow(df) == 0) return()
       selected <- selected[selected <= nrow(df)]
       selected_names <- df$VariableSplit[selected]
@@ -1452,7 +1546,8 @@ mod_process_server <- function(id, data, config, channels,
       res             <- results_store[[nm]]; req(res)
       cfg             <- channels()[[nm]]
       view_filter     <- input$period_filter %||% "focus"
-      df              <- current_act_data()
+      merge_metric    <- active_model_metric()
+      df              <- current_model_data()
       selected        <- selected[selected <= nrow(df)]
       if (length(selected) < 2) {
         showNotification("Select at least 2 current rows to merge.", type = "warning"); return()
@@ -1464,10 +1559,11 @@ mod_process_server <- function(id, data, config, channels,
       if (!length(intersect(selected_splits, names(res$rag)))) {
         showNotification("Selected splits not found in RAG.", type = "warning"); return()
       }
-      has_diag <- !is.null(res$act_diagnoses) &&
-        nrow(res$act_diagnoses) > 0 &&
-        all(c("VariableSplit", "period") %in% names(res$act_diagnoses)) &&
-        nrow(filter(res$act_diagnoses,
+      metric_diag <- if (identical(merge_metric, "spend")) res$cost_diagnoses else res$act_diagnoses
+      has_diag <- !is.null(metric_diag) &&
+        nrow(metric_diag) > 0 &&
+        all(c("VariableSplit", "period") %in% names(metric_diag)) &&
+        nrow(filter(metric_diag,
                     VariableSplit %in% selected_splits,
                     period == view_filter)) > 0
       if (!has_diag && !length(intersect(selected_splits, names(res$rag)))) {
@@ -1475,20 +1571,24 @@ mod_process_server <- function(id, data, config, channels,
                          type = "warning", duration = 10); return()
       }
       
-      spend_splits   <- str_replace_all(selected_splits, regex(act_kw, ignore_case = TRUE), spend_kw)
-      new_spend_name <- str_replace_all(new_name, regex(act_kw, ignore_case = TRUE), spend_kw)
-      if (new_spend_name == new_name) new_spend_name <- paste0(new_name, "_", spend_kw)
+      spend_splits   <- if (identical(merge_metric, "spend")) selected_splits else
+        str_replace_all(selected_splits, regex(act_kw, ignore_case = TRUE), spend_kw)
+      new_spend_name <- if (identical(merge_metric, "spend")) new_name else
+        str_replace_all(new_name, regex(act_kw, ignore_case = TRUE), spend_kw)
+      if (new_spend_name == new_name && !identical(merge_metric, "spend"))
+        new_spend_name <- paste0(new_name, "_", spend_kw)
       matching_cost <- intersect(spend_splits, res$cost_diagnoses$VariableSplit)
       
       merge_entry <- list(new_name = new_name, merged = as.list(selected_splits),
                           view = view_filter, spend_merged = as.list(matching_cost),
-                          new_spend_name = new_spend_name)
+                          new_spend_name = new_spend_name, metric = merge_metric)
       
       set_hist(nm, c(get_hist(nm), list(results_store[[nm]])))
       set_res(nm, apply_single_merge(res, merge_entry, cfg))
       set_log(nm, c(get_log(nm), list(list(
         merged = selected_splits, new_name = new_name, view = view_filter,
-        spend_merged = matching_cost, new_spend_name = new_spend_name))))
+        spend_merged = matching_cost, new_spend_name = new_spend_name,
+        metric = merge_metric))))
       
       if (!is.null(update_merges)) {
         existing <- channels()[[nm]]$saved_merges %||% list()
@@ -1498,6 +1598,7 @@ mod_process_server <- function(id, data, config, channels,
           merged = as.list(selected_splits), view = view_filter,
           spend_merged = as.list(matching_cost),
           new_spend_name = new_spend_name, active = TRUE,
+          metric = merge_metric,
           saved_at = format(Sys.time(), "%Y-%m-%d %H:%M"))))
         update_merges(nm, saved_after)
         mark_result_current(nm, cfg, saved_after)
@@ -1618,10 +1719,18 @@ mod_process_server <- function(id, data, config, channels,
     output$diag_act <- DT::renderDT({
       results_trigger()
       nm  <- req(input$channel_select); req(results_store[[nm]])
-      df  <- current_act_data(); req(nrow(df) > 0)
+      metric <- active_model_metric()
+      total_col <- metric_total_col(metric)
+      pct_col <- metric_pct_col(metric)
+      df  <- current_model_data(); req(nrow(df) > 0)
+      req(total_col %in% names(df))
+      if (!pct_col %in% names(df)) {
+        grand <- sum(df[[total_col]], na.rm = TRUE)
+        df[[pct_col]] <- round(df[[total_col]] / pmax(grand, 1) * 100, 4)
+      }
       
       threshold   <- input$threshold_pct %||% 1
-      finite_pcts <- df$pct_total_activity[is.finite(df$pct_total_activity)]
+      finite_pcts <- df[[pct_col]][is.finite(df[[pct_col]])]
       max_pct     <- if (length(finite_pcts) > 0 && max(finite_pcts) > 0)
         max(finite_pcts) else 1
       
@@ -1633,7 +1742,7 @@ mod_process_server <- function(id, data, config, channels,
                               "quartile_3", "max_no_outlier", "max"),
                             names(df_display))
       col_defs <- list(list(className = "dt-left", targets = 0))
-      activity_target <- which(names(df_display) == "total_activity") - 1
+      activity_target <- which(names(df_display) == total_col) - 1
       if (length(activity_target) == 1 && !is.na(activity_target)) {
         col_defs <- c(col_defs, list(
           list(targets = activity_target,
@@ -1658,12 +1767,12 @@ mod_process_server <- function(id, data, config, channels,
       if (length(num_fmt) > 0)
         dt <- dt %>% formatCurrency(num_fmt, currency = "", digits = 0, mark = ",")
       dt %>%
-        formatStyle("pct_total_activity",
+        formatStyle(pct_col,
                     background         = styleColorBar(c(0, max_pct), "#EBF3FB"),
                     backgroundSize     = "100% 90%",
                     backgroundRepeat   = "no-repeat",
                     backgroundPosition = "center") %>%
-        formatStyle("pct_total_activity",
+        formatStyle(pct_col,
                     color = styleInterval(threshold, c("#dc3545", "#333")))
     }, server = TRUE)
     
@@ -1718,12 +1827,14 @@ mod_process_server <- function(id, data, config, channels,
       nm  <- req(input$channel_select)
       res <- req(results_store[[nm]])
       list(nm = nm, res = res, d = isolate(data()),
-           cfg = isolate(channels()[[nm]]), gcfg = isolate(config()))
-    }) %>% bindCache(input$channel_select, results_trigger())
+           cfg = isolate(channels()[[nm]]), gcfg = isolate(config()),
+           model_metric = active_model_metric())
+    }) %>% bindCache(input$channel_select, input$model_metric, results_trigger())
     
     output$diag_check <- DT::renderDT({
       tc   <- total_check_data()
       nm   <- tc$nm; res <- tc$res; d <- tc$d; cfg <- tc$cfg; gcfg <- tc$gcfg
+      model_metric <- normalize_model_metric(tc$model_metric %||% cfg$model_metric %||% "activity")
       req(d$analytical)
       
       cross_cols    <- res$cross_cols %||% gcfg$cross_cols %||% "Geography"
@@ -1853,8 +1964,18 @@ mod_process_server <- function(id, data, config, channels,
       
       id_in_rag  <- intersect(full_cross_id, names(rag_in_scope))
       spend_kw_f <- cfg$spend_keyword %||% "Spend"
+      act_kw_f   <- cfg$activity_keyword %||% "Activity"
       all_num    <- setdiff(names(rag_in_scope)[sapply(rag_in_scope, is.numeric)], id_in_rag)
-      split_cols <- all_num[!grepl(spend_kw_f, all_num, ignore.case = TRUE)]
+      split_cols <- if (identical(model_metric, "spend")) {
+        all_num[grepl(spend_kw_f, all_num, ignore.case = TRUE)]
+      } else {
+        all_num[!grepl(spend_kw_f, all_num, ignore.case = TRUE)]
+      }
+      if (identical(model_metric, "spend") && !length(split_cols)) {
+        split_cols <- intersect(res$cost_diagnoses$VariableSplit %||% character(0), all_num)
+      } else if (!identical(model_metric, "spend") && !length(split_cols)) {
+        split_cols <- all_num[grepl(act_kw_f, all_num, ignore.case = TRUE)]
+      }
       
       rag_in_scope$row_splits <- if (length(split_cols) > 0)
         rowSums(rag_in_scope[, split_cols, drop = FALSE], na.rm = TRUE) else 0

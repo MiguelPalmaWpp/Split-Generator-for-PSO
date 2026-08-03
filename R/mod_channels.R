@@ -1119,6 +1119,9 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
                 if (!is.na(roi_ch)) mk_info_row("Channel", roi_ch),
                 if (nzchar(cfg$sub_channel %||% "")) mk_info_row("Sub Channel", cfg$sub_channel),
                 if (nzchar(cfg$effect %||% ""))      mk_info_row("Effect", cfg$effect),
+                mk_info_row("Model metric",
+                            if (identical(normalize_model_metric(cfg$model_metric %||% "activity"), "spend"))
+                              "Spend/Cost" else "Activity"),
                 mk_info_row("VarName filter",
                             if (length(cfg$varname_include) > 0)
                               paste(cfg$varname_include, collapse = ", ") else "\u2014"),
@@ -2292,6 +2295,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
             min_period = if (!is.null(an)) min(an$Period, na.rm = TRUE) else NULL,
             max_period = if (!is.null(an)) max(an$Period, na.rm = TRUE) else NULL,
             segment_overrides = list(), activity_keyword = act_kw,
+            model_metric = "activity",
             spend_keyword = spend_kw, split_columns = c("VariableName"),
             saved_merges = list(), dimension_breaks = list(),
             roi = roi_info$value, source = "manual",
@@ -2503,6 +2507,12 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
         spend_kw <- trimws(as.character(row$SpendKeyword[[1]] %||% ""))
         if (!is.na(spend_kw) && nzchar(spend_kw)) cfg$spend_keyword <- spend_kw
       }
+      if ("ModelMetric" %in% names(row)) {
+        mm <- trimws(as.character(row$ModelMetric[[1]] %||% ""))
+        if (!is.na(mm) && nzchar(mm)) cfg$model_metric <- normalize_model_metric(mm)
+      } else if (is.null(cfg$model_metric)) {
+        cfg$model_metric <- "activity"
+      }
       if ("VarNameInclude" %in% names(row)) {
         vi <- parse_config_varnames(row$VarNameInclude[[1]] %||% "")
         if (length(vi)) cfg$varname_include <- vi
@@ -2626,6 +2636,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
             cfg$min_period       <- dates$min_p
             cfg$max_period       <- dates$max_p
             cfg$config_imported  <- TRUE
+            cfg$model_metric     <- cfg$model_metric %||% "activity"
             return(apply_config_keywords(cfg, row))
           }
 
@@ -2649,6 +2660,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
             varname_include = varname_include, analytical_varkeys = actual_mv,
             min_period = dates$min_p, max_period = dates$max_p,
             segment_overrides = list(), activity_keyword = act_kw,
+            model_metric = "activity",
             spend_keyword = spend_kw, split_columns = splits,
             saved_merges = list(), dimension_breaks = list(), dimension_aliases = list(),
             roi = roi_info$value, source = "manual",
@@ -2811,6 +2823,11 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
             cfg_ch   <- rv$channels[[nm]]
             act_kw   <- cfg_ch$activity_keyword %||% "Impressions"
             spend_kw <- cfg_ch$spend_keyword    %||% "Spend"
+            merge_metric <- normalize_model_metric(
+              if ("ModelMetric" %in% names(merge_rows))
+                merge_rows$ModelMetric[i] %||% cfg_ch$model_metric %||% "activity"
+              else cfg_ch$model_metric %||% "activity"
+            )
             new_spend <- stringr::str_replace_all(
               merge_name, stringr::regex(act_kw, ignore_case = TRUE), spend_kw)
             if (new_spend == merge_name) new_spend <- paste0(merge_name, "_", spend_kw)
@@ -2818,6 +2835,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
             rv$channels[[nm]]$saved_merges <- c(existing, list(list(
               id = max_id + 1L, new_name = merge_name, merged = as.list(merged),
               view = merge_view, spend_merged = list(), new_spend_name = new_spend,
+              metric = merge_metric,
               active = TRUE, saved_at = format(Sys.time(), "%Y-%m-%d %H:%M"))))
             n_merges <- n_merges + 1L
           }

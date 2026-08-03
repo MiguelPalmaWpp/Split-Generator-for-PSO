@@ -523,9 +523,112 @@ mod_export_server <- function(id, results, data, config, channels,
       spend <- if (nrow(spend_rows)) {
         tibble::tibble(
           VariableSplit = spend_rows$VariableSplit,
-          total_spend = spend_rows$total
+          total_spend = spend_rows$total,
+          is_local = spend_rows$is_local
         )
       } else tibble::tibble(VariableSplit = character(), total_spend = numeric())
+
+      if (identical(normalize_model_metric(cfg$model_metric %||% "activity"), "spend")) {
+        seed <- spend %>%
+          dplyr::filter(!grepl("_Before(\\s+|_)", .data$VariableSplit, ignore.case = TRUE)) %>%
+          dplyr::mutate(
+            key = stringr::str_remove_all(.data$VariableSplit, stringr::regex(spend_kw, ignore_case = TRUE))
+          )
+        if (nrow(seed)) {
+          activity_focus <- activity %>%
+            dplyr::filter(!grepl("_Before(\\s+|_)", .data$VariableSplit, ignore.case = TRUE)) %>%
+            dplyr::mutate(
+              key = stringr::str_remove_all(.data$VariableSplit, stringr::regex(act_kw, ignore_case = TRUE))
+            ) %>%
+            dplyr::select(key, total_activity)
+          seed <- seed %>%
+            dplyr::left_join(activity_focus, by = "key") %>%
+            dplyr::select(-key)
+        } else {
+          seed$total_activity <- numeric(0)
+        }
+
+        if (geo_col %in% names(agg) && nrow(seed)) {
+          local_splits <- seed$VariableSplit[seed$is_local %in% TRUE]
+          geo_totals <- agg[VariableSplit %in% local_splits, .(
+            total_spend = sum(Value, na.rm = TRUE)
+          ), by = c("VariableSplit", geo_col)]
+          if (nrow(geo_totals)) {
+            setnames(geo_totals, geo_col, "Geography")
+            activity_geo <- if (nzchar(act_kw) && nrow(act_rows)) {
+              act_focus_names <- activity$VariableSplit[
+                !grepl("_Before(\\s+|_)", activity$VariableSplit, ignore.case = TRUE)
+              ]
+              act_geo <- agg[VariableSplit %in% act_focus_names, .(
+                total_activity = sum(Value, na.rm = TRUE)
+              ), by = c("VariableSplit", geo_col)]
+              if (nrow(act_geo)) {
+                setnames(act_geo, geo_col, "Geography")
+                as.data.frame(act_geo) %>%
+                  dplyr::mutate(
+                    key = stringr::str_remove_all(
+                      .data$VariableSplit,
+                      stringr::regex(act_kw, ignore_case = TRUE)
+                    )
+                  ) %>%
+                  dplyr::select(key, Geography, total_activity)
+              } else {
+                tibble::tibble(key = character(), Geography = character(), total_activity = numeric())
+              }
+            } else {
+              tibble::tibble(key = character(), Geography = character(), total_activity = numeric())
+            }
+            seed_local <- as.data.frame(geo_totals) %>%
+              dplyr::mutate(
+                key = stringr::str_remove_all(
+                  .data$VariableSplit,
+                  stringr::regex(spend_kw, ignore_case = TRUE)
+                )
+              ) %>%
+              dplyr::left_join(activity_geo, by = c("key", "Geography")) %>%
+              dplyr::select(-key)
+            seed_national <- seed %>%
+              dplyr::filter(!.data$VariableSplit %in% local_splits) %>%
+              dplyr::mutate(Geography = NA_character_) %>%
+              dplyr::select(VariableSplit, Geography, total_activity, total_spend)
+            seed <- dplyr::bind_rows(seed_local, seed_national)
+          } else {
+            seed <- seed %>% dplyr::mutate(Geography = NA_character_)
+          }
+        } else if (nrow(seed)) {
+          seed <- seed %>% dplyr::mutate(Geography = NA_character_)
+        }
+
+        if (!"Geography" %in% names(seed)) seed$Geography <- NA_character_
+        if (!"total_activity" %in% names(seed)) seed$total_activity <- NA_real_
+        if (nrow(seed)) {
+          spend_meta_source <- source_data[
+            period_tag == "focus" &
+              grepl(spend_kw, source_data$VariableSplit, ignore.case = TRUE),
+            , drop = FALSE
+          ]
+          if (nrow(spend_meta_source)) {
+            spend_meta_source$`Sourced VariableName` <- spend_meta_source$VariableName
+            meta_cols <- unique(c("Sourced VariableName", roi_seed_key_cols))
+            meta_cols <- intersect(meta_cols, names(spend_meta_source))
+            if (length(meta_cols)) {
+              meta_dt <- data.table::as.data.table(spend_meta_source[, c("VariableSplit", meta_cols), drop = FALSE])
+              split_meta <- meta_dt[, lapply(.SD, function(x) {
+                vals <- unique(trimws(as.character(x)))
+                vals <- vals[!is.na(vals) & nzchar(vals)]
+                if (length(vals) == 1L) vals[1] else NA_character_
+              }), by = VariableSplit, .SDcols = meta_cols]
+              seed <- seed %>%
+                dplyr::left_join(as.data.frame(split_meta), by = "VariableSplit")
+            }
+          }
+        }
+        seed <- seed %>%
+          dplyr::select(VariableSplit, Geography, total_activity, total_spend,
+                        dplyr::any_of(c("Sourced VariableName", roi_seed_key_cols)))
+        return(list(activity = activity, spend = spend %>% dplyr::select(VariableSplit, total_spend),
+                    seed = seed))
+      }
 
       seed <- seed_activity %>%
         dplyr::filter(!grepl("_Before(\\s+|_)", .data$VariableSplit, ignore.case = TRUE)) %>%
@@ -629,7 +732,9 @@ mod_export_server <- function(id, results, data, config, channels,
         dplyr::select(VariableSplit, Geography, total_activity, total_spend,
                       dplyr::any_of(c("Sourced VariableName", roi_seed_key_cols)))
 
-      list(activity = activity, spend = spend, seed = seed)
+      list(activity = activity,
+           spend = spend %>% dplyr::select(VariableSplit, total_spend),
+           seed = seed)
     }
 
     final_activity_splits <- function(res, cfg = list(), nm = "") {
@@ -639,6 +744,21 @@ mod_export_server <- function(id, results, data, config, channels,
           MainModelVariableName = character(),
           total_activity = numeric()
         ))
+      }
+
+      if (identical(normalize_model_metric(cfg$model_metric %||% res$model_metric %||% "activity"), "spend")) {
+        spend_final <- final_spend_splits(res, cfg, nm)
+        if (!nrow(spend_final)) {
+          return(tibble::tibble(
+            VariableSplit = character(),
+            MainModelVariableName = character(),
+            total_activity = numeric()
+          ))
+        }
+        return(spend_final %>%
+                 dplyr::mutate(total_activity = NA_real_) %>%
+                 dplyr::select(.data$VariableSplit, .data$MainModelVariableName,
+                               .data$total_activity, dplyr::everything()))
       }
 
       final <- activity_splits_from_rag(res, cfg, nm)
@@ -692,6 +812,13 @@ mod_export_server <- function(id, results, data, config, channels,
     }
 
     pre_merge_activity_splits <- function(clean, cfg = list(), nm = "") {
+      if (identical(normalize_model_metric(cfg$model_metric %||% clean$model_metric %||% "activity"), "spend")) {
+        spend_pre <- pre_merge_spend_splits(clean, cfg, nm)
+        return(spend_pre %>%
+                 dplyr::mutate(total_activity = NA_real_) %>%
+                 dplyr::select(.data$VariableSplit, .data$MainModelVariableName,
+                               .data$total_activity, dplyr::everything()))
+      }
       pre <- activity_splits_from_rag(clean, cfg, nm)
       if (nrow(pre)) return(pre)
       summarize_split_diagnostics(clean$act_diagnoses, nm, cfg) %>%
@@ -807,7 +934,8 @@ mod_export_server <- function(id, results, data, config, channels,
       )
     }
 
-    build_canonical_export_totals <- function(rae_totals, merge_resolved) {
+    build_canonical_export_totals <- function(rae_totals, merge_resolved,
+                                              model_metric = "activity") {
       empty_component <- tibble::tibble(
         VariableSplit = character(),
         Component_Activity = numeric(),
@@ -904,7 +1032,10 @@ mod_export_server <- function(id, results, data, config, channels,
           dplyr::across(dplyr::all_of(seed_meta_cols), stable_seed_meta),
           .groups = "drop"
         ) %>%
-        dplyr::filter(.data$total_activity > 0)
+        dplyr::filter(
+          if (identical(normalize_model_metric(model_metric), "spend"))
+            .data$total_spend > 0 else .data$total_activity > 0
+        )
 
       final_focus <- final_seed %>%
         dplyr::group_by(.data$VariableSplit) %>%
@@ -965,7 +1096,8 @@ mod_export_server <- function(id, results, data, config, channels,
         item$merge_resolved %||% list(
           map = tibble::tibble(MergedSplitName = character(), ComponentSplit = character()),
           issues = character(0)
-        )
+        ),
+        model_metric = item$cfg$model_metric %||% item$res$model_metric %||% "activity"
       )
       item
     }

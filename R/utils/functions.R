@@ -338,6 +338,12 @@ apply_dimension_aliases <- function(d, dimension_aliases) {
   d
 }
 
+normalize_model_metric <- function(x, default = "activity") {
+  x <- tolower(trimws(as.character(x %||% default)[1]))
+  if (is.na(x) || !nzchar(x)) return(default)
+  if (x %in% c("spend", "cost", "investment", "budget")) "spend" else "activity"
+}
+
 export_channels_csv <- function(channels, global_config = NULL) {
   if (!length(channels)) return(data.frame())
   rows <- list()
@@ -352,6 +358,7 @@ export_channels_csv <- function(channels, global_config = NULL) {
       Splits     = "",
       ActivityKeyword = cfg$activity_keyword %||% "",
       SpendKeyword    = cfg$spend_keyword %||% "",
+      ModelMetric     = normalize_model_metric(cfg$model_metric %||% "activity"),
       VarNameInclude  = paste(cfg$varname_include %||% character(0), collapse = " ||| "),
       UpdateLabel = update_label,
       TimeBreakLabel = cfg$time_break_label %||% "",
@@ -370,6 +377,7 @@ export_channels_csv <- function(channels, global_config = NULL) {
         Splits     = paste(c(b$separator, b$n_parts), collapse = "|"),
         ActivityKeyword = "",
         SpendKeyword    = "",
+        ModelMetric     = "",
         VarNameInclude  = "",
         UpdateLabel = "",
         TimeBreakLabel = "",
@@ -389,6 +397,7 @@ export_channels_csv <- function(channels, global_config = NULL) {
         Splits     = "",
         ActivityKeyword = "",
         SpendKeyword    = "",
+        ModelMetric     = "",
         VarNameInclude  = "",
         UpdateLabel = "",
         TimeBreakLabel = "",
@@ -409,6 +418,7 @@ export_channels_csv <- function(channels, global_config = NULL) {
         Splits     = paste(unlist(m$merged), collapse = " ||| "),
         ActivityKeyword = "",
         SpendKeyword    = "",
+        ModelMetric     = m$metric %||% "",
         VarNameInclude  = "",
         UpdateLabel = "",
         TimeBreakLabel = "",
@@ -424,7 +434,7 @@ export_channels_csv <- function(channels, global_config = NULL) {
   out <- dplyr::bind_rows(rows)
   cfg_order <- c(
     "Channel", "Type", "SplitOrder", "Name", "RenameSource", "RenameAlias",
-    "Splits", "ActivityKeyword", "SpendKeyword", "VarNameInclude",
+    "Splits", "ActivityKeyword", "SpendKeyword", "ModelMetric", "VarNameInclude",
     "UpdateLabel", "TimeBreakLabel", "ConfigVersion",
     "BreakMissingPartValue", "BreakDefaultSeparator"
   )
@@ -846,6 +856,12 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
       metric_roles == "spend"
     ])
     if (!length(activity_vars)) activity_vars <- anal_var_names
+    model_metric <- if (length(spend_vars) > 0 &&
+                        !any(metric_roles == "activity", na.rm = TRUE)) {
+      "spend"
+    } else {
+      "activity"
+    }
     
     ch_cfg <- derive_ch_config_fast(anal_var_names)
     
@@ -959,6 +975,7 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
       vof_period_family = vof_period_family_val,
       vof_period_boundary = vof_period_boundary_val,
       segment_overrides = segment_overrides,
+      model_metric      = model_metric,
       activity_keyword  = act_kw,
       spend_keyword     = spend_kw,
       split_columns     = ch_cfg$split_columns,
@@ -1026,6 +1043,7 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
         min_period        = an_min_date,
         max_period        = an_max_date,
         segment_overrides = list(),
+        model_metric      = "activity",
         activity_keyword  = act_kw,
         spend_keyword     = spend_kw,
         split_columns     = ch_cfg$split_columns,
@@ -1527,15 +1545,19 @@ process_channel_legacy <- function(all_rags,
   }
   
   pb("Done.", 1.0)
+  model_metric <- normalize_model_metric(cfg$model_metric %||% "activity")
+  model_diagnoses <- if (identical(model_metric, "spend")) cost_all else act_all
   
   list(
     rag            = rag,
     cross_cols     = cross_cols,
     ref_cross      = ref_cross_key,
     activity_spend = build_activity_spend(act_all, cost_all, cfg),
-    side_mapping   = build_side_mapping(act_all),
+    side_mapping   = build_side_mapping(model_diagnoses),
     act_diagnoses  = act_all,
-    cost_diagnoses = cost_all
+    cost_diagnoses = cost_all,
+    model_diagnoses = model_diagnoses,
+    model_metric = model_metric
   )
 }
 

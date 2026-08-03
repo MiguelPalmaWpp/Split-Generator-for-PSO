@@ -746,7 +746,7 @@ mod_export_server <- function(id, results, data, config, channels,
         ))
       }
 
-      if (identical(normalize_model_metric(cfg$model_metric %||% res$model_metric %||% "activity"), "spend")) {
+      if (identical(normalize_model_metric(res$model_metric %||% cfg$model_metric %||% "activity"), "spend")) {
         spend_final <- final_spend_splits(res, cfg, nm)
         if (!nrow(spend_final)) {
           return(tibble::tibble(
@@ -813,7 +813,7 @@ mod_export_server <- function(id, results, data, config, channels,
     }
 
     pre_merge_activity_splits <- function(clean, cfg = list(), nm = "") {
-      if (identical(normalize_model_metric(cfg$model_metric %||% clean$model_metric %||% "activity"), "spend")) {
+      if (identical(normalize_model_metric(clean$model_metric %||% cfg$model_metric %||% "activity"), "spend")) {
         spend_pre <- pre_merge_spend_splits(clean, cfg, nm)
         return(spend_pre %>%
                  dplyr::mutate(total_activity = NA_real_) %>%
@@ -1095,8 +1095,11 @@ mod_export_server <- function(id, results, data, config, channels,
         )
       }
 
+      cfg_effective <- item$cfg %||% list()
+      cfg_effective$model_metric <- item$res$model_metric %||% cfg_effective$model_metric %||% "activity"
+
       item$rae_totals <- if (isTRUE(has_processed_splits)) {
-        export_metric_totals_from_rae(d, item$cfg %||% list(), gcfg %||% list(), item$name %||% "")
+        export_metric_totals_from_rae(d, cfg_effective, gcfg %||% list(), item$name %||% "")
       } else {
         empty_export_metric_totals()
       }
@@ -1106,7 +1109,7 @@ mod_export_server <- function(id, results, data, config, channels,
           map = tibble::tibble(MergedSplitName = character(), ComponentSplit = character()),
           issues = character(0)
         ),
-        model_metric = item$cfg$model_metric %||% item$res$model_metric %||% "activity"
+        model_metric = item$res$model_metric %||% item$cfg$model_metric %||% "activity"
       )
       item
     }
@@ -1229,7 +1232,7 @@ mod_export_server <- function(id, results, data, config, channels,
           model_at_an <- apply_geo_filters(model_at_an, geo_col)
 
           id_in_rag    <- intersect(cross_id, names(rag_scope))
-          model_metric <- normalize_model_metric(cfg_ch$model_metric %||% res$model_metric %||% "activity")
+          model_metric <- normalize_model_metric(res$model_metric %||% cfg_ch$model_metric %||% "activity")
           spend_kw     <- cfg_ch$spend_keyword %||% "Spend"
           activity_kw  <- cfg_ch$activity_keyword %||% "Activity"
           all_num      <- setdiff(names(rag_scope)[vapply(rag_scope, is.numeric, logical(1))], id_in_rag)
@@ -2237,6 +2240,8 @@ mod_export_server <- function(id, results, data, config, channels,
         r   <- res_list[[nm]]
         cfg <- channels_list[[nm]]
         if (is.null(r) || is.null(r$rag)) return(NULL)
+        cfg$model_metric <- r$model_metric %||% cfg$model_metric %||% "activity"
+        model_metric <- normalize_model_metric(cfg$model_metric %||% "activity")
         roi_file <- clean_roi_columns(d$channels_rois)
         snap_ch <- NULL
         if (!is.null(snapshot) && !is.null(snapshot$export_data) &&
@@ -2251,6 +2256,7 @@ mod_export_server <- function(id, results, data, config, channels,
         geo_col    <- cross_cols[1]
         act_kw     <- cfg$activity_keyword %||% "Impressions"
         spend_kw   <- cfg$spend_keyword    %||% "Spend"
+        metric_total_col <- if (identical(model_metric, "spend")) "total_spend" else "total_activity"
 
         split_order_str <- paste(cfg$split_columns %||% "VariableName", collapse = "|")
 
@@ -2291,8 +2297,9 @@ mod_export_server <- function(id, results, data, config, channels,
             result$Geography <- NA_character_
           if (!"total_spend" %in% names(result))
             result$total_spend <- NA_real_
+          if (!metric_total_col %in% names(result)) result[[metric_total_col]] <- NA_real_
           result <- result %>%
-            dplyr::filter(.data$total_activity > 0) %>%
+            dplyr::filter(!is.na(.data[[metric_total_col]]) & .data[[metric_total_col]] > 0) %>%
             dplyr::mutate(
               Channel = channel_from_roi,
               MainModelVariableName = cfg$model_variable %||% NA_character_,
@@ -2310,12 +2317,20 @@ mod_export_server <- function(id, results, data, config, channels,
         } else {
           final_activity_splits(r, cfg, nm)
         }
-        act_cols <- intersect(final_splits$VariableSplit, all_split_cols)
         nonfocus_pattern <- "_Before(\\s+|_)"
-        act_cols <- act_cols[!grepl(nonfocus_pattern, act_cols, ignore.case = TRUE)]
-        cost_cols <- grep(spend_kw, all_split_cols, ignore.case = TRUE, value = TRUE)
-        cost_cols <- cost_cols[!grepl(nonfocus_pattern, cost_cols, ignore.case = TRUE)]
-        if (!length(act_cols)) return(NULL)
+        metric_cols <- intersect(final_splits$VariableSplit, all_split_cols)
+        metric_cols <- metric_cols[!grepl(nonfocus_pattern, metric_cols, ignore.case = TRUE)]
+        if (identical(model_metric, "spend")) {
+          cost_cols <- metric_cols
+          act_cols <- grep(act_kw, all_split_cols, ignore.case = TRUE, value = TRUE)
+          act_cols <- act_cols[!grepl(nonfocus_pattern, act_cols, ignore.case = TRUE)]
+        } else {
+          act_cols <- metric_cols
+          cost_cols <- grep(spend_kw, all_split_cols, ignore.case = TRUE, value = TRUE)
+          cost_cols <- cost_cols[!grepl(nonfocus_pattern, cost_cols, ignore.case = TRUE)]
+        }
+        primary_cols <- if (identical(model_metric, "spend")) cost_cols else act_cols
+        if (!length(primary_cols)) return(NULL)
 
         all_dedup_cols <- union(act_cols, cost_cols)
         cs_period <- if (geo_col %in% names(rag_df)) {
@@ -2340,20 +2355,29 @@ mod_export_server <- function(id, results, data, config, channels,
               if (all(is.na(vals) | vals == 0)) return(0)
               sum(vals, na.rm = TRUE)
             }
-            act_totals  <- sapply(act_cols, get_geo_total)
+            act_totals  <- if (length(act_cols)) sapply(act_cols, get_geo_total) else numeric(0)
             cost_totals <- if (length(cost_cols)) sapply(cost_cols, get_geo_total) else numeric(0)
-            act_df_g <- tibble::tibble(
-              VariableSplit = act_cols, Geography = geo,
-              total_activity = unname(act_totals),
-              key = stringr::str_remove_all(act_cols, stringr::regex(act_kw, ignore_case = TRUE)))
+            primary_df_g <- tibble::tibble(
+              VariableSplit = primary_cols, Geography = geo,
+              key = stringr::str_remove_all(
+                primary_cols,
+                stringr::regex(if (identical(model_metric, "spend")) spend_kw else act_kw,
+                               ignore_case = TRUE)
+              ))
+            act_df_g <- if (length(act_totals))
+              tibble::tibble(total_activity = unname(act_totals),
+                             key = stringr::str_remove_all(
+                               act_cols, stringr::regex(act_kw, ignore_case = TRUE)))
+            else tibble::tibble(total_activity = numeric(0), key = character(0))
             cost_df_g <- if (length(cost_totals))
               tibble::tibble(total_spend = unname(cost_totals),
                              key = stringr::str_remove_all(
                                cost_cols, stringr::regex(spend_kw, ignore_case = TRUE)))
             else tibble::tibble(total_spend = numeric(0), key = character(0))
-            act_df_g %>%
+            primary_df_g %>%
+              dplyr::left_join(act_df_g, by = "key") %>%
               dplyr::left_join(cost_df_g, by = "key") %>% dplyr::select(-key) %>%
-              dplyr::filter(total_activity > 0) %>%
+              dplyr::filter(!is.na(.data[[metric_total_col]]) & .data[[metric_total_col]] > 0) %>%
               dplyr::mutate(Channel               = channel_from_roi,
                             MainModelVariableName = cfg$model_variable %||% NA_character_)
           })
@@ -2375,20 +2399,29 @@ mod_export_server <- function(id, results, data, config, channels,
             }), na.rm = TRUE)
           }
 
-          act_totals  <- sapply(act_cols, get_total)
+          act_totals  <- if (length(act_cols)) sapply(act_cols, get_total) else numeric(0)
           cost_totals <- if (length(cost_cols)) sapply(cost_cols, get_total) else numeric(0)
-          act_df_s <- tibble::tibble(
-            VariableSplit = act_cols, Geography = NA_character_,
-            total_activity = unname(act_totals),
-            key = stringr::str_remove_all(act_cols, stringr::regex(act_kw, ignore_case = TRUE)))
+          primary_df_s <- tibble::tibble(
+            VariableSplit = primary_cols, Geography = NA_character_,
+            key = stringr::str_remove_all(
+              primary_cols,
+              stringr::regex(if (identical(model_metric, "spend")) spend_kw else act_kw,
+                             ignore_case = TRUE)
+            ))
+          act_df_s <- if (length(act_totals))
+            tibble::tibble(total_activity = unname(act_totals),
+                           key = stringr::str_remove_all(
+                             act_cols, stringr::regex(act_kw, ignore_case = TRUE)))
+          else tibble::tibble(total_activity = numeric(0), key = character(0))
           cost_df_s <- if (length(cost_totals))
             tibble::tibble(total_spend = unname(cost_totals),
                            key = stringr::str_remove_all(
                              cost_cols, stringr::regex(spend_kw, ignore_case = TRUE)))
           else tibble::tibble(total_spend = numeric(0), key = character(0))
-          result <- act_df_s %>%
+          result <- primary_df_s %>%
+            dplyr::left_join(act_df_s, by = "key") %>%
             dplyr::left_join(cost_df_s, by = "key") %>% dplyr::select(-key) %>%
-            dplyr::filter(total_activity > 0) %>%
+            dplyr::filter(!is.na(.data[[metric_total_col]]) & .data[[metric_total_col]] > 0) %>%
             dplyr::mutate(Channel               = channel_from_roi,
                           MainModelVariableName = cfg$model_variable %||% NA_character_)
         }

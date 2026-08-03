@@ -10,24 +10,28 @@ mod_process_ui <- function(id) {
     tagList(
       card(
         card_header("Run Processing"),
-        selectInput(ns("channel_select"), "Select Channel", choices = NULL),
-        uiOutput(ns("model_metric_ui")),
-        actionButton(ns("btn_one"), "Process Selected",
-                     class = "btn-success btn-sm w-100 mb-2"),
-        actionButton(ns("btn_all"), "Process All",
-                     class = "btn-warning btn-sm w-100"),
-        actionButton(ns("btn_failed"), "Reprocess Failed Only",
-                     class = "btn-outline-danger btn-sm w-100 mt-2"),
-        actionButton(ns("btn_changed"), "Reprocess Changed",
-                     class = "btn-outline-secondary btn-sm w-100 mt-2"),
+        div(class = "process-run-panel",
+            div(class = "process-field-block",
+                selectInput(ns("channel_select"), "Select Channel", choices = NULL)),
+            uiOutput(ns("model_metric_ui")),
+            div(class = "process-run-actions",
+                actionButton(ns("btn_one"), "Process Selected",
+                             class = "btn-success btn-sm process-action-primary"),
+                actionButton(ns("btn_all"), "Process All",
+                             class = "btn-warning btn-sm process-action-primary"),
+                actionButton(ns("btn_failed"), "Reprocess Failed Only",
+                             class = "btn-outline-danger btn-sm process-action-secondary"),
+                actionButton(ns("btn_changed"), "Reprocess Changed",
+                             class = "btn-outline-secondary btn-sm process-action-secondary"))),
         hr(class = "hr-sm"),
-        uiOutput(ns("batch_summary")),
-        uiOutput(ns("error_summary")),
+        div(class = "process-run-summary",
+            uiOutput(ns("batch_summary")),
+            uiOutput(ns("error_summary"))),
         uiOutput(ns("status")),
         hr(class = "hr-sm"),
         downloadButton(ns("dl_config_process"),
                        label = tagList(" Download config CSV"),
-                       class = "btn-outline-secondary btn-sm w-100")
+                       class = "btn-outline-secondary btn-sm w-100 process-config-download")
       ),
       uiOutput(ns("merge_history_card"))
     ),
@@ -50,7 +54,6 @@ mod_process_ui <- function(id) {
                   uiOutput(ns("activity_kpis")),
                   uiOutput(ns("threshold_ui")),
                   uiOutput(ns("merge_plan_toolbar")),
-                  uiOutput(ns("merge_toolbar")),
                   uiOutput(ns("config_merge_report")),
                   DTOutput(ns("diag_act"))),
         nav_panel("Spend",       DTOutput(ns("diag_cost"))),
@@ -121,8 +124,8 @@ mod_process_server <- function(id, data, config, channels,
       if (!valid_nm(nm)) return(NULL)
       cfg <- channels()[[nm]] %||% list()
       selected <- normalize_model_metric(input$model_metric %||% cfg$model_metric %||% "activity")
-      div(class = "filter-bar mb-2",
-          tags$span(tags$strong("Model metric:", class = "filter-bar-label")),
+      div(class = "process-model-metric",
+          tags$span(tags$strong("Model metric", class = "process-control-label")),
           radioButtons(session$ns("model_metric"), NULL,
                        choices = c("Activity" = "activity", "Spend/Cost" = "spend"),
                        selected = selected, inline = TRUE))
@@ -285,51 +288,6 @@ mod_process_server <- function(id, data, config, channels,
       })
     }
     
-    # Fixed: [[1]] was mangled to [] / [[]] by the fetcher — now corrected
-    get_merge_name_parts <- function(selected_names) {
-      selected_names <- selected_names[!is.na(selected_names) & nzchar(selected_names)]
-      if (length(selected_names) <= 1)
-        return(list(prefix = "", suffix = ""))
-      
-      common_prefix_chars <- function(strings) {
-        chars   <- lapply(strings, \(s) strsplit(s, "")[[1]])
-        min_len <- min(sapply(chars, length))
-        if (min_len == 0) return("")
-        common_len <- 0L
-        for (i in seq_len(min_len)) {
-          if (length(unique(sapply(chars, `[[`, i))) == 1L)
-            common_len <- i else break
-        }
-        if (common_len == 0L) return("")
-        raw <- substr(strings[1], 1, common_len)
-        pos <- max(gregexpr("_", raw)[[1]])
-        if (pos < 1L) "" else substr(raw, 1, pos)
-      }
-      
-      common_suffix_chars <- function(strings) {
-        revs    <- sapply(strings, \(s) paste(rev(strsplit(s, "")[[1]]), collapse = ""))
-        chars   <- lapply(revs, \(s) strsplit(s, "")[[1]])
-        min_len <- min(sapply(chars, length))
-        if (min_len == 0) return("")
-        common_len <- 0L
-        for (i in seq_len(min_len)) {
-          if (length(unique(sapply(chars, `[[`, i))) == 1L)
-            common_len <- i else break
-        }
-        if (common_len == 0L) return("")
-        raw <- paste(rev(strsplit(substr(revs[1], 1, common_len), "")[[1]]), collapse = "")
-        pos <- min(gregexpr("_", raw)[[1]])
-        if (pos < 1L || pos > nchar(raw)) "" else substr(raw, pos, nchar(raw))
-      }
-      
-      prefix  <- common_prefix_chars(selected_names)
-      suffix  <- common_suffix_chars(selected_names)
-      min_len <- min(nchar(selected_names), na.rm = TRUE)
-      if (is.finite(min_len) && nchar(prefix) + nchar(suffix) >= min_len)
-        suffix <- ""
-      list(prefix = prefix, suffix = suffix)
-    }
-    
     # ── Channel selector ───────────────────────────────────────────────────
     observe({
       updateSelectInput(session, "channel_select", choices = names(channels()))
@@ -463,6 +421,8 @@ mod_process_server <- function(id, data, config, channels,
     run_one <- function(nm, do_gc = TRUE) {
       d    <- data()
       cfg  <- channels()[[nm]]; req(cfg)
+      ui_metric <- if (identical(isolate(input$channel_select), nm)) isolate(input$model_metric) else NULL
+      cfg$model_metric <- normalize_model_metric(ui_metric %||% cfg$model_metric %||% "activity")
       gcfg <- config()
       
       if (is.null(d$all_rags)) {
@@ -593,6 +553,7 @@ mod_process_server <- function(id, data, config, channels,
                         })
         }
         
+        res_stored$model_metric <- cfg$model_metric
         set_res(nm, res_stored); set_orig(nm, res_stored)
         set_log(nm, config_merge_report); set_hist(nm, list())
         set_error(nm, NULL)
@@ -929,30 +890,26 @@ mod_process_server <- function(id, data, config, channels,
     
     # ── Period filter UI ───────────────────────────────────────────────────
     output$period_filter_ui <- renderUI({
-      results_trigger()
       nm  <- input$channel_select; if (!valid_nm(nm)) return(NULL)
       res <- results_store[[nm]]
       has_data <- (!is.null(res$act_diagnoses) && nrow(res$act_diagnoses) > 0) ||
         (!is.null(res$rag) && nrow(res$rag) > 0)
       if (is.null(res) || !has_data) return(NULL)
-      metric_for_counts <- normalize_model_metric(input$model_metric %||% (channels()[[nm]] %||% list())$model_metric %||% "activity")
-      n_focus <- tryCatch(
-        nrow(if (identical(metric_for_counts, "spend")) build_current_spend_data("focus") else build_current_act_data("focus")),
-        error = \(e) 0L
-      )
-      n_nf <- tryCatch(
-        nrow(if (identical(metric_for_counts, "spend")) build_current_spend_data("nonfocus") else build_current_act_data("nonfocus")),
-        error = \(e) 0L
-      )
-      div(class = "filter-bar",
-          tags$span(icon("filter", class = "icon-blue-sm"),
-                    tags$strong(" View:", class = "filter-bar-label")),
-          radioButtons(session$ns("period_filter"), NULL,
-                       choices  = c("Focus" = "focus", "Non-Focus" = "nonfocus"),
-                       selected = "focus", inline = TRUE),
-          div(class = "filter-bar-counts",
-              tags$span(paste0("Focus: ",     n_focus), class = "badge-focus"),
-              tags$span(paste0("Non-Focus: ", n_nf),    class = "badge-nonfocus")))
+      counts <- period_metric_counts()
+      n_focus <- counts$focus %||% 0L
+      n_nf <- counts$nonfocus %||% 0L
+      div(class = "process-view-strip",
+          div(class = "process-view-main",
+              tags$span(icon("filter", class = "icon-blue-sm"),
+                        tags$strong(" View", class = "process-control-label")),
+              div(class = "process-period-choice",
+                  radioButtons(session$ns("period_filter"), NULL,
+                               choices  = c("Focus" = "focus", "Non-Focus" = "nonfocus"),
+                               selected = isolate(input$period_filter %||% "focus"),
+                               inline = TRUE))),
+          div(class = "process-view-counts",
+              tags$span(paste0("Focus: ", n_focus), class = "badge-focus"),
+              tags$span(paste0("Non-Focus: ", n_nf), class = "badge-nonfocus")))
     })
     
     # ── current_act_data ───────────────────────────────────────────────────
@@ -1085,7 +1042,7 @@ mod_process_server <- function(id, data, config, channels,
         return(build_current_spend_from_rag(res, cfg, filter_val))
       }
       if ("period" %in% names(cost_df)) {
-        cost_df <- cost_df %>% filter(.data$period == filter_val)
+        cost_df <- cost_df[cost_df$period == filter_val, , drop = FALSE]
       }
       out <- cost_df %>%
         filter(!is.na(total_spend) & total_spend > 0) %>%
@@ -1103,10 +1060,46 @@ mod_process_server <- function(id, data, config, channels,
       metric <- active_model_metric()
       if (identical(metric, "spend")) current_spend_data() else current_act_data()
     }) %>% bindCache(input$channel_select, input$model_metric, input$period_filter, results_trigger())
+
+    period_metric_counts <- reactive({
+      nm <- input$channel_select
+      if (!valid_nm(nm) || is.null(results_store[[nm]]))
+        return(list(focus = 0L, nonfocus = 0L))
+      metric <- active_model_metric()
+      res <- results_store[[nm]]
+      diag <- if (identical(metric, "spend")) res$cost_diagnoses else res$act_diagnoses
+      total_col <- metric_total_col(metric)
+      quick_count <- function(period) {
+        if (is.null(diag) || !nrow(diag) ||
+            !"VariableSplit" %in% names(diag) ||
+            !total_col %in% names(diag) ||
+            !"period" %in% names(diag)) {
+          return(NA_integer_)
+        }
+        d <- diag
+        d <- d[d$period == period, , drop = FALSE]
+        d <- d[!is.na(d[[total_col]]) & d[[total_col]] > 0, , drop = FALSE]
+        length(unique(d$VariableSplit))
+      }
+      count_for <- function(period) {
+        fast_n <- quick_count(period)
+        if (!is.na(fast_n)) return(fast_n)
+        tryCatch({
+          nrow(if (identical(metric, "spend")) {
+            build_current_spend_data(period)
+          } else {
+            build_current_act_data(period)
+          })
+        }, error = function(e) 0L)
+      }
+      list(
+        focus = count_for("focus"),
+        nonfocus = count_for("nonfocus")
+      )
+    }) %>% bindCache(input$channel_select, input$model_metric, results_trigger())
     
     # ── Activity KPIs ──────────────────────────────────────────────────────
     output$activity_kpis <- renderUI({
-      results_trigger()
       nm <- input$channel_select
       if (!valid_nm(nm) || is.null(results_store[[nm]])) return(NULL)
       metric <- active_model_metric()
@@ -1136,41 +1129,38 @@ mod_process_server <- function(id, data, config, channels,
              icon = "chart-bar",  box_class = "kpi-box kpi-box-blue",
              icon_class = "kpi-icon-blue")
       )
-      do.call(layout_columns, c(
-        list(col_widths = c(3, 3, 3, 3), class = "mb-2"),
-        lapply(kpis, function(k)
-          div(class = k$box_class,
-              icon(k$icon, class = k$icon_class),
-              div(tags$strong(k$value, class = "kpi-value"),
-                  tags$small(k$label,  class = "kpi-label"))))))
+      div(class = "process-kpi-grid",
+          lapply(kpis, function(k)
+            div(class = k$box_class,
+                icon(k$icon, class = k$icon_class),
+                div(class = "kpi-copy",
+                    tags$strong(k$value, class = "kpi-value"),
+                    tags$small(k$label,  class = "kpi-label")))))
     })
     
     # ── Threshold UI ───────────────────────────────────────────────────────
     output$threshold_ui <- renderUI({
-      results_trigger()
       nm <- input$channel_select
       if (!valid_nm(nm) || is.null(results_store[[nm]])) return(NULL)
-      div(class = "filter-bar", style = "gap:12px;",
-          tags$span(icon("sliders", class = "icon-blue-sm"),
-                    tags$strong(" Small split threshold:", class = "filter-bar-label")),
-          div(class = "d-flex align-items-center gap-2",
-              div(class = "input-narrow",
+      div(class = "process-threshold-strip",
+          div(class = "process-threshold-main",
+              tags$span(icon("sliders", class = "icon-blue-sm"),
+                        tags$strong("Small split threshold", class = "process-control-label")),
+              div(class = "process-threshold-input",
                   numericInput(session$ns("threshold_pct"), NULL,
-                               value = input$threshold_pct %||% 1,
-                               min = 0, max = 100, step = 0.5)),
-              tags$span("%", class = "pct-symbol")),
-          tags$span(class = "hint-text",
+                               value = isolate(input$threshold_pct %||% 1),
+                               min = 0, max = 100, step = 0.5),
+                  tags$span("%", class = "pct-symbol"))),
+          tags$span(class = "process-hint-text",
                     icon("circle-info", class = "icon-xs"),
-                    " Splits below threshold shown in red.", tags$br(),
-                    " Select manually based on grouping logic."))
+                    " Splits below threshold are shown in red. Default is 1%."))
     })
     
     # ── Merge plan toolbar ─────────────────────────────────────────────────
     output$merge_plan_toolbar <- renderUI({
-      results_trigger()
       nm <- input$channel_select
       if (!valid_nm(nm) || is.null(results_store[[nm]])) return(NULL)
-      div(class = "toolbar-row",
+      div(class = "process-merge-actions",
           downloadButton(session$ns("dl_merge_plan"),
                          label = tagList(icon("download"), " Download Merge Plan"),
                          class = "btn-outline-secondary btn-sm"),
@@ -1405,81 +1395,7 @@ mod_process_server <- function(id, data, config, channels,
         type = if (n_ok > 0) "message" else "warning")
     })
     
-    # ── Merge toolbar ──────────────────────────────────────────────────────
-    output$merge_toolbar <- renderUI({
-      results_trigger()
-      nm  <- input$channel_select; if (!valid_nm(nm)) return(NULL)
-      res <- results_store[[nm]]
-      if (is.null(res))
-        return(tags$p(class = "text-muted small mb-2",
-                      icon("info-circle"), " Process a channel first."))
-      selected <- input$diag_act_rows_selected %||% integer(0)
-      n_sel    <- length(selected)
-      if (n_sel == 0)
-        return(tags$p(class = "text-muted small mb-2",
-                      icon("hand-pointer"), " Select rows in the table to merge splits."))
-      
-      df             <- current_model_data()
-      selected       <- selected[selected <= nrow(df)]
-      if (length(selected) < 2)
-        return(tags$p(class = "text-muted small mb-2",
-                      icon("hand-pointer"), " Select at least 2 current rows to merge."))
-      selected_names <- df$VariableSplit[selected]
-      display_names  <- strip_common_prefix(selected_names)
-      parts          <- get_merge_name_parts(selected_names)
-      
-      hint <- if (nchar(parts$prefix) > 0 || nchar(parts$suffix) > 0)
-        div(class = "hint-text mt-1",
-            icon("circle-info", class = "icon-xs"),
-            " Detected pattern: ",
-            tags$code(class = "code-tag-blue-sm",
-                      paste0(parts$prefix, "...", parts$suffix)))
-      else NULL
-      
-      total_col <- metric_total_col(active_model_metric())
-      pct_col <- metric_pct_col(active_model_metric())
-      selected_df <- df %>% filter(VariableSplit %in% selected_names)
-      wk_col <- intersect(c("num_weeks_activity", "num_weeks_spend"), names(selected_df))[1]
-      weeks_val <- if (length(wk_col) && !is.na(wk_col)) {
-        finite_weeks <- selected_df[[wk_col]][is.finite(selected_df[[wk_col]])]
-        if (length(finite_weeks)) max(finite_weeks, na.rm = TRUE) else NA_real_
-      } else {
-        NA_real_
-      }
-      combined <- tibble::tibble(
-        act = sum(selected_df[[total_col]], na.rm = TRUE),
-        pct = if (pct_col %in% names(selected_df)) sum(selected_df[[pct_col]], na.rm = TRUE) else NA_real_,
-        weeks = weeks_val
-      )
-      
-      div(class = "merge-toolbar-box",
-          layout_columns(
-            col_widths = c(4, 4, 4),
-            tagList(
-              tags$div(icon("object-group", class = "icon-blue-sm"),
-                       tags$strong(paste0(" ", n_sel, " splits selected"),
-                                   class = "merge-toolbar-title")),
-              tags$div(class = "mt-1",
-                       tags$small(paste0("Combined: ", fmt_compact(combined$act),
-                                         " (", round(combined$pct, 2), "%)",
-                                         " | Max weeks: ", combined$weeks))),
-              tags$div(class = "mt-1",
-                       tags$small(class = "text-muted",
-                                  paste(display_names, collapse = " + ")))
-            ),
-            div(textInput(session$ns("merge_name"), tags$small("New split name"),
-                          placeholder = "e.g. Channel_Small_Other", width = "100%"), hint),
-            tagList(
-              actionButton(session$ns("btn_merge"),
-                           tagList(icon("link"), " Merge"),
-                           class = "btn-primary btn-sm w-100 mb-1"),
-              actionButton(session$ns("btn_clear"),
-                           tagList(icon("xmark"), " Clear"),
-                           class = "btn-outline-secondary btn-sm w-100"))))
-    })
-
     output$config_merge_report <- renderUI({
-      results_trigger()
       nm <- input$channel_select
       if (!valid_nm(nm) || is.null(results_store[[nm]])) return(NULL)
       logs <- get_log(nm)
@@ -1524,100 +1440,6 @@ mod_process_server <- function(id, data, config, channels,
           tags$p(class = "text-muted small mb-0",
                  "All saved config merges matched generated splits.")
       )
-    })
-    
-    observeEvent(input$diag_act_rows_selected, {
-      selected <- input$diag_act_rows_selected %||% integer(0)
-      if (length(selected) < 2) return()
-      df <- tryCatch(current_model_data(), error = \(e) NULL)
-      if (is.null(df) || nrow(df) == 0) return()
-      selected <- selected[selected <= nrow(df)]
-      selected_names <- df$VariableSplit[selected]
-      if (length(selected_names) < 2) return()
-      parts <- get_merge_name_parts(selected_names)
-      updateTextInput(session, "merge_name",
-                      value = paste0(parts$prefix, "Small_Other", parts$suffix))
-    }, ignoreNULL = TRUE, ignoreInit = TRUE)
-    
-    # ── Interactive merge ──────────────────────────────────────────────────
-    observeEvent(input$btn_merge, {
-      nm       <- req(input$channel_select); req(valid_nm(nm))
-      selected <- req(input$diag_act_rows_selected)
-      new_name <- trimws(input$merge_name %||% "")
-      if (!nchar(new_name)) {
-        showNotification("Enter a name for the merged split.", type = "warning"); return()
-      }
-      res             <- results_store[[nm]]; req(res)
-      cfg             <- channels()[[nm]]
-      view_filter     <- input$period_filter %||% "focus"
-      merge_metric    <- active_model_metric()
-      df              <- current_model_data()
-      selected        <- selected[selected <= nrow(df)]
-      if (length(selected) < 2) {
-        showNotification("Select at least 2 current rows to merge.", type = "warning"); return()
-      }
-      selected_splits <- df$VariableSplit[selected]
-      act_kw          <- cfg$activity_keyword %||% "Impressions"
-      spend_kw        <- cfg$spend_keyword    %||% "Spend"
-      
-      if (!length(intersect(selected_splits, names(res$rag)))) {
-        showNotification("Selected splits not found in RAG.", type = "warning"); return()
-      }
-      metric_diag <- if (identical(merge_metric, "spend")) res$cost_diagnoses else res$act_diagnoses
-      has_diag <- !is.null(metric_diag) &&
-        nrow(metric_diag) > 0 &&
-        all(c("VariableSplit", "period") %in% names(metric_diag)) &&
-        nrow(filter(metric_diag,
-                    VariableSplit %in% selected_splits,
-                    period == view_filter)) > 0
-      if (!has_diag && !length(intersect(selected_splits, names(res$rag)))) {
-        showNotification(paste0("No diagnosis data for '", view_filter, "'."),
-                         type = "warning", duration = 10); return()
-      }
-      
-      spend_splits   <- if (identical(merge_metric, "spend")) selected_splits else
-        str_replace_all(selected_splits, regex(act_kw, ignore_case = TRUE), spend_kw)
-      new_spend_name <- if (identical(merge_metric, "spend")) new_name else
-        str_replace_all(new_name, regex(act_kw, ignore_case = TRUE), spend_kw)
-      if (new_spend_name == new_name && !identical(merge_metric, "spend"))
-        new_spend_name <- paste0(new_name, "_", spend_kw)
-      matching_cost <- intersect(spend_splits, res$cost_diagnoses$VariableSplit)
-      
-      merge_entry <- list(new_name = new_name, merged = as.list(selected_splits),
-                          view = view_filter, spend_merged = as.list(matching_cost),
-                          new_spend_name = new_spend_name, metric = merge_metric)
-      
-      set_hist(nm, c(get_hist(nm), list(results_store[[nm]])))
-      set_res(nm, apply_single_merge(res, merge_entry, cfg))
-      set_log(nm, c(get_log(nm), list(list(
-        merged = selected_splits, new_name = new_name, view = view_filter,
-        spend_merged = matching_cost, new_spend_name = new_spend_name,
-        metric = merge_metric))))
-      
-      if (!is.null(update_merges)) {
-        existing <- channels()[[nm]]$saved_merges %||% list()
-        max_id   <- if (length(existing)) max(sapply(existing, \(m) m$id %||% 0L)) else 0L
-        saved_after <- c(existing, list(list(
-          id = max_id + 1L, new_name = new_name,
-          merged = as.list(selected_splits), view = view_filter,
-          spend_merged = as.list(matching_cost),
-          new_spend_name = new_spend_name, active = TRUE,
-          metric = merge_metric,
-          saved_at = format(Sys.time(), "%Y-%m-%d %H:%M"))))
-        update_merges(nm, saved_after)
-        mark_result_current(nm, cfg, saved_after)
-      }
-      
-      updateTextInput(session, "merge_name", value = "")
-      showNotification(
-        paste0("Merged ", length(selected_splits), " [", toupper(view_filter), "] splits",
-               if (length(matching_cost) > 0) paste0(" + ", length(matching_cost), " spend"),
-               " \u2192 ", new_name, " \u2014 saved to config"),
-        type = "message")
-    })
-    
-    observeEvent(input$btn_clear, {
-      DT::dataTableProxy(session$ns("diag_act")) %>% DT::selectRows(NULL)
     })
     
     # ── Undo ───────────────────────────────────────────────────────────────
@@ -1671,7 +1493,6 @@ mod_process_server <- function(id, data, config, channels,
     
     # ── Merge history card ─────────────────────────────────────────────────
     output$merge_history_card <- renderUI({
-      results_trigger()
       nm   <- input$channel_select; if (!valid_nm(nm)) return(NULL)
       log  <- get_log(nm); hist <- get_hist(nm)
       if (!length(log)) return(NULL)
@@ -1721,7 +1542,6 @@ mod_process_server <- function(id, data, config, channels,
     
     # ── Activity table ─────────────────────────────────────────────────────
     output$diag_act <- DT::renderDT({
-      results_trigger()
       nm  <- req(input$channel_select); req(results_store[[nm]])
       metric <- active_model_metric()
       total_col <- metric_total_col(metric)
@@ -1760,7 +1580,7 @@ mod_process_server <- function(id, data, config, channels,
       
       dt <- df_display %>%
         datatable(
-          selection = list(mode = "multiple", target = "row"),
+          selection = "none",
           options   = list(
             scrollX = TRUE, scrollY = "420px", paging = TRUE, pageLength = 50,
             lengthChange = FALSE, dom = "frtip",
@@ -1782,7 +1602,6 @@ mod_process_server <- function(id, data, config, channels,
     
     # ── Spend table ────────────────────────────────────────────────────────
     output$diag_cost <- DT::renderDT({
-      results_trigger()
       nm <- input$channel_select
       if (!valid_nm(nm))
         return(info_table("Select a channel to review spend.", "info"))
@@ -1816,9 +1635,11 @@ mod_process_server <- function(id, data, config, channels,
       dt <- df_display %>%
         datatable(
           options = list(
-            scrollX = TRUE, scrollY = "420px", paging = FALSE, dom = "frt",
+            scrollX = TRUE, scrollY = "420px", paging = TRUE, pageLength = 50,
+            lengthChange = FALSE, dom = "frtip",
             deferRender = TRUE, scroller = TRUE, autoWidth = FALSE,
             initComplete = dt_blue_callback, columnDefs = col_defs),
+          selection = "none",
           rownames = FALSE)
       if (length(num_fmt) > 0)
         dt <- dt %>% formatCurrency(num_fmt, currency = "", digits = 0, mark = ",")

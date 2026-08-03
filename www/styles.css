@@ -2307,6 +2307,131 @@ padding: 8px 16px;
 MOD_PROCESS — Status Panel
 ═══════════════════════════════════════════════════════════════════════
 */
+.process-run-panel {
+display: flex;
+flex-direction: column;
+gap: 12px;
+}
+
+.process-field-block .form-group,
+.process-field-block .shiny-input-container {
+margin-bottom: 0;
+width: 100%;
+}
+
+.process-field-block label {
+font-size: 12.5px;
+font-weight: 600;
+color: #263648;
+margin-bottom: 7px;
+}
+
+.process-field-block select,
+.process-field-block .selectize-input {
+min-height: 38px;
+border-color: #d8e3f0;
+border-radius: 7px;
+font-size: 13px;
+}
+
+.process-model-metric {
+background: #f6f8fb;
+border: 1px solid #edf2f8;
+border-radius: 8px;
+padding: 11px 13px;
+display: flex;
+align-items: center;
+justify-content: space-between;
+gap: 10px;
+flex-wrap: wrap;
+}
+
+.process-model-metric .form-group,
+.process-model-metric .shiny-input-container {
+margin: 0;
+width: auto;
+}
+
+.process-model-metric .radio-inline {
+font-size: 13px;
+color: #263648;
+margin: 0 0 0 10px;
+white-space: nowrap;
+}
+
+.process-model-metric .radio-inline input[type="radio"],
+.process-period-choice .radio-inline input[type="radio"] {
+position: absolute;
+opacity: 0;
+width: 0;
+height: 0;
+pointer-events: none;
+}
+
+.process-model-metric .radio-inline,
+.process-period-choice .radio-inline {
+border: 1px solid #cfe1f6;
+border-radius: 999px;
+color: #5B9BD5;
+font-weight: 600;
+line-height: 1;
+padding: 5px 10px;
+transition: all 0.15s ease;
+}
+
+.process-model-metric .radio-inline:has(input[type="radio"]:checked),
+.process-period-choice .radio-inline:has(input[type="radio"]:checked) {
+background: #5B9BD5;
+border-color: #5B9BD5;
+color: #fff;
+}
+
+.process-run-actions {
+display: flex;
+flex-direction: column;
+gap: 10px;
+padding-top: 4px;
+}
+
+.process-run-actions .btn {
+width: 100%;
+min-height: 38px;
+border-radius: 7px;
+font-size: 13px;
+font-weight: 700;
+letter-spacing: 0;
+}
+
+.process-action-primary {
+box-shadow: 0 1px 0 rgba(30, 41, 59, 0.04);
+}
+
+.process-action-secondary {
+background: #fff;
+}
+
+.process-run-summary {
+display: flex;
+flex-direction: column;
+gap: 8px;
+}
+
+.process-config-download {
+min-height: 36px;
+border-radius: 7px !important;
+font-size: 13px !important;
+font-weight: 700 !important;
+display: inline-flex !important;
+align-items: center;
+justify-content: center;
+}
+
+#process-status {
+max-height: 280px;
+overflow-y: auto;
+padding-right: 3px;
+}
+
 .status-item {
 display: flex; align-items: center; gap: 8px;
 padding: 7px 8px; border-radius: 6px;
@@ -2348,6 +2473,84 @@ display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
 .input-narrow { width: 70px; }
 .pct-symbol   { color: #6c757d; font-size: 13px; font-weight: 600; }
 
+.process-view-strip,
+.process-threshold-strip {
+background: #f6f8fb;
+border: 1px solid #e6edf7;
+border-radius: 8px;
+padding: 12px 16px;
+margin-bottom: 14px;
+display: flex;
+align-items: center;
+justify-content: space-between;
+gap: 16px;
+flex-wrap: wrap;
+}
+
+.process-view-main,
+.process-threshold-main {
+display: flex;
+align-items: center;
+gap: 14px;
+flex-wrap: wrap;
+min-width: 0;
+}
+
+.process-control-label {
+font-size: 13px;
+font-weight: 700;
+color: #263648;
+white-space: nowrap;
+}
+
+.process-period-choice .form-group,
+.process-period-choice .shiny-input-container {
+margin: 0;
+width: auto;
+}
+
+.process-period-choice .radio-inline {
+margin: 0 12px 0 0;
+font-size: 13px;
+color: #263648;
+}
+
+.process-view-counts {
+display: flex;
+align-items: center;
+gap: 8px;
+flex-wrap: wrap;
+font-size: 12px;
+}
+
+.process-threshold-input {
+display: flex;
+align-items: center;
+gap: 8px;
+}
+
+.process-threshold-input .shiny-input-container {
+width: 86px;
+margin: 0;
+}
+
+.process-threshold-input input.form-control {
+height: 34px;
+font-size: 13px;
+text-align: center;
+border-color: #d5e2f2;
+border-radius: 6px;
+}
+
+.process-hint-text {
+display: inline-flex;
+align-items: center;
+gap: 5px;
+color: #7d8da6;
+font-size: 11.5px;
+line-height: 1.35;
+}
+
 /*
 ═══════════════════════════════════════════════════════════════════════
 MOD_PROCESS — KPI Boxes
@@ -2368,12 +2571,75 @@ border-radius: 6px; padding: 10px 14px; border-left: 3px solid transparent;
 .kpi-value { font-size: 20px; color: #2c3e50; display: block; line-height: 1.2; }
 .kpi-label { color: #6c757d; font-size: 11px; }
 
+.process-kpi-grid {
+display: grid;
+grid-template-columns: repeat(4, minmax(160px, 1fr));
+gap: 14px;
+margin-bottom: 14px;
+}
+
+.process-kpi-grid .kpi-box {
+min-height: 74px;
+border: 1px solid transparent;
+box-shadow: inset 3px 0 0 currentColor;
+border-left: 0;
+}
+
+.process-kpi-grid .kpi-box-blue {
+color: #5B9BD5;
+border-color: #d9e9f8;
+}
+
+.process-kpi-grid .kpi-box-green {
+color: #2ecc71;
+border-color: #d7f0de;
+}
+
+.process-kpi-grid .kpi-box-red {
+color: #e74c3c;
+border-color: #f6d7d3;
+}
+
+.process-kpi-grid .kpi-copy {
+min-width: 0;
+}
+
 /*
 ═══════════════════════════════════════════════════════════════════════
 MOD_PROCESS — Toolbars
 ═══════════════════════════════════════════════════════════════════════
 */
 .toolbar-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; margin-bottom: 6px; }
+
+.process-merge-actions {
+display: flex;
+align-items: center;
+gap: 10px;
+padding: 4px 0 12px;
+margin-bottom: 6px;
+flex-wrap: wrap;
+}
+
+.process-merge-actions .btn,
+.process-merge-actions .btn-upload-plan {
+height: 34px;
+display: inline-flex;
+align-items: center;
+justify-content: center;
+gap: 6px;
+border-radius: 6px;
+font-size: 13px;
+font-weight: 600;
+padding: 6px 14px;
+width: auto;
+white-space: nowrap;
+}
+
+.process-merge-actions .hint-text {
+font-size: 11.5px;
+color: #8a99b3;
+line-height: 1.35;
+}
 
 .btn-upload-plan {
 display: flex; align-items: center; gap: 6px;
@@ -2385,9 +2651,26 @@ margin: 0; white-space: nowrap; transition: all 0.15s;
 }
 .btn-upload-plan:hover { background: #EBF3FB; }
 
-.merge-toolbar-box   { background: #EBF3FB; border: 1px solid #5B9BD5; border-radius: 8px; padding: 12px 16px; margin-bottom: 12px; }
-.merge-toolbar-title { color: #5B9BD5; font-size: 13px; }
-.code-tag-blue-sm    { background: #EBF3FB; color: #5B9BD5; padding: 1px 5px; border-radius: 3px; font-size: 11px; }
+@media (max-width: 1100px) {
+.process-kpi-grid {
+grid-template-columns: repeat(2, minmax(180px, 1fr));
+}
+}
+
+@media (max-width: 640px) {
+.process-view-strip,
+.process-threshold-strip {
+align-items: flex-start;
+}
+
+.process-kpi-grid {
+grid-template-columns: 1fr;
+}
+
+.process-merge-actions .hint-text {
+width: 100%;
+}
+}
 
 /*
 ═══════════════════════════════════════════════════════════════════════

@@ -12,14 +12,64 @@ ordinal_tag <- function(i) {
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 # â”€â”€ parse_period_robust â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# Parses period strings from all_rags (YYYYMMDD, MM/DD/YYYY, DD.MM.YYYY, etc.)
+# Date parsing orders are intentionally day-first before month-first because
+# VOF/RAE files are commonly authored from LATAM Excel exports.
+DATE_PARSE_ORDERS <- c("Ymd", "dmY", "mdY", "ymd", "dmy", "mdy")
+
+parse_date_with_orders <- function(x, orders = DATE_PARSE_ORDERS) {
+  if (inherits(x, "Date")) return(x)
+  if (inherits(x, "POSIXt")) return(as.Date(x))
+  if (is.null(x) || length(x) == 0L) return(as.Date(character(0L)))
+
+  raw <- trimws(as.character(x))
+  raw[raw %in% c("", "NA", "N/A", "NULL", "None", "none")] <- NA_character_
+  out <- rep(as.Date(NA_character_), length(raw))
+
+  serial_idx <- !is.na(raw) & grepl("^\\d+(\\.0+)?$", raw)
+  if (any(serial_idx)) {
+    n <- suppressWarnings(as.numeric(raw[serial_idx]))
+    serial_ok <- !is.na(n) & n > 20000 & n < 70000
+    serial_dates <- rep(as.Date(NA_character_), length(n))
+    serial_dates[serial_ok] <- suppressWarnings(as.Date(n[serial_ok], origin = "1899-12-30"))
+    out[serial_idx] <- serial_dates
+  }
+
+  parse_idx <- is.na(out) & !is.na(raw) & nzchar(raw)
+  if (any(parse_idx) && requireNamespace("lubridate", quietly = TRUE)) {
+    parsed <- suppressWarnings(lubridate::parse_date_time(
+      raw[parse_idx],
+      orders = orders,
+      quiet = TRUE
+    ))
+    out[parse_idx] <- as.Date(parsed)
+  }
+
+  parse_idx <- is.na(out) & !is.na(raw) & nzchar(raw)
+  if (any(parse_idx)) {
+    fmts <- c(
+      "%Y%m%d", "%d%m%Y", "%m%d%Y",
+      "%Y-%m-%d", "%d-%m-%Y", "%m-%d-%Y",
+      "%Y/%m/%d", "%d/%m/%Y", "%m/%d/%Y",
+      "%d/%m/%y", "%m/%d/%y",
+      "%d.%m.%Y", "%m.%d.%Y",
+      "%d-%b-%Y", "%d-%b-%y"
+    )
+    vals <- raw[parse_idx]
+    fallback <- rep(as.Date(NA_character_), length(vals))
+    for (fmt in fmts) {
+      missing <- is.na(fallback)
+      if (!any(missing)) break
+      fallback[missing] <- suppressWarnings(as.Date(vals[missing], format = fmt))
+    }
+    out[parse_idx] <- fallback
+  }
+
+  out
+}
+
+# Parses period strings from all_rags, analytical datasets and VOF files.
 parse_period_robust <- function(x) {
-  x <- trimws(as.character(x))
-  x <- gsub("^(\\d{4})(\\d{2})(\\d{2})$",        "\\1-\\2-\\3", x)
-  x <- gsub("^(\\d{1,2})/(\\d{1,2})/(\\d{4})$",   "\\3-\\1-\\2", x)
-  x <- gsub("^(\\d{1,2})/(\\d{1,2})/(\\d{2})$",   "20\\3-\\1-\\2", x)
-  x <- gsub("^(\\d{1,2})\\.(\\d{1,2})\\.(\\d{4})$","\\3-\\2-\\1", x)
-  suppressWarnings(as.Date(x))
+  parse_date_with_orders(x)
 }
 
 # â”€â”€ parse_vof_period â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -27,62 +77,7 @@ parse_period_robust <- function(x) {
 # Returns a Date vector always â€” never integers or numerics.
 # Handles: YYYY-MM-DD Â· M/D/YYYY Â· MM/DD/YYYY Â· M/D/YY Â· Excel serials
 parse_vof_period <- function(x) {
-  if (is.null(x) || length(x) == 0L) return(as.Date(character(0L)))
-
-  raw_vals <- trimws(as.character(x))
-  slash_vals <- raw_vals[grepl("^\\d{1,2}/\\d{1,2}/\\d{2,4}$", raw_vals)]
-  slash_order <- "mdy"
-  if (length(slash_vals)) {
-    parts <- strsplit(slash_vals, "/", fixed = TRUE)
-    first <- suppressWarnings(as.integer(vapply(parts, `[`, character(1), 1L)))
-    second <- suppressWarnings(as.integer(vapply(parts, `[`, character(1), 2L)))
-    dmy_votes <- sum(first > 12, na.rm = TRUE)
-    mdy_votes <- sum(second > 12, na.rm = TRUE)
-    if (dmy_votes > mdy_votes) slash_order <- "dmy"
-  }
-
-  slash_fmts <- if (identical(slash_order, "dmy")) {
-    c("%d/%m/%Y", "%d/%m/%y", "%m/%d/%Y", "%m/%d/%y")
-  } else {
-    c("%m/%d/%Y", "%m/%d/%y", "%d/%m/%Y", "%d/%m/%y")
-  }
-
-  out <- rep(as.Date(NA_character_), length(x))
-
-  for (i in seq_along(x)) {
-    v <- x[[i]]
-    if (is.na(v)) next
-    s <- trimws(as.character(v))
-    if (!nzchar(s)) next
-
-    fmts <- if (grepl("^\\d{4}-\\d{1,2}-\\d{1,2}$", s)) {
-      "%Y-%m-%d"
-    } else if (grepl("^\\d{4}/\\d{1,2}/\\d{1,2}$", s)) {
-      "%Y/%m/%d"
-    } else if (grepl("^\\d{1,2}/\\d{1,2}/\\d{2,4}$", s)) {
-      slash_fmts
-    } else if (grepl("^\\d{1,2}-[[:alpha:]]{3}-\\d{2,4}$", s)) {
-      c("%d-%b-%Y", "%d-%b-%y")
-    } else {
-      c("%Y-%m-%d", "%Y/%m/%d", "%d-%b-%Y", "%d-%b-%y", slash_fmts)
-    }
-
-    for (fmt in fmts) {
-      d <- tryCatch(as.Date(s, format = fmt), error = \(e) as.Date(NA))
-      if (!is.na(d)) { out[[i]] <- d; break }
-    }
-
-    # Excel serial number fallback (e.g. 44675)
-    if (is.na(out[[i]])) {
-      n <- suppressWarnings(as.numeric(s))
-      if (!is.na(n) && n > 20000 && n < 70000)
-        out[[i]] <- tryCatch(
-          as.Date(n, origin = "1899-12-30"),
-          error = \(e) as.Date(NA))
-    }
-  }
-
-  out
+  parse_date_with_orders(x)
 }
 
 # â”€â”€ parse_period (alias used by infer_schema) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

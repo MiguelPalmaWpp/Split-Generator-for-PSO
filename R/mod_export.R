@@ -828,17 +828,21 @@ mod_export_server <- function(id, results, data, config, channels,
     }
 
     final_spend_splits <- function(res, cfg = list(), nm = "") {
-      current <- spend_splits_from_rag(res, cfg, nm)
-      if (nrow(current)) return(current)
-      summarize_split_diagnostics(res$cost_diagnoses, nm, cfg) %>%
-        dplyr::select(VariableSplit, MainModelVariableName, total_spend)
+      diag <- summarize_split_diagnostics(res$cost_diagnoses, nm, cfg) %>%
+        dplyr::select(VariableSplit, MainModelVariableName, total_spend) %>%
+        dplyr::filter(!is.na(.data$total_spend) & .data$total_spend > 0) %>%
+        dplyr::distinct(VariableSplit, MainModelVariableName, .keep_all = TRUE)
+      if (nrow(diag)) return(diag)
+      spend_splits_from_rag(res, cfg, nm)
     }
 
     pre_merge_spend_splits <- function(clean, cfg = list(), nm = "") {
-      pre <- spend_splits_from_rag(clean, cfg, nm)
-      if (nrow(pre)) return(pre)
-      summarize_split_diagnostics(clean$cost_diagnoses, nm, cfg) %>%
-        dplyr::select(VariableSplit, MainModelVariableName, total_spend)
+      diag <- summarize_split_diagnostics(clean$cost_diagnoses, nm, cfg) %>%
+        dplyr::select(VariableSplit, MainModelVariableName, total_spend) %>%
+        dplyr::filter(!is.na(.data$total_spend) & .data$total_spend > 0) %>%
+        dplyr::distinct(VariableSplit, MainModelVariableName, .keep_all = TRUE)
+      if (nrow(diag)) return(diag)
+      spend_splits_from_rag(clean, cfg, nm)
     }
 
     extract_export_merges <- function(cfg) {
@@ -852,9 +856,12 @@ mod_export_server <- function(id, results, data, config, channels,
       merges <- cfg$saved_merges %||% list()
       if (is.data.frame(merges)) merges <- split(merges, seq_len(nrow(merges)))
       rows <- lapply(merges, function(m) {
-        if (is.null(m)) return(NULL)
+        if (is.null(m) || !is.list(m)) return(NULL)
         active <- isTRUE(m$active) || isTRUE(m$enabled) || isTRUE(m$checked)
         if (!active) return(NULL)
+        merge_metric <- normalize_model_metric(m$metric %||% cfg$model_metric %||% "activity")
+        channel_metric <- normalize_model_metric(cfg$model_metric %||% "activity")
+        if (!is.null(m$metric) && !identical(merge_metric, channel_metric)) return(NULL)
         merged_name <- first_non_empty(c(
           m$new_name, m$name, m$merged_split, m$MergeName, m$merge_name
         ))
@@ -1067,7 +1074,7 @@ mod_export_server <- function(id, results, data, config, channels,
     }
 
     ensure_channel_export_payload <- function(item, d, gcfg) {
-      if (is.null(item)) return(item)
+      if (is.null(item) || !is.list(item)) return(item)
       if (!is.null(item$rae_totals) && !is.null(item$canonical_totals) &&
           !is.null(item$merge_resolved)) return(item)
 
@@ -1221,10 +1228,29 @@ mod_export_server <- function(id, results, data, config, channels,
           rag_scope <- apply_geo_filters(rag_scope, geo_col)
           model_at_an <- apply_geo_filters(model_at_an, geo_col)
 
-          id_in_rag  <- intersect(cross_id, names(rag_scope))
-          spend_kw   <- cfg_ch$spend_keyword %||% "Spend"
-          all_num    <- setdiff(names(rag_scope)[sapply(rag_scope, is.numeric)], id_in_rag)
-          split_cols <- all_num[!grepl(spend_kw, all_num, ignore.case = TRUE)]
+          id_in_rag    <- intersect(cross_id, names(rag_scope))
+          model_metric <- normalize_model_metric(cfg_ch$model_metric %||% res$model_metric %||% "activity")
+          spend_kw     <- cfg_ch$spend_keyword %||% "Spend"
+          activity_kw  <- cfg_ch$activity_keyword %||% "Activity"
+          all_num      <- setdiff(names(rag_scope)[vapply(rag_scope, is.numeric, logical(1))], id_in_rag)
+          split_cols <- if (identical(model_metric, "spend")) {
+            cols <- all_num[grepl(spend_kw, all_num, ignore.case = TRUE)]
+            if (!length(cols) && !is.null(res$cost_diagnoses) &&
+                "VariableSplit" %in% names(res$cost_diagnoses)) {
+              cols <- intersect(normalize_export_split(unique(res$cost_diagnoses$VariableSplit)), all_num)
+            }
+            cols
+          } else {
+            cols <- all_num[!grepl(spend_kw, all_num, ignore.case = TRUE)]
+            if (!length(cols) && nzchar(activity_kw)) {
+              cols <- all_num[grepl(activity_kw, all_num, ignore.case = TRUE)]
+            }
+            if (!length(cols) && !is.null(res$act_diagnoses) &&
+                "VariableSplit" %in% names(res$act_diagnoses)) {
+              cols <- intersect(normalize_export_split(unique(res$act_diagnoses$VariableSplit)), all_num)
+            }
+            cols
+          }
           if (!length(split_cols)) return(FALSE)
 
           rag_scope$row_splits <- rowSums(rag_scope[, split_cols, drop = FALSE], na.rm = TRUE)
@@ -1268,8 +1294,12 @@ mod_export_server <- function(id, results, data, config, channels,
     }
 
     build_file_dims <- function(export_data, d, ch_list) {
-      total_splits <- sum(vapply(export_data, function(x) nrow(x$final), integer(1)))
+      total_splits <- sum(vapply(export_data, function(x) {
+        if (!is.list(x)) return(0L)
+        nrow(x$final %||% tibble::tibble())
+      }, integer(1)))
       total_composition_rows <- sum(vapply(export_data, function(x) {
+        if (!is.list(x)) return(0L)
         merges <- extract_export_merges(x$cfg %||% list())
         sum(vapply(merges, function(m) length(m$Components %||% character(0)), integer(1)))
       }, integer(1)))
@@ -1389,8 +1419,30 @@ mod_export_server <- function(id, results, data, config, channels,
       export_snapshot()$merge_issues
     })
 
+    normalize_channel_summary <- function(summ) {
+      if (is.null(summ) || !length(summ)) return(list())
+      summ <- Filter(function(x) is.list(x) && !is.null(x$name), summ)
+      lapply(summ, function(x) {
+        n_splits <- suppressWarnings(as.integer(x$n_splits %||% 0L))[1]
+        if (is.na(n_splits)) n_splits <- 0L
+        list(
+          name = as.character(x$name %||% "")[1],
+          processed = isTRUE(x$processed),
+          has_warning = isTRUE(x$has_warning),
+          tc_mismatch = isTRUE(x$tc_mismatch),
+          n_splits = n_splits
+        )
+      })
+    }
+
+    safe_process_qa <- function() {
+      proc <- tryCatch(process_qa(), error = function(e) list())
+      if (!is.list(proc)) proc <- list()
+      proc
+    }
+
     channel_summary <- reactive({
-      export_snapshot()$channel_summary
+      normalize_channel_summary(export_snapshot()$channel_summary)
     })
 
     n_ok <- reactive({
@@ -1412,6 +1464,7 @@ mod_export_server <- function(id, results, data, config, channels,
     split_period_counts <- reactive({
       snap <- export_snapshot()
       split_lists <- lapply(snap$export_data, function(x) {
+        if (!is.list(x) || is.null(x$final)) return(character(0))
         splits <- x$final$VariableSplit %||% character(0)
         splits[!is.na(splits) & nzchar(splits)]
       })
@@ -1431,12 +1484,14 @@ mod_export_server <- function(id, results, data, config, channels,
     }
 
     focus_splits_for_export_item <- function(item) {
+      if (!is.list(item) || is.null(item$final)) return(character(0))
       splits <- item$final$VariableSplit %||% character(0)
       splits <- splits[!is.na(splits) & nzchar(trimws(splits))]
       unique(splits[!is_nonfocus_split(splits)])
     }
 
     focus_geos_for_export_item <- function(item, gcfg) {
+      if (!is.list(item)) return(character(0))
       focus_splits <- focus_splits_for_export_item(item)
       r <- item$res
       if (is.null(r) || is.null(r$rag) || !length(focus_splits)) return(character(0))
@@ -1591,8 +1646,8 @@ mod_export_server <- function(id, results, data, config, channels,
 
     export_issue_summary <- reactive({
       snap <- export_snapshot()
-      summ <- snap$channel_summary
-      proc <- process_qa()
+      summ <- channel_summary()
+      proc <- safe_process_qa()
       failed_names <- proc$failed_names %||% character(0)
       stale_names <- proc$stale_names %||% character(0)
       pending_names <- vapply(summ, \(x) if (!isTRUE(x$processed)) x$name else NA_character_,
@@ -1760,7 +1815,7 @@ mod_export_server <- function(id, results, data, config, channels,
 
     output$channel_status <- renderUI({
       summ <- channel_summary()
-      proc <- process_qa()
+      proc <- safe_process_qa()
       stale_nms <- proc$stale_names %||% character(0)
       failed_nms <- proc$failed_names %||% character(0)
       if (!length(summ))
@@ -1801,7 +1856,7 @@ mod_export_server <- function(id, results, data, config, channels,
 
     output$readiness_badge <- renderUI({
       summ    <- channel_summary()
-      proc    <- process_qa()
+      proc    <- safe_process_qa()
       n_ready <- sum(vapply(summ, \(x) isTRUE(x$processed), logical(1)))
       n_total <- length(summ)
       n_stale <- proc$stale %||% 0L
@@ -2027,8 +2082,7 @@ mod_export_server <- function(id, results, data, config, channels,
     })
 
     output$download_section <- renderUI({
-      snap <- export_snapshot()
-      summ    <- snap$channel_summary
+      summ <- channel_summary()
       n_ready <- sum(vapply(summ, \(x) isTRUE(x$processed), logical(1)))
       n_total <- length(summ)
       issue_state <- export_issue_summary()
@@ -2873,6 +2927,7 @@ mod_export_server <- function(id, results, data, config, channels,
     scwa_channel_choices <- reactive({
       snap <- export_snapshot()
       candidates <- names(Filter(function(item) {
+        if (!is.list(item)) return(FALSE)
         cfg <- item$cfg %||% list()
         length(extract_export_merges(cfg)) > 0 &&
           nrow(item$final %||% tibble::tibble()) > 0

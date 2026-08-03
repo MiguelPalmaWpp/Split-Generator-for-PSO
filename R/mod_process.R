@@ -937,11 +937,11 @@ mod_process_server <- function(id, data, config, channels,
       if (is.null(res) || !has_data) return(NULL)
       metric_for_counts <- normalize_model_metric(input$model_metric %||% (channels()[[nm]] %||% list())$model_metric %||% "activity")
       n_focus <- tryCatch(
-        nrow(if (identical(metric_for_counts, "spend")) build_current_spend_from_rag(res, channels()[[nm]] %||% list(), "focus") else build_current_act_data("focus")),
+        nrow(if (identical(metric_for_counts, "spend")) build_current_spend_data("focus") else build_current_act_data("focus")),
         error = \(e) 0L
       )
       n_nf <- tryCatch(
-        nrow(if (identical(metric_for_counts, "spend")) build_current_spend_from_rag(res, channels()[[nm]] %||% list(), "nonfocus") else build_current_act_data("nonfocus")),
+        nrow(if (identical(metric_for_counts, "spend")) build_current_spend_data("nonfocus") else build_current_act_data("nonfocus")),
         error = \(e) 0L
       )
       div(class = "filter-bar",
@@ -1074,8 +1074,7 @@ mod_process_server <- function(id, data, config, channels,
     }
     
     # ── current_spend_data ─────────────────────────────────────────────────
-    current_spend_data <- reactive({
-      results_trigger()
+    build_current_spend_data <- function(filter_val = "focus") {
       nm  <- req(input$channel_select)
       res <- req(results_store[[nm]])
       cfg <- channels()[[nm]] %||% list()
@@ -1083,16 +1082,21 @@ mod_process_server <- function(id, data, config, channels,
       if (is.null(cost_df) || nrow(cost_df) == 0 ||
           !"VariableSplit" %in% names(cost_df) ||
           !"total_spend" %in% names(cost_df)) {
-        return(build_current_spend_from_rag(res, cfg, input$period_filter %||% "focus"))
+        return(build_current_spend_from_rag(res, cfg, filter_val))
       }
       if ("period" %in% names(cost_df)) {
-        cost_df <- cost_df %>% filter(.data$period == (input$period_filter %||% "focus"))
+        cost_df <- cost_df %>% filter(.data$period == filter_val)
       }
       out <- cost_df %>%
         filter(!is.na(total_spend) & total_spend > 0) %>%
         select(-any_of(c("seg", "period", "model_var"))) %>%
         mutate(across(where(is.numeric), \(x) round(x, 4)))
-      if (!nrow(out)) build_current_spend_from_rag(res, cfg, input$period_filter %||% "focus") else out
+      if (!nrow(out)) build_current_spend_from_rag(res, cfg, filter_val) else out
+    }
+
+    current_spend_data <- reactive({
+      results_trigger()
+      build_current_spend_data(input$period_filter %||% "focus")
     }) %>% bindCache(input$channel_select, input$period_filter, results_trigger())
 
     current_model_data <- reactive({

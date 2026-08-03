@@ -253,7 +253,7 @@ mod_export_server <- function(id, results, data, config, channels,
           sum(suppressWarnings(as.numeric(rag_df[[col]])), na.rm = TRUE)
         }, numeric(1))
       ) %>%
-        dplyr::distinct(.data$VariableSplit, .data$MainModelVariableName, .keep_all = TRUE)
+        dplyr::distinct(VariableSplit, MainModelVariableName, .keep_all = TRUE)
     }
 
     spend_splits_from_rag <- function(res, cfg = list(), nm = "") {
@@ -303,7 +303,7 @@ mod_export_server <- function(id, results, data, config, channels,
           sum(suppressWarnings(as.numeric(rag_df[[col]])), na.rm = TRUE)
         }, numeric(1))
       ) %>%
-        dplyr::distinct(.data$VariableSplit, .data$MainModelVariableName, .keep_all = TRUE)
+        dplyr::distinct(VariableSplit, MainModelVariableName, .keep_all = TRUE)
     }
 
     export_metric_totals_from_rae <- function(d, cfg = list(), gcfg = list(), nm = "") {
@@ -757,8 +757,9 @@ mod_export_server <- function(id, results, data, config, channels,
         }
         return(spend_final %>%
                  dplyr::mutate(total_activity = NA_real_) %>%
-                 dplyr::select(.data$VariableSplit, .data$MainModelVariableName,
-                               .data$total_activity, dplyr::everything()))
+                 dplyr::select(dplyr::all_of(c("VariableSplit", "MainModelVariableName",
+                                                "total_activity")),
+                               dplyr::everything()))
       }
 
       final <- activity_splits_from_rag(res, cfg, nm)
@@ -766,7 +767,7 @@ mod_export_server <- function(id, results, data, config, channels,
 
       diag_meta <- summarize_split_diagnostics(res$act_diagnoses, nm, cfg) %>%
         dplyr::select(VariableSplit, MainModelVariableName, total_activity.diag = total_activity) %>%
-        dplyr::distinct(.data$VariableSplit, .keep_all = TRUE)
+        dplyr::distinct(VariableSplit, .keep_all = TRUE)
       if (nrow(diag_meta) > 0) {
         final <- final %>%
           dplyr::left_join(diag_meta, by = "VariableSplit", suffix = c("", ".diag")) %>%
@@ -793,7 +794,7 @@ mod_export_server <- function(id, results, data, config, channels,
               sm %>%
                 dplyr::select(dplyr::any_of(c("VariableSplit", "MainModelVariableName"))) %>%
                 dplyr::filter(nzchar(.data$MainModelVariableName)) %>%
-                dplyr::distinct(.data$VariableSplit, .keep_all = TRUE),
+                dplyr::distinct(VariableSplit, .keep_all = TRUE),
               by = "VariableSplit",
               suffix = c("", ".side")
             ) %>%
@@ -808,7 +809,7 @@ mod_export_server <- function(id, results, data, config, channels,
       }
 
       final %>%
-        dplyr::distinct(.data$VariableSplit, .data$MainModelVariableName, .keep_all = TRUE)
+        dplyr::distinct(VariableSplit, MainModelVariableName, .keep_all = TRUE)
     }
 
     pre_merge_activity_splits <- function(clean, cfg = list(), nm = "") {
@@ -816,8 +817,9 @@ mod_export_server <- function(id, results, data, config, channels,
         spend_pre <- pre_merge_spend_splits(clean, cfg, nm)
         return(spend_pre %>%
                  dplyr::mutate(total_activity = NA_real_) %>%
-                 dplyr::select(.data$VariableSplit, .data$MainModelVariableName,
-                               .data$total_activity, dplyr::everything()))
+                 dplyr::select(dplyr::all_of(c("VariableSplit", "MainModelVariableName",
+                                                "total_activity")),
+                               dplyr::everything()))
       }
       pre <- activity_splits_from_rag(clean, cfg, nm)
       if (nrow(pre)) return(pre)
@@ -2578,8 +2580,7 @@ mod_export_server <- function(id, results, data, config, channels,
 
         out %>%
           dplyr::select(dplyr::any_of(standard_cols)) %>%
-          dplyr::distinct(.data$VariableSplit, .data$MainModelVariableName,
-                          .keep_all = TRUE)
+          dplyr::distinct(VariableSplit, MainModelVariableName, .keep_all = TRUE)
       }
 
       rows <- Filter(Negate(is.null), lapply(names(res_list), function(nm) {
@@ -2612,7 +2613,7 @@ mod_export_server <- function(id, results, data, config, channels,
               MaxWeight.side = .data$MaxWeight,
               rank.side = .data$rank
             ) %>%
-            dplyr::distinct(.data$VariableSplit, .keep_all = TRUE)
+            dplyr::distinct(VariableSplit, .keep_all = TRUE)
 
           out <- out %>%
             dplyr::left_join(side_meta, by = "VariableSplit") %>%
@@ -2646,8 +2647,7 @@ mod_export_server <- function(id, results, data, config, channels,
       if (is.null(result) || !nrow(result)) return(NULL)
       result %>%
         dplyr::arrange(.data$VariableSplit, .data$MainModelVariableName) %>%
-        dplyr::distinct(.data$VariableSplit, .data$MainModelVariableName,
-                        .keep_all = TRUE) %>%
+        dplyr::distinct(VariableSplit, MainModelVariableName, .keep_all = TRUE) %>%
         dplyr::select(dplyr::all_of(standard_cols))
     }
 

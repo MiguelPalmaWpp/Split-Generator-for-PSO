@@ -206,7 +206,7 @@ splits_summary <- function(df, type = "activity") {
     active_rle <- rle(!is.na(vals) & vals > 0)
     min_consec <- if (any(active_rle$values))
       max(active_rle$lengths[active_rle$values]) else 0L
-    max_idx <- round(max(non_zero) / mean(non_zero), 4)
+    max_idx <- round(max(non_zero) / sum(non_zero), 4)
 
     if (type == "activity") {
       tibble(

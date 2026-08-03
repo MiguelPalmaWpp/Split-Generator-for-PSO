@@ -1035,11 +1035,13 @@ mod_process_server <- function(id, data, config, channels,
       nm  <- req(input$channel_select)
       res <- req(results_store[[nm]])
       cfg <- channels()[[nm]] %||% list()
+      rag_out <- build_current_spend_from_rag(res, cfg, filter_val)
+      if (!is.null(rag_out) && nrow(rag_out) > 0) return(rag_out)
       cost_df <- res$cost_diagnoses
       if (is.null(cost_df) || nrow(cost_df) == 0 ||
           !"VariableSplit" %in% names(cost_df) ||
           !"total_spend" %in% names(cost_df)) {
-        return(build_current_spend_from_rag(res, cfg, filter_val))
+        return(empty_spend_diag())
       }
       if ("period" %in% names(cost_df)) {
         cost_df <- cost_df[cost_df$period == filter_val, , drop = FALSE]
@@ -1082,14 +1084,14 @@ mod_process_server <- function(id, data, config, channels,
         length(unique(d$VariableSplit))
       }
       count_for <- function(period) {
+        if (identical(metric, "spend")) {
+          return(tryCatch(nrow(build_current_spend_data(period)),
+                          error = function(e) 0L))
+        }
         fast_n <- quick_count(period)
         if (!is.na(fast_n)) return(fast_n)
         tryCatch({
-          nrow(if (identical(metric, "spend")) {
-            build_current_spend_data(period)
-          } else {
-            build_current_act_data(period)
-          })
+          nrow(build_current_act_data(period))
         }, error = function(e) 0L)
       }
       list(

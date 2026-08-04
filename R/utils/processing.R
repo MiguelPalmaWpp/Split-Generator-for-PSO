@@ -1,6 +1,6 @@
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# =============================================================================
 # R/processing.R
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# =============================================================================
 
 keep_nonzero_cols <- function(df) {
   df   <- as.data.frame(df)
@@ -188,7 +188,7 @@ build_side_mapping <- function(metric_all) {
     select(-model_var)
 }
 
-# â”€â”€ splits_summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# splits_summary
 splits_summary <- function(df, type = "activity") {
   if (is.null(df) || nrow(df) == 0)
     return(tibble(VariableSplit = character()))
@@ -248,7 +248,7 @@ splits_summary <- function(df, type = "activity") {
   result
 }
 
-# â”€â”€ apply_single_merge â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# apply_single_merge
 # New function added to support interactive merging in mod_process.
 # Merges selected splits in the RAG and updates all diagnostic structures.
 apply_single_merge <- function(res, merge_entry, cfg, notify = TRUE) {
@@ -458,13 +458,13 @@ apply_single_merge <- function(res, merge_entry, cfg, notify = TRUE) {
     return(res)
   }
 
-  # RAG â€” activity
+ # RAG activity
   selected_splits <- rag_cols
   new_rag             <- res$rag
   new_rag[[new_name]] <- rowSums(new_rag[, rag_cols, drop = FALSE], na.rm = TRUE)
   new_rag             <- new_rag[, setdiff(names(new_rag), setdiff(rag_cols, new_name))]
 
-  # RAG â€” spend
+ # RAG spend
   spend_rag_cands  <- stringr::str_replace_all(
     rag_cols, stringr::regex(act_kw, ignore_case = TRUE), spend_kw)
   spend_rag_cands  <- spend_rag_cands[!identical(act_kw, spend_kw) &
@@ -632,9 +632,9 @@ apply_single_merge <- function(res, merge_entry, cfg, notify = TRUE) {
   out
 }
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# =============================================================================
 # process_channel
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# =============================================================================
 process_channel <- function(all_rags,
                             analytical,
                             dates_df,
@@ -647,7 +647,7 @@ process_channel <- function(all_rags,
                             segment_overrides = list(),
                             min_period        = NULL,
                             max_period        = NULL,
-                            schema_metadata   = NULL,   # â† NEW
+                            schema_metadata   = NULL,
                             progress_cb       = NULL) {
 
   pb <- function(detail, value = NULL) {
@@ -663,7 +663,7 @@ process_channel <- function(all_rags,
   source_data <- all_rags
   if (is.null(source_data)) stop("All RAGs data not uploaded.")
 
-  # â”€â”€ Pre-convert all date params once â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # Pre-convert all date params once
   min_p   <- if (!is.null(min_period))
     tryCatch(as.Date(min_period), error = \(e) as.Date(NA)) else as.Date(NA)
   max_p   <- if (!is.null(max_period))
@@ -671,11 +671,11 @@ process_channel <- function(all_rags,
   start_d <- as.Date(start_report_date)
   end_d   <- as.Date(end_report_date)
 
-  # â”€â”€ Filter to channel's VOF date range â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # Filter to channel's VOF date range
   if (!is.na(min_p)) source_data <- source_data[source_data$Period >= min_p, ]
   if (!is.na(max_p)) source_data <- source_data[source_data$Period <= max_p, ]
 
-  # â”€â”€ Constrain to analytical date spine â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # Constrain to analytical date spine
   if (nrow(dates_df) > 0) {
     an_min_date <- min(dates_df$Period, na.rm = TRUE)
     an_max_date <- max(dates_df$Period, na.rm = TRUE)
@@ -692,13 +692,13 @@ process_channel <- function(all_rags,
   join_key   <- cross_id
   id_protect <- cross_id
 
-  # â”€â”€ rag_base via data.table â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # rag_base via data.table
   rag_base_dt <- unique(
     data.table::as.data.table(source_data)[, cross_id, with = FALSE])
   data.table::setorderv(rag_base_dt, "Period")
   rag_base <- as.data.frame(rag_base_dt)
 
-  # â”€â”€ ref_cross_key from rag_base (smaller) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # ref_cross_key from rag_base (smaller)
   cross_data_rb <- rag_base[, cross_cols, drop = FALSE]
   cross_key_rb  <- do.call(paste, c(as.list(cross_data_rb), list(sep = " / ")))
   ref_cross_key <- sort(unique(cross_key_rb))[1]
@@ -715,7 +715,7 @@ process_channel <- function(all_rags,
     any(sapply(segment_overrides,
                \(o) length(o$geography_exclude %||% character(0)) > 0))
 
-  # â”€â”€ Pre-filter â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # Pre-filter
   pb("Filtering source data...", 0.10)
 
   d_prefilt <- data.table::as.data.table(source_data)
@@ -765,7 +765,7 @@ process_channel <- function(all_rags,
       if (nchar(p %||% "") > 0)
         d_prefilt <- d_prefilt[!grepl(p, Creative, ignore.case = TRUE)]
 
-  # â”€â”€ Filter by useful_long dimension values â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # Filter by useful_long dimension values
   # When Product (or another dim) is useful_long, each channel corresponds
   # to specific values of that dimension. Without this filter, all product
   # channels share the same RAG data, causing Total Check mismatches.
@@ -793,7 +793,7 @@ process_channel <- function(all_rags,
     )
   }
 
-  # â”€â”€ Segment loop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # Segment loop
   pb("Building splits...", 0.20)
 
   d <- data.table::copy(d_prefilt)
@@ -826,7 +826,7 @@ process_channel <- function(all_rags,
     split_cols_technical <- unique(c("VariableName", cfg$split_columns %||% character(0)))
     d[, SplitName := build_split_name_from_columns(d, split_cols_technical)]
 
-    # â”€â”€ Pivot wide â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # Pivot wide
     lhs    <- paste(cross_id, collapse = " + ")
     d_wide <- data.table::dcast(d,
                                 as.formula(paste(lhs, "~ SplitName")),
@@ -841,14 +841,14 @@ process_channel <- function(all_rags,
     d_wide <- as.data.frame(d_wide)
     d_wide <- d_wide[order(d_wide$Period), ]
 
-    # â”€â”€ Non-focus suffix â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # Non-focus suffix
     nf_sfx <- {
       tbr <- cfg$time_break_label %||% ""
       if (nzchar(tbr)) paste0("Before ", update_label, "|", tbr)
       else             paste0("Before ", update_label)
     }
 
-    # â”€â”€ Non-focus slice â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # Non-focus slice
     nf_raw <- as.data.frame(d_wide[d_wide$Period < start_d, ])
     nf     <- keep_nonzero_cols(nf_raw)
 
@@ -881,7 +881,7 @@ process_channel <- function(all_rags,
       }
     }
 
-    # â”€â”€ Focus slice â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # Focus slice
     fc_raw <- as.data.frame(
       d_wide[d_wide$Period >= start_d & d_wide$Period <= end_d, ])
     fc <- keep_nonzero_cols(fc_raw)
@@ -918,7 +918,7 @@ process_channel <- function(all_rags,
     rm(d, d_wide, nf_raw, nf, fc_raw, fc)
   }
 
-  # â”€â”€ Assemble RAG â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # Assemble RAG
   pb("Assembling RAG...", 0.82)
 
   rag_dt <- rag_base_dt

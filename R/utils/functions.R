@@ -1,17 +1,17 @@
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# =============================================================================
 # R/functions.R
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# =============================================================================
 
-# â”€â”€ Ordinal tag â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Ordinal tag
 ordinal_tag <- function(i) {
   c("First", "Second", "Third", "Fourth", "Fifth")[min(i, 5L)]
 }
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# =============================================================================
 # DATE PARSERS
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# =============================================================================
 
-# â”€â”€ parse_period_robust â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# parse_period_robust
 # Date parsing orders are intentionally day-first before month-first because
 # VOF/RAE files are commonly authored from LATAM Excel exports.
 DATE_PARSE_ORDERS <- c("Ymd", "dmY", "mdY", "ymd", "dmy", "mdy")
@@ -72,22 +72,22 @@ parse_period_robust <- function(x) {
   parse_date_with_orders(x)
 }
 
-# â”€â”€ parse_vof_period â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# â”€â”€ Robust VOF period parser â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# Returns a Date vector always â€” never integers or numerics.
-# Handles: YYYY-MM-DD Â· M/D/YYYY Â· MM/DD/YYYY Â· M/D/YY Â· Excel serials
+# parse_vof_period
+# Robust VOF period parser
+# Returns a Date vector always never integers or numerics.
+# Handles: YYYY-MM-DD M/D/YYYY MM/DD/YYYY M/D/YY Excel serials
 parse_vof_period <- function(x) {
   parse_date_with_orders(x)
 }
 
-# â”€â”€ parse_period (alias used by infer_schema) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# parse_period (alias used by infer_schema)
 parse_period <- parse_period_robust
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# =============================================================================
 # SCHEMA INFERENCE HELPERS
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# =============================================================================
 
-# â”€â”€ shared column contracts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# shared column contracts
 clean_names <- function(x) {
   x <- as.character(x)
   x <- gsub("^\ufeff", "", x, perl = TRUE)
@@ -113,7 +113,7 @@ column_contract <- function(df, required = character(), optional = character()) 
   )
 }
 
-# â”€â”€ is_weekly_like â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# is_weekly_like
 is_weekly_like <- function(dates) {
   dates <- sort(dates[!is.na(dates)])
   if (length(dates) < 2) return(FALSE)
@@ -121,11 +121,11 @@ is_weekly_like <- function(dates) {
   median_diff >= 6 && median_diff <= 8
 }
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# =============================================================================
 # SCHEMA INFERENCE
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# =============================================================================
 
-# â”€â”€ infer_schema â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# infer_schema
 # Infers the structural schema of the Analytical dataset.
 # Returns: dims (cross-section candidates), time_col, variables, date range, etc.
 infer_schema <- function(df, time_col = "Period") {
@@ -166,13 +166,13 @@ infer_schema <- function(df, time_col = "Period") {
   )
 }
 
-# â”€â”€ build_schema_metadata â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# build_schema_metadata
 # Builds full schema metadata from the Analytical dataset.
 # Returns:
-#   $xs_dims        â€” cross-sectional dimension columns
-#   $useful_long    â€” longitudinal dims with values other than "Total"
-#   $discarded_long â€” longitudinal dims where all values are "Total"
-#   $name_lookup    â€” data.frame: OriginalName, VariableName, <one col per long dim>
+# $xs_dims cross-sectional dimension columns
+# $useful_long longitudinal dims with values other than "Total"
+# $discarded_long longitudinal dims where all values are "Total"
+# $name_lookup data.frame: OriginalName, VariableName, <one col per long dim>
 build_schema_metadata <- function(df, schema) {
   tc   <- schema$time_col
   dims <- schema$dims
@@ -191,7 +191,7 @@ build_schema_metadata <- function(df, schema) {
   long_dims_expected <- setdiff(MFF_DIMS_STD, xs_dims)
   n_suffix           <- length(long_dims_expected)
 
-  # C. Parse variable names â€” format: BaseName_D1val_D2val_..._Dnval
+ # C. Parse variable names format: BaseName_D1val_D2val_..._Dnval
   numeric_cols  <- names(df)[vapply(df, is.numeric, logical(1))]
   name_analysis <- data.frame(OriginalName = numeric_cols,
                               stringsAsFactors = FALSE)
@@ -233,11 +233,11 @@ build_schema_metadata <- function(df, schema) {
   )
 }
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# =============================================================================
 # CROSS-SECTION DETECTION
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# =============================================================================
 
-# â”€â”€ auto_detect_cross_cols â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# auto_detect_cross_cols
 # Kept as fallback when schema_metadata is not available.
 # Prefer xs_dims from build_schema_metadata when possible.
 auto_detect_cross_cols <- function(analytical) {
@@ -249,34 +249,34 @@ auto_detect_cross_cols <- function(analytical) {
   if (!length(found)) "Geography" else found
 }
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# =============================================================================
 # FILE READER
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# =============================================================================
 
-# â”€â”€ read_main_data â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# read_main_data
 # Reads the main data file. Accepts .csv and .zip only (as per UI restrictions).
-# â”€â”€ read_main_data â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# read_main_data
 # Accepts:
-#   .zip  â†’ contains exactly one .txt file (always this structure)
-#   .csv  â†’ direct CSV upload (legacy / small files)
+# .zip contains exactly one .txt file (always this structure)
+# .csv direct CSV upload (legacy / small files)
 read_main_data <- function(path, ext) {
 
   raw <- if (tolower(ext) == "zip") {
 
-    # â”€â”€ Extract ZIP â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # Extract ZIP
     tmp <- file.path(tempdir(), paste0("unzip_", as.integer(Sys.time())))
     dir.create(tmp, showWarnings = FALSE)
     on.exit(unlink(tmp, recursive = TRUE), add = TRUE)
     unzip(path, exdir = tmp)
 
-    # â”€â”€ Find the TXT file â€” always exactly one â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # Find the TXT file always exactly one
     txt_files <- list.files(tmp, pattern = "\\.txt$",
                             full.names = TRUE, recursive = TRUE)
 
     if (!length(txt_files))
       stop("No TXT file found inside the ZIP.")
 
-    # Read â€” fread auto-detects delimiter (tab, comma, pipe, etc.)
+ # Read fread auto-detects delimiter (tab, comma, pipe, etc.)
     data.table::fread(txt_files[1],
                       data.table    = FALSE,
                       colClasses    = "character",
@@ -284,7 +284,7 @@ read_main_data <- function(path, ext) {
                       showProgress  = FALSE)
 
   } else {
-    # â”€â”€ Direct CSV upload â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # Direct CSV upload
     data.table::fread(file         = path,
                       sep          = "auto",
                       encoding     = "UTF-8",
@@ -293,18 +293,18 @@ read_main_data <- function(path, ext) {
                       showProgress = FALSE)
   }
 
-  # â”€â”€ rawPeriod alias â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # rawPeriod alias
   if ("rawPeriod" %in% names(raw))
     names(raw) <- sub("^raw", "", names(raw))
 
-  # â”€â”€ Validate required columns â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # Validate required columns
   miss <- setdiff(REQUIRED_COLS, names(raw))
   if (length(miss))
     stop("Missing columns: ", paste(miss, collapse = ", "))
 
   raw <- raw[, intersect(REQUIRED_COLS, names(raw)), drop = FALSE]
 
-  # â”€â”€ Parse and sort â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # Parse and sort
   raw %>%
     dplyr::mutate(
       Period        = parse_period_robust(Period),
@@ -315,11 +315,11 @@ read_main_data <- function(path, ext) {
     dplyr::arrange(Geography, VariableName, Period)
 }
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# =============================================================================
 # CONFIG CSV
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# =============================================================================
 
-# â”€â”€ export_channels_csv â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# export_channels_csv
 apply_dimension_aliases <- function(d, dimension_aliases) {
   if (!length(dimension_aliases)) return(d)
   for (als in dimension_aliases) {
@@ -436,11 +436,11 @@ export_channels_csv <- function(channels, global_config = NULL) {
   dplyr::select(out, dplyr::any_of(cfg_order), dplyr::everything())
 }
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# =============================================================================
 # KEYWORD DETECTORS
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# =============================================================================
 
-# â”€â”€ detect_activity_keyword â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# detect_activity_keyword
 detect_activity_keyword <- function(var_names,
                                     keyword_dict = MEDIA_KEYWORD_DICT) {
   for (kw in keyword_dict$activity)
@@ -502,7 +502,7 @@ expand_varname_include_with_spend <- function(all_variable_names,
   unique(c(vi, spend_candidates[compatible]))
 }
 
-# â”€â”€ detect_spend_keyword â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# detect_spend_keyword
 detect_spend_keyword <- function(main_data, varname_include,
                                  keyword_dict = MEDIA_KEYWORD_DICT) {
   if (is.null(main_data) || !"VariableName" %in% names(main_data))
@@ -541,11 +541,11 @@ detect_spend_keyword <- function(main_data, varname_include,
   "Spend"
 }
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# =============================================================================
 # VAR KEY BUILDER (kept for summary/coverage info)
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# =============================================================================
 
-# â”€â”€ build_var_key â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# build_var_key
 build_var_key <- function(main_data, vof_analytical_names) {
   if (is.null(main_data) || !"VariableName" %in% names(main_data))
     return(list(type = "standard", key_col = "var_key_v1",
@@ -574,9 +574,9 @@ build_var_key <- function(main_data, vof_analytical_names) {
   )
 }
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# =============================================================================
 # BUILD MEDIA INDEX
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# =============================================================================
 
 build_media_index <- function(main_data, analytical, vof_df, model_details,
                               channels_rois = NULL, cross_cols = "Geography",
@@ -605,14 +605,14 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
   an_max_date <- if (!is.null(analytical) && "Period" %in% names(analytical))
     max(analytical$Period, na.rm = TRUE) else as.Date(NA_character_)
 
-  # â”€â”€ Detect VOF geo column (Geography or Geographies)
+ # Detect VOF geo column (Geography or Geographies)
   detect_geo_col <- function(df) {
     if ("Geography"   %in% names(df)) return("Geography")
     if ("Geographies" %in% names(df)) return("Geographies")
     return(NULL)
   }
 
-  # â”€â”€ Step 1: IN/FIXED variables
+ # Step 1: IN/FIXED variables
   in_model_vars <- if (!is.null(model_details) &&
                        all(c("Type", "VariableName") %in% names(model_details))) {
     model_details %>%
@@ -624,7 +624,7 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
       unique()
   } else unique(vof_df$MainModelVariableName)
 
-  # â”€â”€ Step 2: validate + filter VOF
+ # Step 2: validate + filter VOF
   req_vof  <- c("AnalyticalVariableName", "MainModelVariableName",
                 "MinPeriod", "MaxPeriod")
   miss_vof <- setdiff(req_vof, names(vof_df))
@@ -655,11 +655,11 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
   if (!nrow(vof_filtered))
     stop("No VOF rows matched ModelDetails Type='IN'/'FIXED'.")
 
-  # â”€â”€ Step 3: coverage info
+ # Step 3: coverage info
   vk_info <- build_var_key(main_data,
                            unique(vof_filtered$AnalyticalVariableName))
 
-  # â”€â”€ Step 4: ROI lookup
+ # Step 4: ROI lookup
   roi_lookup <- NULL
   if (!is.null(channels_rois) &&
       "MainModelVariableName" %in% names(channels_rois)) {
@@ -683,11 +683,11 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
         dplyr::distinct(MainModelVariableName, .keep_all = TRUE)
   }
 
-  # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-  # PRE-COMPUTATIONS â€” run ONCE before the loop
-  # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# =============================================================================
+ # PRE-COMPUTATIONS run ONCE before the loop
+# =============================================================================
 
-  # OPT-2: Parse ALL VOF dates FIRST â€” must happen before split so that
+ # OPT-2: Parse ALL VOF dates FIRST must happen before split so that
   # .min_parsed / .max_parsed are present in every element of vof_by_mv
   vof_min_dates <- tryCatch(
     as.Date(parse_vof_period(vof_filtered$MinPeriod), origin = "1970-01-01"),
@@ -700,7 +700,7 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
   vof_filtered$.min_parsed <- vof_min_dates
   vof_filtered$.max_parsed <- vof_max_dates
 
-  # OPT-1: Split AFTER adding parsed date columns â†’ O(1) lookup per variable
+ # OPT-1: Split AFTER adding parsed date columns O(1) lookup per variable
   vof_by_mv <- split(vof_filtered, vof_filtered$MainModelVariableName)
 
   # OPT-3: Pre-compute unique VariableNames from main_data ONCE
@@ -708,7 +708,7 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
     unique(trimws(as.character(main_data$VariableName))) else character(0)
   all_main_vn <- all_main_vn[!is.na(all_main_vn) & nzchar(all_main_vn)]
 
-  # OPT-4: Pre-index schema name_lookup as named list â†’ O(1) lookup
+ # OPT-4: Pre-index schema name_lookup as named list O(1) lookup
   schema_lookup_by_orig <- NULL
   if (!is.null(schema_metadata) &&
       !is.null(schema_metadata$name_lookup) &&
@@ -847,9 +847,9 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
   roi_by_mv <- if (!is.null(roi_lookup))
     split(roi_lookup, roi_lookup$MainModelVariableName) else list()
 
-  # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# =============================================================================
   # MAIN LOOP
-  # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# =============================================================================
 
   for (mv in unique(vof_filtered$MainModelVariableName)) {
 
@@ -922,7 +922,7 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
       detect_spend_kw_fast(varname_include)
     }
 
-    # Dates â€” read from pre-parsed columns (now always Date class)
+ # Dates read from pre-parsed columns (now always Date class)
     vof_min_raw <- tryCatch({
       d <- vof_rows$.min_parsed
       d <- d[!is.na(d)]
@@ -988,7 +988,7 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
       if (length(ef)) ef[1] else ""
     } else ""
 
-    # ROI â€” O(1) lookup
+ # ROI O(1) lookup
     roi_val <- NA_real_
     ri      <- roi_by_mv[[mv]]
     if (!is.null(ri) && nrow(ri) > 0) {
@@ -1024,7 +1024,7 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
     )
   }
 
-  # â”€â”€ Step 6: keyword fallback channels
+ # Step 6: keyword fallback channels
   if (!is.null(analytical)) {
     cross_id_cols <- c(cross_cols, "Period", "BP_Year")
     model_cols    <- setdiff(names(analytical)[sapply(analytical, is.numeric)],
@@ -1093,7 +1093,7 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
     }
   }
 
-  # â”€â”€ Step 7: time_break_labels
+ # Step 7: time_break_labels
   for (nm in names(channels)) {
     if (!identical(channels[[nm]]$source, "vof")) next
     channels[[nm]]$time_break_label <- ""
@@ -1213,7 +1213,7 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
   )
 }
 
-# â”€â”€ Timeline HTML builder â€” pure function, no reactive dependencies â”€â”€â”€â”€â”€â”€
+# Timeline HTML builder pure function, no reactive dependencies
 # Used by mod_setup output$file_comparison for Time Scope warnings.
 build_timeline_html <- function(an_range, main_range) {
   tryCatch({
@@ -1293,7 +1293,7 @@ process_channel_legacy <- function(all_rags,
   source_data <- all_rags
   if (is.null(source_data)) stop("All RAGs data not uploaded.")
 
-  # â”€â”€ OPT: pre-convert all date params once â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # OPT: pre-convert all date params once
   min_p   <- if (!is.null(min_period))
     tryCatch(as.Date(min_period), error = \(e) as.Date(NA)) else as.Date(NA)
   max_p   <- if (!is.null(max_period))
@@ -1301,11 +1301,11 @@ process_channel_legacy <- function(all_rags,
   start_d <- as.Date(start_report_date)
   end_d   <- as.Date(end_report_date)
 
-  # â”€â”€ Filter to channel's VOF date range â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # Filter to channel's VOF date range
   if (!is.na(min_p)) source_data <- source_data[source_data$Period >= min_p, ]
   if (!is.na(max_p)) source_data <- source_data[source_data$Period <= max_p, ]
 
-  # â”€â”€ Constrain to analytical date spine â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # Constrain to analytical date spine
   if (nrow(dates_df) > 0) {
     an_min_date <- min(dates_df$Period, na.rm = TRUE)
     an_max_date <- max(dates_df$Period, na.rm = TRUE)
@@ -1322,13 +1322,13 @@ process_channel_legacy <- function(all_rags,
   join_key   <- cross_id
   id_protect <- cross_id
 
-  # â”€â”€ OPT: rag_base via data.table (faster unique + setorder) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # OPT: rag_base via data.table (faster unique + setorder)
   rag_base_dt <- unique(
     data.table::as.data.table(source_data)[, cross_id, with = FALSE])
   data.table::setorderv(rag_base_dt, "Period")
   rag_base <- as.data.frame(rag_base_dt)
 
-  # â”€â”€ OPT: ref_cross_key from rag_base (~2k rows) not source_data (576k) â”€
+ # OPT: ref_cross_key from rag_base (~2k rows) not source_data (576k)
   cross_data_rb <- rag_base[, cross_cols, drop = FALSE]
   cross_key_rb  <- do.call(paste, c(as.list(cross_data_rb), list(sep = " / ")))
   ref_cross_key <- sort(unique(cross_key_rb))[1]
@@ -1345,7 +1345,7 @@ process_channel_legacy <- function(all_rags,
     any(sapply(segment_overrides,
                \(o) length(o$geography_exclude %||% character(0)) > 0))
 
-  # â”€â”€ Pre-filter â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # Pre-filter
   pb("Filtering source data...", 0.10)
 
   d_prefilt <- data.table::as.data.table(source_data)
@@ -1401,7 +1401,7 @@ process_channel_legacy <- function(all_rags,
     )
   )
 
-  # â”€â”€ Segment loop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # Segment loop
   pb("Building splits...", 0.20)
 
   d <- data.table::copy(d_prefilt)
@@ -1434,7 +1434,7 @@ process_channel_legacy <- function(all_rags,
     split_cols_technical <- unique(c("VariableName", cfg$split_columns %||% character(0)))
     d[, SplitName := build_split_name_from_columns(d, split_cols_technical)]
 
-    # â”€â”€ Pivot wide â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # Pivot wide
     lhs    <- paste(cross_id, collapse = " + ")
     d_wide <- data.table::dcast(d,
                                 as.formula(paste(lhs, "~ SplitName")),
@@ -1442,7 +1442,7 @@ process_channel_legacy <- function(all_rags,
                                 fun.aggregate = sum, fill = 0)
     d_wide <- merge(rag_base_dt, d_wide, by = cross_id, all.x = TRUE)
 
-    # â”€â”€ OPT: setnafill instead of for-loop over columns â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # OPT: setnafill instead of for-loop over columns
     num_cols_w <- names(d_wide)[sapply(d_wide, is.numeric)]
     if (length(num_cols_w) > 0)
       data.table::setnafill(d_wide, fill = 0, cols = num_cols_w)
@@ -1450,14 +1450,14 @@ process_channel_legacy <- function(all_rags,
     d_wide <- as.data.frame(d_wide)
     d_wide <- d_wide[order(d_wide$Period), ]
 
-    # â”€â”€ Non-focus suffix â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # Non-focus suffix
     nf_sfx <- {
       tbr <- cfg$time_break_label %||% ""
       if (nzchar(tbr)) paste0("Before ", update_label, "|", tbr)
       else             paste0("Before ", update_label)
     }
 
-    # â”€â”€ Non-focus slice â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # Non-focus slice
     nf_raw <- as.data.frame(d_wide[d_wide$Period < start_d, ])
     nf     <- keep_nonzero_cols(nf_raw)
 
@@ -1490,7 +1490,7 @@ process_channel_legacy <- function(all_rags,
       }
     }
 
-    # â”€â”€ Focus slice â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # Focus slice
     fc_raw <- as.data.frame(
       d_wide[d_wide$Period >= start_d & d_wide$Period <= end_d, ])
     fc <- keep_nonzero_cols(fc_raw)
@@ -1527,7 +1527,7 @@ process_channel_legacy <- function(all_rags,
     rm(d, d_wide, nf_raw, nf, fc_raw, fc)
   }
 
-  # â”€â”€ OPT: Assemble RAG â€” setnafill OUTSIDE the merge loop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ # OPT: Assemble RAG setnafill OUTSIDE the merge loop
   # Was: for-loop over columns after EACH merge (grows with every iteration)
   # Now: single setnafill pass at the end over the final table
   pb("Assembling RAG...", 0.82)
@@ -1602,7 +1602,7 @@ process_channel_legacy <- function(all_rags,
   )
 }
 
-# â”€â”€ get_useful_long_values â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# get_useful_long_values
 # Extracts the specific values of a useful_long dimension (e.g. Product="Prod1")
 # that belong to a channel, derived from its analytical_varkeys via name_lookup.
 # Used by process_channel to filter main data to channel-specific rows only,

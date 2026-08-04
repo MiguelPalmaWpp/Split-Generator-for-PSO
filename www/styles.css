@@ -1951,7 +1951,7 @@ border-bottom: 1px solid #f1f5f9;
 .channel-audit-summary {
 display: grid;
 gap: 8px;
-grid-template-columns: repeat(6, minmax(120px, 1fr));
+grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
 margin: 8px 0 10px;
 }
 
@@ -1983,6 +1983,14 @@ line-height: 1.2;
 word-break: break-word;
 }
 
+.channel-audit-reason {
+color: #64748b;
+font-size: 11px;
+font-weight: 600;
+line-height: 1.25;
+margin-top: 3px;
+}
+
 .audit-row-ok { background: #f0fdf4; border-color: #bbf7d0; }
 .audit-row-warn { background: #fffbeb; border-color: #fde68a; }
 .audit-row-error { background: #fef2f2; border-color: #fecaca; }
@@ -1993,6 +2001,57 @@ word-break: break-word;
 .audit-row-error .channel-audit-value { color: #dc2626; }
 .audit-row-info .channel-audit-value { color: #2563eb; }
 .audit-row-neutral .channel-audit-value { color: #475569; }
+.audit-row-ok .channel-audit-reason { color: #166534; }
+.audit-row-warn .channel-audit-reason { color: #92400e; }
+.audit-row-error .channel-audit-reason { color: #991b1b; }
+
+.channel-audit-status-explain {
+align-items: flex-start;
+border-radius: 7px;
+display: grid;
+gap: 6px;
+line-height: 1.35;
+margin: 2px 0 8px;
+padding: 9px 11px;
+}
+
+.channel-audit-status-title {
+align-items: center;
+display: flex;
+font-size: 12px;
+gap: 7px;
+}
+
+.channel-audit-status-list {
+display: grid;
+gap: 3px;
+list-style-position: outside;
+margin: 0;
+padding-left: 18px;
+}
+
+.channel-audit-status-list li {
+font-size: 11.8px;
+margin: 0;
+}
+
+.audit-explain-ok {
+background: #f0fdf4;
+border: 1px solid #bbf7d0;
+color: #166534;
+}
+
+.audit-explain-warn {
+background: #fffbeb;
+border: 1px solid #fde68a;
+color: #92400e;
+}
+
+.audit-explain-error {
+background: #fef2f2;
+border: 1px solid #fecaca;
+color: #991b1b;
+}
 
 .channel-audit-messages {
 display: grid;

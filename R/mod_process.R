@@ -188,6 +188,10 @@ mod_process_server <- function(id, data, config, channels,
         vi,
         cfg$spend_keyword %||% NULL
       )
+      vi <- expand_analytical_keys_to_variable_names(
+        unique(all_rags$VariableName),
+        vi
+      )
       vi <- unique(trimws(as.character(vi)))
       vi <- vi[!is.na(vi) & nzchar(vi)]
       if (!length(vi))
@@ -1079,6 +1083,174 @@ mod_process_server <- function(id, data, config, channels,
     }
 
     # ── current_spend_data ─────────────────────────────────────────────────
+    build_current_spend_from_rae <- function(nm, cfg, filter_val = "focus") {
+      d <- tryCatch(data(), error = \(e) NULL)
+      if (is.null(d) || is.null(d$all_rags) ||
+          !"VariableName" %in% names(d$all_rags) ||
+          !"Period" %in% names(d$all_rags)) {
+        return(empty_spend_diag())
+      }
+
+      source_data <- as.data.frame(d$all_rags)
+      source_data$Period <- if (inherits(source_data$Period, "Date")) {
+        source_data$Period
+      } else {
+        parse_period_robust(source_data$Period)
+      }
+      source_data <- source_data[!is.na(source_data$Period), , drop = FALSE]
+      if (!nrow(source_data)) return(empty_spend_diag())
+
+      min_p <- tryCatch(as.Date(cfg$min_period), error = \(e) as.Date(NA))
+      max_p <- tryCatch(as.Date(cfg$max_period), error = \(e) as.Date(NA))
+      if (!is.na(min_p)) source_data <- source_data[source_data$Period >= min_p, , drop = FALSE]
+      if (!is.na(max_p)) source_data <- source_data[source_data$Period <= max_p, , drop = FALSE]
+      if (!nrow(source_data)) return(empty_spend_diag())
+
+      vi <- cfg$varname_include[nzchar(cfg$varname_include %||% "")]
+      if (length(vi) > 0) {
+        vi <- expand_varname_include_with_spend(
+          unique(source_data$VariableName),
+          vi,
+          cfg$spend_keyword %||% NULL
+        )
+        vi <- expand_analytical_keys_to_variable_names(
+          unique(source_data$VariableName),
+          vi
+        )
+        vi <- unique(trimws(as.character(vi)))
+        vi <- vi[!is.na(vi) & nzchar(vi)]
+      }
+      if (length(vi) > 0) {
+        vn <- trimws(as.character(source_data$VariableName))
+        match_mode <- cfg$varname_match_mode %||%
+          if (identical(cfg$source %||% "", "vof")) "exact" else "prefix"
+        keep <- if (identical(match_mode, "exact")) {
+          tolower(vn) %in% tolower(vi)
+        } else {
+          pattern <- paste(
+            paste0("^", stringr::str_replace_all(vi, "([\\W])", "\\\\\\1")),
+            collapse = "|"
+          )
+          grepl(pattern, vn, ignore.case = TRUE, perl = TRUE)
+        }
+        source_data <- source_data[keep %in% TRUE, , drop = FALSE]
+      }
+      if (!nrow(source_data)) return(empty_spend_diag())
+
+      filter_regex <- function(df, col, pats) {
+        if (!col %in% names(df)) return(df)
+        for (p in pats %||% character(0)) {
+          if (nchar(p %||% "") > 0)
+            df <- df[!grepl(p, df[[col]], ignore.case = TRUE), , drop = FALSE]
+        }
+        df
+      }
+
+      source_data <- filter_regex(source_data, "VariableName", cfg$varname_exclude)
+      source_data <- filter_regex(source_data, "Campaign", cfg$campaign_exclude)
+      source_data <- filter_regex(source_data, "Outlet", cfg$outlet_exclude)
+      source_data <- filter_regex(source_data, "Creative", cfg$creative_exclude)
+      has_geo_overrides <- length(cfg$segment_overrides %||% list()) > 0 &&
+        any(vapply(cfg$segment_overrides %||% list(), function(o) {
+          length(o$geography_exclude %||% character(0)) > 0
+        }, logical(1)))
+      if (!has_geo_overrides)
+        source_data <- filter_regex(source_data, "Geography", cfg$geography_exclude)
+
+      source_data <- tryCatch(
+        filter_to_analytical_varkey_combinations(
+          source_data,
+          cfg,
+          d$schema_metadata %||% NULL
+        ),
+        error = \(e) source_data
+      )
+      if (has_geo_overrides) {
+        seg_ovr <- Filter(\(o) isTRUE(o$seg == 1L), cfg$segment_overrides %||% list())
+        geo_exc <- if (length(seg_ovr) > 0)
+          seg_ovr[[1]]$geography_exclude %||% character(0)
+        else
+          cfg$geography_exclude %||% character(0)
+        source_data <- filter_regex(source_data, "Geography", geo_exc)
+      }
+      if (!nrow(source_data)) return(empty_spend_diag())
+
+      gcfg <- config()
+      start_d <- tryCatch(as.Date(gcfg$start_report_date), error = \(e) as.Date(NA))
+      end_d <- tryCatch(as.Date(gcfg$end_report_date), error = \(e) as.Date(NA))
+      update_label <- gcfg$update_label %||% "Focus"
+      if (!is.na(end_d)) source_data <- source_data[source_data$Period <= end_d, , drop = FALSE]
+      if (!nrow(source_data)) return(empty_spend_diag())
+
+      source_data$VariableValue <- suppressWarnings(as.numeric(as.character(source_data$VariableValue)))
+      source_data$VariableValue[is.na(source_data$VariableValue)] <- 0
+      source_data <- apply_dimension_breaks(
+        source_data,
+        cfg$dimension_breaks %||% list(),
+        channel_name = cfg$channel_name %||% nm
+      )
+      source_data <- apply_dimension_aliases(source_data, cfg$dimension_aliases %||% list())
+      split_cols_technical <- unique(c("VariableName", cfg$split_columns %||% character(0)))
+      source_data$SplitName <- build_split_name_from_columns(source_data, split_cols_technical)
+
+      period_tag <- rep(NA_character_, nrow(source_data))
+      if (!is.na(start_d))
+        period_tag[source_data$Period < start_d] <- "nonfocus"
+      if (!is.na(start_d) && !is.na(end_d))
+        period_tag[source_data$Period >= start_d & source_data$Period <= end_d] <- "focus"
+      if (is.na(start_d) && !is.na(end_d))
+        period_tag[source_data$Period <= end_d] <- "focus"
+
+      keep <- !is.na(period_tag) & period_tag == filter_val
+      source_data <- source_data[keep, , drop = FALSE]
+      if (!nrow(source_data)) return(empty_spend_diag())
+
+      nf_sfx <- {
+        tbr <- cfg$time_break_label %||% ""
+        if (nzchar(tbr)) paste0("Before ", update_label, "|", tbr)
+        else paste0("Before ", update_label)
+      }
+      source_data$VariableSplit <- if (identical(filter_val, "focus")) {
+        paste0(source_data$SplitName, "_", update_label)
+      } else {
+        paste0(source_data$SplitName, "_", nf_sfx)
+      }
+
+      spend_kw <- cfg$spend_keyword %||% "Spend"
+      source_data <- source_data[
+        grepl(spend_kw, source_data$VariableSplit, ignore.case = TRUE),
+        , drop = FALSE
+      ]
+      if (!nrow(source_data)) return(empty_spend_diag())
+
+      agg <- data.table::as.data.table(source_data)[
+        , .(VariableValue = sum(VariableValue, na.rm = TRUE)),
+        by = .(Period, VariableSplit)
+      ]
+      if (!nrow(agg)) return(empty_spend_diag())
+
+      wide <- data.table::dcast(
+        agg,
+        Period ~ VariableSplit,
+        value.var = "VariableValue",
+        fun.aggregate = sum,
+        fill = 0
+      )
+      out <- splits_summary(as.data.frame(wide), "spend")
+      if (is.null(out) || !nrow(out)) return(empty_spend_diag())
+
+      out <- out %>%
+        filter(!is.na(total_spend) & total_spend > 0) %>%
+        select(-any_of(c("seg", "period", "model_var"))) %>%
+        mutate(across(where(is.numeric), \(x) round(x, 4)))
+      if (nrow(out)) {
+        grand <- sum(out$total_spend, na.rm = TRUE)
+        out <- out %>%
+          mutate(pct_total_spend = round(total_spend / pmax(grand, 1) * 100, 4))
+      }
+      out
+    }
+
     build_current_spend_data <- function(filter_val = "focus") {
       nm  <- req(input$channel_select)
       res <- req(results_store[[nm]])
@@ -1089,7 +1261,7 @@ mod_process_server <- function(id, data, config, channels,
       if (is.null(cost_df) || nrow(cost_df) == 0 ||
           !"VariableSplit" %in% names(cost_df) ||
           !"total_spend" %in% names(cost_df)) {
-        return(empty_spend_diag())
+        return(build_current_spend_from_rae(nm, cfg, filter_val))
       }
       if ("period" %in% names(cost_df)) {
         cost_df <- cost_df[cost_df$period == filter_val, , drop = FALSE]
@@ -1103,7 +1275,7 @@ mod_process_server <- function(id, data, config, channels,
         out <- out %>%
           mutate(pct_total_spend = round(total_spend / pmax(grand, 1) * 100, 4))
       }
-      if (!nrow(out)) build_current_spend_from_rag(res, cfg, filter_val) else out
+      if (!nrow(out)) build_current_spend_from_rae(nm, cfg, filter_val) else out
     }
 
     current_spend_data <- reactive({

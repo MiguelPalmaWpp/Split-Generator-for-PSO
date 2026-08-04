@@ -16,6 +16,20 @@ ordinal_tag <- function(i) {
 # VOF/RAE files are commonly authored from LATAM Excel exports.
 DATE_PARSE_ORDERS <- c("Ymd", "dmY", "mdY", "ymd", "dmy", "mdy")
 
+parse_lubridate_orders <- function(x, orders) {
+  x <- trimws(as.character(x %||% character(0)))
+  out <- rep(as.Date(NA_character_), length(x))
+  valid <- !is.na(x) & nzchar(x)
+  if (!any(valid) || !requireNamespace("lubridate", quietly = TRUE)) return(out)
+  parsed <- suppressWarnings(lubridate::parse_date_time(
+    x[valid],
+    orders = orders,
+    quiet = TRUE
+  ))
+  out[valid] <- as.Date(parsed)
+  out
+}
+
 parse_date_with_orders <- function(x, orders = DATE_PARSE_ORDERS) {
   if (inherits(x, "Date")) return(x)
   if (inherits(x, "POSIXt")) return(as.Date(x))
@@ -78,6 +92,53 @@ parse_period_robust <- function(x) {
 # Handles: YYYY-MM-DD M/D/YYYY MM/DD/YYYY M/D/YY Excel serials
 parse_vof_period <- function(x) {
   parse_date_with_orders(x)
+}
+
+parse_period_token_date <- function(token) {
+  token <- trimws(as.character(token %||% ""))
+  digits <- stringr::str_extract(token, "\\d{8}")
+  if (is.na(digits) || !nzchar(digits)) return(as.Date(NA_character_))
+  suppressWarnings(as.Date(digits, format = "%Y%m%d"))
+}
+
+parse_vof_period_context <- function(x, period_token = NULL, role = c("any", "min", "max")) {
+  role <- match.arg(role)
+  parsed <- parse_vof_period(x)
+  if (is.null(x) || length(x) == 0L) return(parsed)
+
+  raw <- trimws(as.character(x))
+  token <- trimws(as.character(period_token %||% rep("", length(raw))))
+  if (length(token) == 1L && length(raw) > 1L) token <- rep(token, length(raw))
+  if (length(token) != length(raw)) token <- rep("", length(raw))
+
+  token_dates <- as.Date(vapply(token, parse_period_token_date, as.Date(NA_character_)))
+  slash_idx <- !is.na(raw) & grepl("^\\d{1,2}/\\d{1,2}/\\d{2,4}$", raw)
+  ambiguous_idx <- slash_idx & !is.na(token_dates)
+  if (!any(ambiguous_idx)) return(parsed)
+
+  ambiguous_raw <- raw[ambiguous_idx]
+  mdY <- parse_lubridate_orders(ambiguous_raw, c("mdY", "mdy"))
+  dmY <- parse_lubridate_orders(ambiguous_raw, c("dmY", "dmy"))
+
+  if (all(is.na(mdY))) {
+    mdY <- suppressWarnings(as.Date(ambiguous_raw, format = "%m/%d/%Y"))
+    mdY2 <- suppressWarnings(as.Date(ambiguous_raw, format = "%m/%d/%y"))
+    mdY[is.na(mdY)] <- mdY2[is.na(mdY)]
+  }
+  if (all(is.na(dmY))) {
+    dmY <- suppressWarnings(as.Date(ambiguous_raw, format = "%d/%m/%Y"))
+    dmY2 <- suppressWarnings(as.Date(ambiguous_raw, format = "%d/%m/%y"))
+    dmY[is.na(dmY)] <- dmY2[is.na(dmY)]
+  }
+
+  idx <- which(ambiguous_idx)
+  tdates <- token_dates[idx]
+  use_mdy <- !is.na(mdY) & !is.na(tdates) & mdY == tdates
+  use_dmy <- !is.na(dmY) & !is.na(tdates) & dmY == tdates
+
+  parsed[idx[use_mdy]] <- mdY[use_mdy]
+  parsed[idx[!use_mdy & use_dmy]] <- dmY[!use_mdy & use_dmy]
+  parsed
 }
 
 # parse_period (alias used by infer_schema)
@@ -560,6 +621,23 @@ expand_varname_include_with_spend <- function(all_variable_names,
   unique(c(vi, spend_candidates[compatible]))
 }
 
+expand_analytical_keys_to_variable_names <- function(all_variable_names,
+                                                     varname_include) {
+  vi <- unique(trimws(as.character(varname_include %||% character(0))))
+  vi <- vi[!is.na(vi) & nzchar(vi)]
+  all_vn <- unique(trimws(as.character(all_variable_names %||% character(0))))
+  all_vn <- all_vn[!is.na(all_vn) & nzchar(all_vn)]
+  if (!length(vi) || !length(all_vn)) return(vi)
+
+  vi_l <- tolower(vi)
+  matched <- all_vn[vapply(all_vn, function(vn) {
+    vn_l <- tolower(trimws(vn))
+    any(vi_l == vn_l | startsWith(vi_l, paste0(vn_l, "_")))
+  }, logical(1))]
+
+  unique(c(vi, matched))
+}
+
 # detect_spend_keyword
 detect_spend_keyword <- function(main_data, varname_include,
                                  keyword_dict = MEDIA_KEYWORD_DICT) {
@@ -747,12 +825,26 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
 
  # OPT-2: Parse ALL VOF dates FIRST must happen before split so that
   # .min_parsed / .max_parsed are present in every element of vof_by_mv
+  vof_period_tokens_for_dates <- stringr::str_match(
+    trimws(as.character(vof_filtered$MainModelVariableName %||% "")),
+    stringr::regex("\\s+--p\\s+(-?\\d{8}-?)", ignore_case = TRUE)
+  )[, 2]
+  vof_period_tokens_for_dates[is.na(vof_period_tokens_for_dates)] <- ""
+
   vof_min_dates <- tryCatch(
-    as.Date(parse_vof_period(vof_filtered$MinPeriod), origin = "1970-01-01"),
+    as.Date(parse_vof_period_context(
+      vof_filtered$MinPeriod,
+      vof_period_tokens_for_dates,
+      role = "min"
+    ), origin = "1970-01-01"),
     error = \(e) rep(as.Date(NA), nrow(vof_filtered))
   )
   vof_max_dates <- tryCatch(
-    as.Date(parse_vof_period(vof_filtered$MaxPeriod), origin = "1970-01-01"),
+    as.Date(parse_vof_period_context(
+      vof_filtered$MaxPeriod,
+      vof_period_tokens_for_dates,
+      role = "max"
+    ), origin = "1970-01-01"),
     error = \(e) rep(as.Date(NA), nrow(vof_filtered))
   )
   vof_filtered$.min_parsed <- vof_min_dates
@@ -866,13 +958,6 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
     )
     x <- stringr::str_squish(x)
     trimws(x)
-  }
-
-  parse_period_token_date <- function(token) {
-    token <- trimws(as.character(token %||% ""))
-    digits <- stringr::str_extract(token, "\\d{8}")
-    if (is.na(digits) || !nzchar(digits)) return(as.Date(NA_character_))
-    suppressWarnings(as.Date(digits, format = "%Y%m%d"))
   }
 
   vof_period_boundary <- function(token, min_raw, max_raw) {
@@ -1409,6 +1494,10 @@ process_channel_legacy <- function(all_rags,
       vi,
       cfg$spend_keyword %||% NULL
     )
+    vi <- expand_analytical_keys_to_variable_names(
+      unique(d_prefilt$VariableName),
+      vi
+    )
   }
   if (length(vi) > 0) {
     match_mode <- cfg$varname_match_mode %||%
@@ -1685,13 +1774,27 @@ filter_to_analytical_varkey_combinations <- function(d, cfg, schema_metadata) {
     return(d)
   }
 
-  long_dims <- schema_metadata$useful_long %||% character(0)
-  key_cols <- intersect(c("VariableName", long_dims), names(d))
-  key_cols <- intersect(key_cols, names(schema_metadata$name_lookup))
-  if (!length(key_cols) || !"VariableName" %in% key_cols) return(d)
+  lookup_all <- schema_metadata$name_lookup
+  candidate_dims <- setdiff(intersect(names(lookup_all), names(d)),
+                            c("OriginalName", "VariableName"))
+  useful_dims <- unique(c(schema_metadata$useful_long %||% character(0),
+                         candidate_dims))
+  useful_dims <- useful_dims[vapply(useful_dims, function(dim) {
+    if (!dim %in% names(lookup_all) || !dim %in% names(d)) return(FALSE)
+    vals <- trimws(as.character(lookup_all[[dim]]))
+    vals <- vals[!is.na(vals) & nzchar(vals)]
+    any(tolower(vals) != "total")
+  }, logical(1))]
 
-  lookup <- schema_metadata$name_lookup[
-    schema_metadata$name_lookup$OriginalName %in% (cfg$analytical_varkeys %||% character(0)),
+  # VariableName is filtered before this helper runs. Longitudinal filters must
+  # not require the metric name to be identical, otherwise an Activity channel
+  # such as "Display Impressions" drops its paired "Display Spend" rows.
+  key_cols <- intersect(useful_dims, names(d))
+  key_cols <- intersect(key_cols, names(lookup_all))
+  if (!length(key_cols)) return(d)
+
+  lookup <- lookup_all[
+    lookup_all$OriginalName %in% (cfg$analytical_varkeys %||% character(0)),
     key_cols,
     drop = FALSE
   ]

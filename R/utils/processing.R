@@ -92,6 +92,23 @@ build_split_name_from_columns <- function(d, split_cols, fallback_col = "Variabl
   combined
 }
 
+expand_analytical_keys_to_variable_names <- function(all_variable_names,
+                                                     varname_include) {
+  vi <- unique(trimws(as.character(varname_include %||% character(0))))
+  vi <- vi[!is.na(vi) & nzchar(vi)]
+  all_vn <- unique(trimws(as.character(all_variable_names %||% character(0))))
+  all_vn <- all_vn[!is.na(all_vn) & nzchar(all_vn)]
+  if (!length(vi) || !length(all_vn)) return(vi)
+
+  vi_l <- tolower(vi)
+  matched <- all_vn[vapply(all_vn, function(vn) {
+    vn_l <- tolower(trimws(vn))
+    any(vi_l == vn_l | startsWith(vi_l, paste0(vn_l, "_")))
+  }, logical(1))]
+
+  unique(c(vi, matched))
+}
+
 get_diag_df <- function(df, cross_cols, ref_cross_key) {
   if (nrow(df) == 0) return(df)
   cross_data <- df[, cross_cols, drop = FALSE]
@@ -148,6 +165,9 @@ build_activity_spend <- function(act_all, cost_all, cfg) {
   if ((nrow(act_all) == 0 || !"VariableSplit" %in% names(act_all)) &&
       (nrow(cost_all) == 0 || !"VariableSplit" %in% names(cost_all)))
     return(tibble())
+  channel_name <- trimws(as.character(cfg$channel_name %||%
+                                        cfg$model_variable %||% ""))[1]
+  if (is.na(channel_name)) channel_name <- ""
   cost_key <- if (nrow(cost_all) > 0 && "VariableSplit" %in% names(cost_all))
     cost_all %>%
     select(VariableSplit_c = VariableSplit, total_spend) %>%
@@ -163,7 +183,7 @@ build_activity_spend <- function(act_all, cost_all, cfg) {
                                   regex(cfg$activity_keyword,
                                         ignore_case = TRUE))) %>%
       left_join(cost_key, by = "key") %>%
-      mutate(Channel               = cfg$channel_name,
+      mutate(Channel               = channel_name,
              MainModelVariableName = model_var) %>%
       select(VariableSplit, total_activity, total_spend,
              Channel, MainModelVariableName))
@@ -171,7 +191,7 @@ build_activity_spend <- function(act_all, cost_all, cfg) {
   cost_all %>%
     select(VariableSplit, total_spend, model_var) %>%
     mutate(total_activity = NA_real_,
-           Channel = cfg$channel_name,
+           Channel = channel_name,
            MainModelVariableName = model_var) %>%
     select(VariableSplit, total_activity, total_spend,
            Channel, MainModelVariableName)
@@ -727,6 +747,10 @@ process_channel <- function(all_rags,
       vi,
       cfg$spend_keyword %||% NULL
     )
+    vi <- expand_analytical_keys_to_variable_names(
+      unique(d_prefilt$VariableName),
+      vi
+    )
   }
   if (length(vi) > 0) {
     match_mode <- cfg$varname_match_mode %||%
@@ -765,27 +789,9 @@ process_channel <- function(all_rags,
       if (nchar(p %||% "") > 0)
         d_prefilt <- d_prefilt[!grepl(p, Creative, ignore.case = TRUE)]
 
- # Filter by useful_long dimension values
-  # When Product (or another dim) is useful_long, each channel corresponds
-  # to specific values of that dimension. Without this filter, all product
-  # channels share the same RAG data, causing Total Check mismatches.
-  # e.g. Channel "Social_Prod1" should only see rows where Product = "Prod1"
-  if (!is.null(schema_metadata)              &&
-      !is.null(schema_metadata$name_lookup)  &&
-      length(schema_metadata$useful_long) > 0 &&
-      length(cfg$analytical_varkeys) > 0) {
-
-    nl <- schema_metadata$name_lookup
-
-    for (dim in schema_metadata$useful_long) {
-      if (!dim %in% names(d_prefilt)) next
-
-      dim_vals <- get_useful_long_values(cfg$analytical_varkeys, nl, dim)
-
-      if (length(dim_vals) > 0)
-        d_prefilt <- d_prefilt[d_prefilt[[dim]] %in% dim_vals]
-    }
-
+  if (!is.null(schema_metadata) &&
+      !is.null(schema_metadata$name_lookup) &&
+      length(cfg$analytical_varkeys %||% character(0)) > 0) {
     d_prefilt <- data.table::as.data.table(
       filter_to_analytical_varkey_combinations(
         as.data.frame(d_prefilt), cfg, schema_metadata

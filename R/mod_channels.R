@@ -379,6 +379,10 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
     filter_by_channel_varnames <- function(df, cfg) {
       vi <- cfg$varname_include[nzchar(cfg$varname_include %||% "")]
       if (!length(vi) || !"VariableName" %in% names(df)) return(df)
+      vi <- expand_analytical_keys_to_variable_names(
+        unique(trimws(as.character(df$VariableName))),
+        vi
+      )
 
       match_mode <- cfg$varname_match_mode %||%
         if (identical(cfg$source %||% "", "vof")) "exact" else "prefix"
@@ -400,6 +404,10 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
         unique(trimws(as.character(df$VariableName))),
         vi,
         cfg$spend_keyword %||% NULL
+      )
+      vi <- expand_analytical_keys_to_variable_names(
+        unique(trimws(as.character(df$VariableName))),
+        vi
       )
       cfg2 <- cfg
       cfg2$varname_include <- vi
@@ -442,6 +450,11 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
         } else {
           md
         }
+        sm <- tryCatch(data()$schema_metadata, error = \(e) NULL)
+        scoped <- tryCatch(
+          filter_to_analytical_varkey_combinations(scoped, cfg, sm),
+          error = \(e) scoped
+        )
         filtered <- filter_preview_dates(scoped, cfg)
         list(
           data = filtered$data,
@@ -604,8 +617,29 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
       roi_missing <- is.na(roi_val)
       status <- if (length(blockers)) "Blocked" else if (length(warnings) || length(notes)) "Needs review" else "Ready"
       status_class <- switch(status, Ready = "audit-ready", `Needs review` = "audit-review", Blocked = "audit-blocked")
+      status_reason <- if (length(blockers)) {
+        blockers[[1]]
+      } else if (length(warnings)) {
+        warn <- warnings[[1]]
+        if (grepl("^ROI is missing", warn)) {
+          "ROI is missing for this channel."
+        } else if (grepl("^No Cost/Spend rows", warn)) {
+          "Spend/Cost rows were not found with the current keyword."
+        } else if (grepl("Cost for this family", warn)) {
+          "Spend keyword may need review because Cost exists for this family."
+        } else {
+          warn
+        }
+      } else if (n_merges > 0) {
+        paste0(n_merges, " saved merge(s) will be applied during Process.")
+      } else if (length(notes)) {
+        notes[[1]]
+      } else {
+        "Channel audit passed."
+      }
       out <- list(
         status = status,
+        status_reason = status_reason,
         status_class = status_class,
         activity_rows = activity_rows,
         spend_rows = spend_rows,
@@ -626,11 +660,14 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
       out
     }
 
-    audit_pill <- function(label, value, tone = c("neutral", "ok", "warn", "error", "info")) {
+    audit_pill <- function(label, value, tone = c("neutral", "ok", "warn", "error", "info"),
+                           detail = NULL) {
       tone <- match.arg(tone)
       div(class = paste("channel-audit-metric channel-audit-row", paste0("audit-row-", tone)),
           tags$span(label, class = "channel-audit-label"),
-          tags$strong(value, class = "channel-audit-value"))
+          tags$strong(value, class = "channel-audit-value"),
+          if (!is.null(detail) && nzchar(detail))
+            tags$span(detail, class = "channel-audit-reason"))
     }
 
     render_channel_audit <- function(nm, cfg, audit = NULL) {
@@ -639,9 +676,23 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
       time_text <- if (nzchar(cfg$time_break_label %||% "")) cfg$time_break_label else "None"
       spend_label <- cfg$spend_keyword %||% "Spend"
       status_tone <- switch(audit$status, Ready = "ok", `Needs review` = "warn", Blocked = "error")
-      tagList(
+      source_text <- source_label(cfg)
+      metric_text <- if (identical(normalize_model_metric(cfg$model_metric %||% "activity"), "spend"))
+        "Spend/Cost" else "Activity"
+      status_items <- unique(c(
+        audit$blockers,
+        audit$warnings,
+        audit$notes
+      ))
+      if (!length(status_items)) {
+        status_items <- "Channel is ready: data, model variable, date range and ROI checks passed."
+      }
+      messages_notes <- setdiff(audit$notes, status_items)
+        tagList(
         div(class = "channel-audit-summary channel-audit-metrics",
             audit_pill("Status", audit$status, status_tone),
+            audit_pill("Source", source_text, if (isTRUE(cfg$config_imported)) "info" else "neutral"),
+            audit_pill("Model metric", metric_text, if (identical(metric_text, "Spend/Cost")) "info" else "neutral"),
             audit_pill("Activity rows", fmt_audit_count(audit$activity_rows),
                        if (audit$activity_rows > 0) "ok" else "error"),
             audit_pill(paste0(spend_label, " rows"), fmt_audit_count(audit$spend_rows),
@@ -649,12 +700,21 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
             audit_pill("ROI", roi_text, if (isTRUE(audit$roi_missing)) "error" else "ok"),
             audit_pill("TimeBreak", time_text, if (nzchar(cfg$time_break_label %||% "")) "info" else "neutral"),
             audit_pill("Merges", audit$n_merges, if (audit$n_merges > 0) "info" else "neutral")),
+        div(class = paste("channel-audit-status-explain", paste0("audit-explain-", status_tone)),
+            div(class = "channel-audit-status-title",
+                icon(if (identical(audit$status, "Blocked")) "circle-xmark"
+                     else if (identical(audit$status, "Needs review")) "triangle-exclamation"
+                     else "circle-check"),
+                tags$strong(if (identical(audit$status, "Ready")) "Audit passed"
+                            else paste("Why this status"))),
+            tags$ul(class = "channel-audit-status-list",
+                    lapply(status_items, \(msg) tags$li(msg)))),
         if (isTRUE(audit$roi_missing))
           div(class = "channel-audit-roi-critical",
               icon("triangle-exclamation"),
               div(tags$strong("ROIs by Channel missing"),
                   tags$span("seed_for_indices.csv will export without ROI values until the ROI file is loaded in Setup."))),
-        if (length(audit$blockers) || length(audit$warnings) || length(audit$notes))
+        if (length(audit$blockers) || length(audit$warnings) || length(messages_notes))
           div(class = "channel-audit-messages",
               tagList(lapply(audit$blockers, \(msg)
                 div(class = "channel-audit-message audit-msg-error",
@@ -662,7 +722,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
               tagList(lapply(audit$warnings[!grepl("^ROI is missing", audit$warnings)], \(msg)
                 div(class = "channel-audit-message audit-msg-warn",
                     icon("triangle-exclamation"), tags$span(msg)))),
-              tagList(lapply(audit$notes, \(msg)
+              tagList(lapply(messages_notes, \(msg)
                 div(class = "channel-audit-message audit-msg-info",
                     icon("circle-info"), tags$span(msg)))))
       )
@@ -2590,14 +2650,19 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
         
         recover_dates <- function(nm, row_idx) {
           saved_min <- as.Date(NA); saved_max <- as.Date(NA)
+          period_token <- stringr::str_match(
+            trimws(as.character(nm %||% "")),
+            stringr::regex("\\s+--p\\s+(-?\\d{8}-?)", ignore_case = TRUE)
+          )[, 2]
+          if (is.na(period_token)) period_token <- ""
           if (has_date_cols) {
             min_str <- trimws(config_rows$MinPeriod[row_idx] %||% "")
             max_str <- trimws(config_rows$MaxPeriod[row_idx] %||% "")
             saved_min <- tryCatch(
-              if (nzchar(min_str)) parse_vof_period(min_str) else as.Date(NA),
+              if (nzchar(min_str)) parse_vof_period_context(min_str, period_token, "min") else as.Date(NA),
               error = \(e) as.Date(NA))
             saved_max <- tryCatch(
-              if (nzchar(max_str)) parse_vof_period(max_str) else as.Date(NA),
+              if (nzchar(max_str)) parse_vof_period_context(max_str, period_token, "max") else as.Date(NA),
               error = \(e) as.Date(NA))
           }
           if (is.na(saved_min) || is.na(saved_max)) {
@@ -2610,8 +2675,8 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
                                                nzchar(trimws(as.character(vof_ch$MinPeriod)))]
                 raw_maxs <- vof_ch$MaxPeriod[!is.na(vof_ch$MaxPeriod) &
                                                nzchar(trimws(as.character(vof_ch$MaxPeriod)))]
-                vof_mins <- if (length(raw_mins)) parse_vof_period(raw_mins) else as.Date(NA)
-                vof_maxs <- if (length(raw_maxs)) parse_vof_period(raw_maxs) else as.Date(NA)
+                vof_mins <- if (length(raw_mins)) parse_vof_period_context(raw_mins, period_token, "min") else as.Date(NA)
+                vof_maxs <- if (length(raw_maxs)) parse_vof_period_context(raw_maxs, period_token, "max") else as.Date(NA)
                 vof_mins <- vof_mins[!is.na(vof_mins)]; vof_maxs <- vof_maxs[!is.na(vof_maxs)]
                 if (length(vof_mins)) saved_min <- min(vof_mins)
                 if (length(vof_maxs)) saved_max <- max(vof_maxs)

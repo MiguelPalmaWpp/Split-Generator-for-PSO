@@ -2628,7 +2628,8 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
           dates <- recover_dates(nm, row_idx)
           row <- config_rows[row_idx, , drop = FALSE]
           if (nm %in% names(rv$available_channels)) {
-            cfg <- rv$available_channels[[nm]]
+            base_cfg <- rv$available_channels[[nm]]
+            cfg <- base_cfg
             cfg$split_columns    <- splits
             cfg$dimension_breaks <- list()
             cfg$dimension_aliases <- list()
@@ -2637,7 +2638,8 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
             cfg$max_period       <- dates$max_p
             cfg$config_imported  <- TRUE
             cfg$model_metric     <- cfg$model_metric %||% "activity"
-            return(apply_config_keywords(cfg, row))
+            cfg <- apply_config_keywords(cfg, row)
+            return(reconcile_channel_metric_keywords(cfg, base_cfg))
           }
 
           varname_include <- get_varname_include_fallback(nm)
@@ -2666,7 +2668,8 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
             roi = roi_info$value, source = "manual",
             media_channel = if (!is.na(roi_info$channel)) roi_info$channel else "",
             sub_channel = "", effect = "", config_imported = TRUE)
-          apply_config_keywords(cfg, row)
+          cfg <- apply_config_keywords(cfg, row)
+          reconcile_channel_metric_keywords(cfg)
         }
 
         infer_merge_view <- function(merge_name, merged_raw) {

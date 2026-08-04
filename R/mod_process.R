@@ -108,6 +108,7 @@ mod_process_server <- function(id, data, config, channels,
     active_model_metric <- reactive({
       nm <- input$channel_select
       cfg <- if (valid_nm(nm)) channels()[[nm]] else NULL
+      cfg <- reconcile_channel_metric_keywords(cfg)
       normalize_model_metric(input$model_metric %||% cfg$model_metric %||% "activity")
     })
 
@@ -154,6 +155,7 @@ mod_process_server <- function(id, data, config, channels,
       nm <- input$channel_select
       if (!valid_nm(nm)) return(NULL)
       cfg <- channels()[[nm]] %||% list()
+      cfg <- reconcile_channel_metric_keywords(cfg)
       selected <- normalize_model_metric(input$model_metric %||% cfg$model_metric %||% "activity")
       div(class = "process-model-metric",
           tags$span(tags$strong("Model metric", class = "process-control-label")),
@@ -166,6 +168,7 @@ mod_process_server <- function(id, data, config, channels,
       nm <- input$channel_select
       if (!valid_nm(nm)) return()
       cfg <- channels()[[nm]] %||% list()
+      cfg <- reconcile_channel_metric_keywords(cfg)
       updateRadioButtons(session, "model_metric",
                          selected = normalize_model_metric(cfg$model_metric %||% "activity"))
       tryCatch(DT::dataTableProxy(session$ns("diag_act")) %>% DT::selectRows(NULL),
@@ -454,6 +457,7 @@ mod_process_server <- function(id, data, config, channels,
       cfg  <- channels()[[nm]]; req(cfg)
       ui_metric <- if (identical(isolate(input$channel_select), nm)) isolate(input$model_metric) else NULL
       cfg$model_metric <- normalize_model_metric(ui_metric %||% cfg$model_metric %||% "activity")
+      cfg <- reconcile_channel_metric_keywords(cfg)
       gcfg <- config()
 
       if (is.null(d$all_rags)) {

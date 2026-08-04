@@ -339,6 +339,64 @@ normalize_model_metric <- function(x, default = "activity") {
   if (x %in% c("spend", "cost", "investment", "budget")) "spend" else "activity"
 }
 
+reconcile_channel_metric_keywords <- function(cfg, reference_cfg = NULL,
+                                              keyword_dict = MEDIA_KEYWORD_DICT) {
+  if (is.null(cfg)) return(cfg)
+  reference_cfg <- reference_cfg %||% list()
+
+  spend_terms <- unique(keyword_dict$spend %||% c("Spend", "Cost", "Investment", "Budget"))
+  spend_terms <- spend_terms[!is.na(spend_terms) & nzchar(trimws(as.character(spend_terms)))]
+
+  has_spend_term <- function(x) {
+    x <- trimws(as.character(x %||% ""))
+    if (!length(x) || !nzchar(x[1]) || !length(spend_terms)) return(FALSE)
+    any(stringr::str_detect(x[1], stringr::regex(paste(spend_terms, collapse = "|"),
+                                                ignore_case = TRUE)))
+  }
+
+  act_kw <- trimws(as.character(cfg$activity_keyword %||% ""))
+  spend_kw <- trimws(as.character(cfg$spend_keyword %||% ""))
+  same_kw <- nzchar(act_kw) && nzchar(spend_kw) &&
+    identical(tolower(act_kw), tolower(spend_kw))
+
+  vars <- trimws(as.character(cfg$varname_include %||% character(0)))
+  vars <- vars[!is.na(vars) & nzchar(vars)]
+  spend_like_vars <- length(vars) > 0 &&
+    mean(vapply(vars, has_spend_term, logical(1))) >= 0.8
+
+  ref_metric <- normalize_model_metric(reference_cfg$model_metric %||% "", default = "")
+  model_name_spend <- has_spend_term(cfg$model_variable %||% "") ||
+    has_spend_term(cfg$channel_name %||% "")
+
+  if (same_kw && (identical(ref_metric, "spend") || spend_like_vars || model_name_spend)) {
+    cfg$model_metric <- "spend"
+  } else {
+    cfg$model_metric <- normalize_model_metric(
+      cfg$model_metric %||% reference_cfg$model_metric %||% "activity"
+    )
+  }
+
+  if (identical(normalize_model_metric(cfg$model_metric %||% "activity"), "spend")) {
+    if (!nzchar(spend_kw)) {
+      spend_kw <- trimws(as.character(reference_cfg$spend_keyword %||% "Spend"))
+      cfg$spend_keyword <- spend_kw
+    }
+
+    current_act <- trimws(as.character(cfg$activity_keyword %||% ""))
+    if (!nzchar(current_act) ||
+        (nzchar(spend_kw) && identical(tolower(current_act), tolower(spend_kw)))) {
+      ref_act <- trimws(as.character(reference_cfg$activity_keyword %||% ""))
+      if (!nzchar(ref_act) ||
+          (nzchar(spend_kw) && identical(tolower(ref_act), tolower(spend_kw)))) {
+        ref_act <- "Activity"
+      }
+      cfg$activity_keyword <- ref_act
+    }
+  }
+
+  cfg
+}
+
 export_channels_csv <- function(channels, global_config = NULL) {
   if (!length(channels)) return(data.frame())
   rows <- list()
@@ -786,7 +844,7 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
     x <- trimws(as.character(x %||% ""))
     m <- stringr::str_match(
       x,
-      stringr::regex("\\s+--p\\s+([^\\s]+)", ignore_case = TRUE)
+      stringr::regex("\\s+--p\\s+(-?\\d{8}-?)", ignore_case = TRUE)
     )
     token <- m[, 2]
     ifelse(is.na(token), "", trimws(token))
@@ -798,6 +856,15 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
       x,
       stringr::regex("\\s+--p\\s+[^\\s]+", ignore_case = TRUE)
     )
+    x <- stringr::str_remove(
+      x,
+      stringr::regex("\\s+--g\\s+.*$", ignore_case = TRUE)
+    )
+    x <- stringr::str_remove(
+      x,
+      stringr::regex("-+\\s*(Spend|Cost|Investment|Budget)\\s*$", ignore_case = TRUE)
+    )
+    x <- stringr::str_squish(x)
     trimws(x)
   }
 
@@ -1152,39 +1219,24 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
     unique_ranges <- unique_ranges[order(range_order, min_order, max_order,
                                          unique_ranges$nm), , drop = FALSE]
 
-    cluster_id <- integer(nrow(unique_ranges))
-    current_cluster <- 0L
-    prev_end <- as.Date(NA_character_)
-    for (i in seq_len(nrow(unique_ranges))) {
-      starts_open <- !is.na(unique_ranges$min_date[i]) && is.na(unique_ranges$max_date[i])
-      close_to_prev_end <- starts_open && !is.na(prev_end) &&
-        as.integer(unique_ranges$min_date[i] - prev_end) >= 1L &&
-        as.integer(unique_ranges$min_date[i] - prev_end) <= 7L
-      if (!close_to_prev_end) current_cluster <- current_cluster + 1L
-      cluster_id[i] <- current_cluster
-      if (!is.na(unique_ranges$max_date[i])) prev_end <- unique_ranges$max_date[i]
-    }
-    unique_ranges$cluster_id <- cluster_id
-    range_clusters <- unique_ranges[, c("range_key", "cluster_id"), drop = FALSE]
-    range_df <- merge(range_df, range_clusters, by = "range_key", all.x = TRUE, sort = FALSE)
+    # The signature is already strict enough to identify real VOF siblings:
+    # same period family, analytical variable set, media channel and effect.
+    # Do not split siblings into extra clusters by date gaps; weekly data can
+    # legitimately have gaps and still must receive First/Second labels.
+    if (nrow(unique_ranges) <= 1) next
 
-    for (cid in sort(unique(unique_ranges$cluster_id))) {
-      cluster_ranges <- unique_ranges[unique_ranges$cluster_id == cid, , drop = FALSE]
-      if (nrow(cluster_ranges) <= 1) next
-      range_labels <- setNames(
-        paste0(vapply(seq_len(nrow(cluster_ranges)), ordinal_tag, character(1)), "TimeBreak"),
-        cluster_ranges$range_key
-      )
-      range_orders <- setNames(seq_len(nrow(cluster_ranges)), cluster_ranges$range_key)
-      cluster_group <- paste(sig, paste0("cluster_", cid), sep = "::::")
-      cluster_nms <- range_df$nm[range_df$cluster_id == cid]
-      for (nm in cluster_nms) {
-        key <- range_df$range_key[range_df$nm == nm][1]
-        channels[[nm]]$time_break_label <- range_labels[[key]] %||% ""
-        channels[[nm]]$vof_time_break_group <- cluster_group
-        channels[[nm]]$vof_time_break_order <- range_orders[[key]] %||% NA_integer_
-        channels[[nm]]$vof_time_break_group_size <- nrow(cluster_ranges)
-      }
+    range_labels <- setNames(
+      paste0(vapply(seq_len(nrow(unique_ranges)), ordinal_tag, character(1)), "TimeBreak"),
+      unique_ranges$range_key
+    )
+    range_orders <- setNames(seq_len(nrow(unique_ranges)), unique_ranges$range_key)
+
+    for (nm in range_df$nm) {
+      key <- range_df$range_key[range_df$nm == nm][1]
+      channels[[nm]]$time_break_label <- range_labels[[key]] %||% ""
+      channels[[nm]]$vof_time_break_group <- sig
+      channels[[nm]]$vof_time_break_order <- range_orders[[key]] %||% NA_integer_
+      channels[[nm]]$vof_time_break_group_size <- nrow(unique_ranges)
     }
   }
 

@@ -1786,26 +1786,35 @@ filter_to_analytical_varkey_combinations <- function(d, cfg, schema_metadata) {
     any(tolower(vals) != "total")
   }, logical(1))]
 
-  # VariableName is filtered before this helper runs. Longitudinal filters must
-  # not require the metric name to be identical, otherwise an Activity channel
-  # such as "Display Impressions" drops its paired "Display Spend" rows.
+  # Longitudinal filters should respect the VOF combinations without requiring
+  # the metric word itself to match. For example, "Display Impressions" and
+  # "Display Spend" share the same metric base, but "Display Spend_Collection"
+  # should not be kept unless that Display/Product combination exists in VOF.
   key_cols <- intersect(useful_dims, names(d))
   key_cols <- intersect(key_cols, names(lookup_all))
   if (!length(key_cols)) return(d)
 
+  use_metric_base <- "VariableName" %in% names(lookup_all) &&
+    "VariableName" %in% names(d)
+
   lookup <- lookup_all[
     lookup_all$OriginalName %in% (cfg$analytical_varkeys %||% character(0)),
-    key_cols,
+    unique(c(if (use_metric_base) "VariableName" else character(0), key_cols)),
     drop = FALSE
   ]
   if (!nrow(lookup)) return(d)
 
   normalize_key <- function(df) {
+    parts <- list()
+    if (use_metric_base) {
+      parts <- c(parts, list(metric_base_name(df$VariableName)))
+    }
+    parts <- c(parts, lapply(key_cols, function(col) {
+      tolower(trimws(as.character(df[[col]] %||% "")))
+    }))
     do.call(
       paste,
-      c(lapply(key_cols, function(col) {
-        tolower(trimws(as.character(df[[col]] %||% "")))
-      }), list(sep = "\r"))
+      c(parts, list(sep = "\r"))
     )
   }
 

@@ -44,6 +44,8 @@ source_dir("R", "^mod_.*\\.R$")
 WPP_BLUE      <- "#5B9BD5"
 WPP_BLUE_DARK <- "#4a87c0"
 WPP_BLUE_SOFT <- "#EBF3FB"
+APP_TITLE     <- "Splits Generation For Deep Dives"
+APP_SUBTITLE  <- "By Advanced Analytics Colombia"
 
 REQUIRED_COLS <- c(
   "Geography", "Product", "VariableName", "Period",
@@ -83,8 +85,8 @@ wpp_logo <- function(height = "74px", opacity = 1) {
 
 app_center <- tags$div(
   class = "navbar-center-block",
-  tags$span("Splits Generator for Deep Dives", class = "app-main-title"),
-  tags$span("By Advanced Analytics Colombia", class = "app-subtitle")
+  tags$span(APP_TITLE, class = "app-main-title"),
+  tags$span(APP_SUBTITLE, class = "app-subtitle")
 )
 
 # ── DT blue callback — function defined in www/custom.js ─────────────────

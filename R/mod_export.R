@@ -48,7 +48,7 @@ mod_export_server <- function(id, results, data, config, channels,
       side_mapping = "Side Model Mapping.csv",
       seed_indices = "Seed For Indices.csv",
       split_composition = "Split Composition.csv",
-      channel_config = "Channel Config.csv"
+      channel_config = "Splits Metadata.csv"
     )
     scwa_flags <- reactiveVal(setNames(logical(0), character(0)))
     scwa_channel_cache <- reactiveValues(keys = character(0), values = list())
@@ -1027,6 +1027,7 @@ mod_export_server <- function(id, results, data, config, channels,
         dplyr::summarise(
           Component_Activity = sum(.data$total_activity, na.rm = TRUE),
           Component_Spend = sum(.data$total_spend, na.rm = TRUE),
+          dplyr::across(dplyr::all_of(seed_meta_cols), stable_seed_meta),
           .groups = "drop"
         )
 
@@ -1967,9 +1968,9 @@ mod_export_server <- function(id, results, data, config, channels,
                       "Split lineage: components, activity and spend per period",
                       dims$composition),
           div(class = "export-file-group-title",
-              icon("gear", class = "icon-blue-sm"), "Configuration"),
+              icon("gear", class = "icon-blue-sm"), "Metadata"),
           mk_file_row("gear",           "amber",  export_file_names$channel_config,
-                      "Split order, merges, breaks and segment overrides",
+                      "Global split order, merges, breaks, renames and channel metadata",
                       dims$config)
         )
       )
@@ -2485,9 +2486,8 @@ mod_export_server <- function(id, results, data, config, channels,
           src_col <- "Sourced VariableName"
           has_src_col <- src_col %in% names(roi_df) && src_col %in% names(act_df)
           has_geo_col <- "Geography" %in% names(roi_df) && "Geography" %in% names(act_df)
-          roi_long_cols <- roi_rae_key_columns(roi_df, d$all_rags)
-          roi_long_cols <- intersect(roi_long_cols, names(act_df))
-          roi_long_cols <- setdiff(roi_long_cols, "Geography")
+          roi_available_long_cols <- setdiff(roi_rae_key_columns(roi_df, d$all_rags), "Geography")
+          roi_long_cols <- intersect(roi_available_long_cols, names(act_df))
           unknown_roi_keys <- setdiff(
             setdiff(names(roi_df), c("MainModelVariableName", "Channel", "Geography",
                                      "Sourced VariableName", "VariableSplit", "SplitOrder",
@@ -2503,7 +2503,10 @@ mod_export_server <- function(id, results, data, config, channels,
               type = "warning", duration = 12
             )
           }
-          empty_roi <- setNames(as.list(rep(NA_real_, length(roi_num_cols))), roi_num_cols)
+          empty_roi <- c(
+            setNames(as.list(rep(NA_real_, length(roi_num_cols))), roi_num_cols),
+            list(.ROIChannel = NA_character_)
+          )
 
           roi_norm <- roi_df %>%
             dplyr::mutate(
@@ -2513,7 +2516,7 @@ mod_export_server <- function(id, results, data, config, channels,
               sv_val = if (src_col %in% names(roi_df))
                 normalize_roi_text(.data[[src_col]]) else ""
             )
-          for (key_col in roi_long_cols) {
+          for (key_col in roi_available_long_cols) {
             roi_norm[[paste0(".key_", key_col)]] <- normalize_roi_text(roi_norm[[key_col]])
           }
 
@@ -2592,10 +2595,28 @@ mod_export_server <- function(id, results, data, config, channels,
             }
 
             for (keys in key_sets) {
+              omitted_specific <- setdiff(
+                intersect(c("sv_val", "geo_val", paste0(".key_", roi_available_long_cols)), names(cands)),
+                keys
+              )
+              if (length(omitted_specific)) {
+                has_more_specific_roi <- vapply(omitted_specific, function(k) {
+                  any(nzchar(cands[[k]] %||% ""), na.rm = TRUE)
+                }, logical(1))
+                if (any(has_more_specific_roi)) next
+              }
               hit <- match_one_level(keys)
               if (!nrow(hit)) next
               hit <- dplyr::distinct(hit, dplyr::across(dplyr::all_of(roi_num_cols)), .keep_all = TRUE)
-              if (nrow(hit) == 1L) return(as.list(hit[1, roi_num_cols, drop = FALSE]))
+              if (nrow(hit) == 1L) {
+                matched <- as.list(hit[1, roi_num_cols, drop = FALSE])
+                matched$.ROIChannel <- if ("Channel" %in% names(hit)) {
+                  trimws(as.character(hit$Channel[[1]] %||% NA_character_))
+                } else {
+                  NA_character_
+                }
+                return(matched)
+              }
               ambiguous_matches <<- c(ambiguous_matches, paste0(row$Channel, " -> ", row$VariableSplit))
               return(NULL)
             }
@@ -2611,6 +2632,12 @@ mod_export_server <- function(id, results, data, config, channels,
           })
 
           act_df <- dplyr::bind_cols(act_df, dplyr::bind_rows(matched_rois))
+          if (".ROIChannel" %in% names(act_df)) {
+            roi_channel <- trimws(as.character(act_df$.ROIChannel))
+            act_df$Channel <- ifelse(!is.na(roi_channel) & nzchar(roi_channel),
+                                     roi_channel, act_df$Channel)
+            act_df <- dplyr::select(act_df, -dplyr::any_of(".ROIChannel"))
+          }
 
           if (length(ambiguous_matches)) {
             showNotification(
@@ -2822,17 +2849,82 @@ mod_export_server <- function(id, results, data, config, channels,
         }
       }
 
-      channel_from_roi <- function(nm, cfg) {
+      make_component_channel_lookup <- function(component_metrics, mmv, fallback_channel) {
         rois <- if (!is.null(d)) clean_roi_columns(d$channels_rois) else NULL
-        if (!is.null(rois) &&
-            all(c("MainModelVariableName", "Channel") %in% names(rois))) {
-          mv <- cfg$model_variable %||% nm
-          rows_roi <- rois[trimws(as.character(rois$MainModelVariableName)) ==
-                             trimws(as.character(mv)), "Channel", drop = TRUE]
-          rows_roi <- rows_roi[!is.na(rows_roi) & nzchar(trimws(as.character(rows_roi)))]
-          if (length(rows_roi)) return(trimws(as.character(rows_roi[1])))
+        if (is.null(rois) || !nrow(rois) ||
+            !all(c("MainModelVariableName", "Channel") %in% names(rois)) ||
+            is.null(component_metrics) || !nrow(component_metrics) ||
+            !"VariableSplit" %in% names(component_metrics)) {
+          return(function(split_nm) fallback_channel)
         }
-        nm
+
+        roi_keys <- setdiff(roi_rae_key_columns(rois, d$all_rags), "Geography")
+        meta_cols <- intersect(c("Sourced VariableName", roi_keys), names(component_metrics))
+        if (!length(meta_cols)) {
+          return(function(split_nm) fallback_channel)
+        }
+
+        rois$.mv_norm <- normalize_roi_mv(rois$MainModelVariableName)
+        rois <- rois[rois$.mv_norm == normalize_roi_mv(mmv), , drop = FALSE]
+        if (!nrow(rois)) {
+          return(function(split_nm) fallback_channel)
+        }
+
+        if ("Sourced VariableName" %in% names(rois))
+          rois$.source_norm <- normalize_roi_text(rois[["Sourced VariableName"]])
+        for (key_col in roi_keys) {
+          if (key_col %in% names(rois))
+            rois[[paste0(".key_", key_col)]] <- normalize_roi_text(rois[[key_col]])
+        }
+
+        channel_by_split <- new.env(parent = emptyenv(), hash = TRUE)
+        meta <- component_metrics %>%
+          dplyr::select(VariableSplit, dplyr::any_of(meta_cols)) %>%
+          dplyr::distinct()
+
+        for (i in seq_len(nrow(meta))) {
+          candidates <- rois
+          if ("Sourced VariableName" %in% meta_cols &&
+              "Sourced VariableName" %in% names(meta) &&
+              ".source_norm" %in% names(candidates)) {
+            src_val <- normalize_roi_text(meta[["Sourced VariableName"]][[i]])
+            if (nzchar(src_val)) {
+              candidates <- candidates[
+                nzchar(candidates$.source_norm) & candidates$.source_norm == src_val,
+                , drop = FALSE
+              ]
+            }
+          }
+
+          for (key_col in roi_keys) {
+            meta_key <- paste0(".key_", key_col)
+            if (!key_col %in% names(meta) || !meta_key %in% names(candidates)) next
+            key_val <- normalize_roi_text(meta[[key_col]][[i]])
+            if (!nzchar(key_val)) next
+            candidates <- candidates[
+              nzchar(candidates[[meta_key]]) & candidates[[meta_key]] == key_val,
+              , drop = FALSE
+            ]
+          }
+
+          channels <- unique(trimws(as.character(candidates$Channel)))
+          channels <- channels[!is.na(channels) & nzchar(channels)]
+          if (length(channels) == 1L) {
+            for (key in split_key_variants(meta$VariableSplit[[i]])) {
+              assign(key, channels[[1]], envir = channel_by_split)
+            }
+          }
+        }
+
+        function(split_nm) {
+          keys <- split_key_variants(split_nm)
+          hits <- unique(unlist(mget(keys, envir = channel_by_split,
+                                     ifnotfound = list(character()),
+                                     inherits = FALSE),
+                                use.names = FALSE))
+          hits <- hits[!is.na(hits) & nzchar(hits)]
+          if (length(hits) == 1L) hits[[1]] else fallback_channel
+        }
       }
 
       rows <- Filter(Negate(is.null), lapply(names(channels_list), function(nm) {
@@ -2910,6 +3002,11 @@ mod_export_server <- function(id, results, data, config, channels,
           dplyr::filter(is_focus_split_name(.data$VariableSplit))
         final_metrics <- final_metrics %>%
           dplyr::filter(is_focus_split_name(.data$VariableSplit))
+        lookup_component_channel <- make_component_channel_lookup(
+          component_metrics,
+          mmv,
+          ch_name
+        )
         lookup_component_activity <- make_metric_lookup(component_metrics, "total_activity", cfg)
         lookup_component_spend <- make_metric_lookup(component_metrics, "total_spend", cfg)
         lookup_merged_activity <- make_metric_lookup(final_metrics, "total_activity", cfg)
@@ -2920,7 +3017,7 @@ mod_export_server <- function(id, results, data, config, channels,
 
         lineage %>%
           dplyr::mutate(
-            Channel = ch_name,
+            Channel = vapply(.data$ComponentSplit, lookup_component_channel, character(1)),
             MainModelVariableName = mmv,
             Component_Activity = vapply(.data$ComponentSplit, lookup_component_activity, numeric(1)),
             Component_Spend = vapply(.data$ComponentSplit, lookup_component_spend, numeric(1)),
@@ -3245,14 +3342,14 @@ mod_export_server <- function(id, results, data, config, channels,
           }, error = \(e) showNotification(paste("Split composition error:", e$message),
                                            type = "warning", duration = 6))
 
-          incProgress(0.15, message = "Channel configuration...")
+          incProgress(0.15, message = "Splits Metadata...")
           tryCatch({
-            df <- export_channels_csv(channels_snap, config())
+            df <- export_splits_metadata_csv(channels_snap, config())
             if (!is.null(df) && nrow(df) > 0) {
               f <- file.path(tmp_dir, export_file_names$channel_config)
               readr::write_csv(df, f, na = ""); written <- c(written, f)
             }
-          }, error = \(e) showNotification(paste("Config error:", e$message),
+          }, error = \(e) showNotification(paste("Splits Metadata error:", e$message),
                                            type = "warning", duration = 6))
 
           incProgress(0.05, message = "Creating ZIP archive...")

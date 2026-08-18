@@ -17,6 +17,8 @@ mod_setup_ui <- function(id) {
   }
   
   tagList(
+    div(
+      class = "setup-flow",
     
     div(
       class = "seg-ctrl-wrap",
@@ -50,7 +52,7 @@ mod_setup_ui <- function(id) {
     ),
     
     card(
-      class = "setup-files-card", fill = FALSE,
+      class = "setup-files-card setup-files-section", fill = FALSE,
       card_header("Data Files"),
       div(
         class = "batch-file-card-wrap mb-3",
@@ -92,7 +94,7 @@ mod_setup_ui <- function(id) {
     conditionalPanel(
       condition = sprintf("input['%s'] == 'update'", ns("app_mode")),
       card(
-        class = "setup-files-card", fill = FALSE,
+        class = "setup-files-card setup-files-section", fill = FALSE,
         card_header(
           div(class = "card-header-between",
               div(class = "card-header-inner",
@@ -124,12 +126,21 @@ mod_setup_ui <- function(id) {
       )
     ),
     
-    layout_columns(
-      col_widths = c(7, 5),
-      card(
-        class = "global-params-card",
-        card_header("Global Parameters"),
-        uiOutput(ns("update_label_ui")),
+    card(
+      class = "setup-comparison-card setup-validation-section", full_screen = TRUE,
+      card_header("File Validation"),
+      uiOutput(ns("validation_summary")),
+      uiOutput(ns("file_comparison"))
+    ),
+
+    card(
+      class = "global-params-card setup-global-card",
+      card_header("Global Parameters"),
+      div(
+        class = "setup-global-grid",
+        div(
+          class = "setup-global-main",
+          uiOutput(ns("update_label_ui")),
         conditionalPanel(
           condition = sprintf("input['%s'] != 'update'", ns("app_mode")),
           div(class = "mb-2",
@@ -148,25 +159,36 @@ mod_setup_ui <- function(id) {
               " All data in RAE Datafile is treated as focus period.",
               " Past data already carries the Before label from processing.")
         ),
-        uiOutput(ns("custom_dates_ui")),
-        uiOutput(ns("reporting_period_preview")),
-        uiOutput(ns("weight_variable_ui")),
-        hr(),
-        uiOutput(ns("cross_section_info")),
-        hr(),
-        uiOutput(ns("validation_alerts"))
+          uiOutput(ns("custom_dates_ui")),
+          uiOutput(ns("weight_variable_ui"))
+        ),
+        div(
+          class = "setup-global-side",
+          div(
+            class = "setup-suffix-panel",
+            div(class = "setup-panel-title", "Column Suffix Preview"),
+            uiOutput(ns("suffix_preview"))
+          ),
+          div(
+            class = "setup-period-panel",
+            div(class = "setup-panel-title", "Reporting Period Preview"),
+            uiOutput(ns("reporting_period_preview"))
+          )
+        )
       ),
-      card(card_header("Column Suffix Preview"),
-           uiOutput(ns("suffix_preview")))
+      div(
+        class = "setup-global-footer",
+        uiOutput(ns("cross_section_info")),
+        uiOutput(ns("validation_alerts"))
+      )
     ),
     
-    card(card_header("Media Variable Index"),
-         uiOutput(ns("media_index_display"))),
-    
-    card(class = "setup-comparison-card", full_screen = TRUE,
-         card_header("File Validation"),
-         uiOutput(ns("validation_summary")),
-         uiOutput(ns("file_comparison")))
+    card(
+      class = "setup-index-section",
+      card_header("Media Variable Index"),
+      uiOutput(ns("media_index_display"))
+    )
+    )
   )
 }
 
@@ -196,10 +218,13 @@ mod_setup_server <- function(id) {
       side_mapping_nonfocus  = NULL,
       update_status          = "pending",
       file_meta              = list(),
+      file_contracts         = list(),
+      cross_file_warnings    = list(),
       upload_issues          = NULL
     )
     
     mi_building    <- reactiveVal(FALSE)
+    mi_signature   <- reactiveVal(NULL)
     upd_processing <- reactiveVal(FALSE)
     build_period_preset <- reactiveVal("last52")
     
@@ -227,7 +252,8 @@ mod_setup_server <- function(id) {
 
       recognized_items <- lapply(intersect(base_file_kinds, names(rv$file_meta)), function(kind) {
         meta <- rv$file_meta[[kind]]
-        contract <- loaded_file_contract_text(kind)
+        contract <- rv$file_contracts[[kind]]
+        contract_text <- loaded_file_contract_text(kind)
         list(
           main = paste0(meta$name, " -> ", base_file_labels[[kind]]),
           sub  = paste0(
@@ -237,7 +263,9 @@ mod_setup_server <- function(id) {
             if (!is.null(meta$cols)) paste0(" | ", format(meta$cols, big.mark = ","), " cols") else "",
             " | via ", meta$source,
             " | ", meta$loaded_at,
-            if (nzchar(contract)) paste0(" | ", contract) else ""
+            if (nzchar(contract_text)) paste0(" | ", contract_text) else "",
+            if (length(contract$warnings %||% character(0)))
+              paste0(" | ", length(contract$warnings), " warning(s)") else ""
           )
         )
       })
@@ -268,9 +296,13 @@ mod_setup_server <- function(id) {
           sub  = paste0("Load failed | ", x$error)
         )
       })
+      warning_items <- lapply(contract_warning_items(), function(x) {
+        list(main = x$title, sub = x$message)
+      })
 
       has_review <- length(missing_items) > 0 || length(optional_missing_items) > 0 ||
-        length(duplicate_items) > 0 || length(unrecognized_items) > 0 || length(error_items) > 0
+        length(duplicate_items) > 0 || length(unrecognized_items) > 0 ||
+        length(error_items) > 0 || length(warning_items) > 0
 
       tags$div(
         class = "batch-upload-summary",
@@ -283,11 +315,13 @@ mod_setup_server <- function(id) {
           ),
           tags$div(
             class = "batch-summary-badges",
-            batch_summary_badge("Recognized", length(recognized_items), "ok"),
+            batch_summary_badge("Loaded", length(recognized_items), "ok"),
             batch_summary_badge("Missing", length(missing_items),
                                 if (length(missing_items)) "warn" else "neutral"),
             batch_summary_badge("Optional missing", length(optional_missing_items),
                                 if (length(optional_missing_items)) "warn" else "neutral"),
+            batch_summary_badge("Warnings", length(warning_items),
+                                if (length(warning_items)) "warn" else "neutral"),
             batch_summary_badge("Skipped", length(duplicate_items),
                                 if (length(duplicate_items)) "warn" else "neutral"),
             batch_summary_badge("Not recognized", length(unrecognized_items),
@@ -296,9 +330,10 @@ mod_setup_server <- function(id) {
         ),
         tags$div(
           class = "batch-summary-body",
-          batch_summary_section("Recognized files", recognized_items, "ok"),
+          batch_summary_section("Loaded files", recognized_items, "ok"),
           batch_summary_section("Missing required files", missing_items, "warn"),
           batch_summary_section("Optional files not loaded", optional_missing_items, "warn"),
+          batch_summary_section("Warnings", warning_items, "warn"),
           batch_summary_section("Skipped duplicates", duplicate_items, "warn"),
           batch_summary_section("Not recognized", unrecognized_items, "error"),
           batch_summary_section("Load errors", error_items, "error")
@@ -359,7 +394,62 @@ mod_setup_server <- function(id) {
         !is.null(rv$vof_data) && !is.null(rv$details)
     }
 
-    loaded_file_contract_text <- function(kind) {
+    normalize_contract_key <- function(x) {
+      x <- trimws(as.character(x))
+      x <- stringr::str_to_upper(x)
+      gsub("\\s+", " ", x)
+    }
+
+    normalize_contract_model_var <- function(x) {
+      out <- trimws(as.character(x))
+      out <- stringr::str_replace_all(out, "\\s+", " ")
+      out <- stringr::str_remove(out, stringr::regex("(_Total)+$", ignore_case = TRUE))
+      stringr::str_to_lower(out)
+    }
+
+    date_contract <- function(df, col = "Period") {
+      if (is.null(df) || !col %in% names(df)) {
+        return(list(has_date = FALSE, min = NULL, max = NULL, invalid = 0L))
+      }
+      raw <- df[[col]]
+      parsed <- if (inherits(raw, "Date")) raw else parse_period_robust(raw)
+      non_empty <- !is.na(raw) & nzchar(trimws(as.character(raw)))
+      invalid <- sum(non_empty & is.na(parsed), na.rm = TRUE)
+      valid <- parsed[!is.na(parsed)]
+      list(
+        has_date = length(valid) > 0,
+        min = if (length(valid)) min(valid) else NULL,
+        max = if (length(valid)) max(valid) else NULL,
+        invalid = invalid
+      )
+    }
+
+    vof_date_contract <- function(df) {
+      if (is.null(df)) return(list(invalid = 0L, min = NULL, max = NULL))
+      cols <- intersect(c("MinPeriod", "MaxPeriod"), names(df))
+      if (!length(cols)) return(list(invalid = 0L, min = NULL, max = NULL))
+      parsed <- lapply(cols, function(col) {
+        raw <- df[[col]]
+        p <- parse_period_robust(raw)
+        non_empty <- !is.na(raw) & nzchar(trimws(as.character(raw)))
+        list(parsed = p, invalid = sum(non_empty & is.na(p), na.rm = TRUE))
+      })
+      all_dates <- do.call(c, lapply(parsed, `[[`, "parsed"))
+      all_dates <- all_dates[!is.na(all_dates)]
+      list(
+        invalid = sum(vapply(parsed, `[[`, integer(1), "invalid")),
+        min = if (length(all_dates)) min(all_dates) else NULL,
+        max = if (length(all_dates)) max(all_dates) else NULL
+      )
+    }
+
+    roi_columns_detected <- function(df) {
+      if (is.null(df)) return(character(0))
+      cols <- names(df)
+      cols[stringr::str_detect(cols, stringr::regex("\\bROI\\b|ROI", ignore_case = TRUE))]
+    }
+
+    build_file_contract <- function(kind, rule = NULL) {
       df <- switch(kind,
                    main = rv$main_data,
                    analytical = rv$analytical,
@@ -367,7 +457,17 @@ mod_setup_server <- function(id) {
                    details = rv$details_raw,
                    rois = rv$channels_rois,
                    NULL)
-      if (is.null(df)) return("")
+      label <- base_file_labels[[kind]] %||% kind
+      if (is.null(df)) {
+        return(list(
+          kind = kind, label = label, loaded = FALSE, rule = rule %||% "",
+          rows = 0L, cols = 0L, key_columns = character(0),
+          date_min = NULL, date_max = NULL, warnings = character(0),
+          blockers = if (kind %in% required_base_file_kinds) "Not loaded" else character(0),
+          built_at = format(Sys.time(), "%Y-%m-%d %H:%M")
+        ))
+      }
+
       req_cols <- switch(kind,
                          main = REQUIRED_COLS,
                          analytical = "Period",
@@ -378,13 +478,214 @@ mod_setup_server <- function(id) {
       opt_cols <- switch(kind,
                          vof = c("Geography", "Geographies", "Metric", "Effect", "MediaChannel", "SubChannel"),
                          rois = c("ROI", "Geography", "Sourced VariableName", "Channel"),
+                         analytical = analytical_dim_cols,
                          character(0))
-      contract <- column_contract(df, req_cols, opt_cols)
-      present <- c(contract$present_required, contract$present_optional)
-      missing <- contract$missing_required
+      cc <- column_contract(df, req_cols, opt_cols)
+      warnings <- character(0)
+      blockers <- cc$missing_required
+      date_info <- if (kind == "vof") vof_date_contract(df) else date_contract(df, "Period")
+
+      if (kind == "main") {
+        if (!"VariableValue" %in% names(df)) blockers <- c(blockers, "VariableValue")
+        if (!isTRUE(date_info$has_date)) blockers <- c(blockers, "No valid Period values")
+        if (date_info$invalid > 0) warnings <- c(warnings, paste0(date_info$invalid, " RAE Period value(s) could not be parsed"))
+        vals <- suppressWarnings(as.numeric(df$VariableValue))
+        if (!any(is.finite(vals), na.rm = TRUE)) blockers <- c(blockers, "VariableValue has no numeric values")
+      } else if (kind == "analytical") {
+        sig <- validate_analytical_signature(df)
+        if (!isTRUE(sig$ok)) blockers <- c(blockers, sig$reason)
+        if (!isTRUE(date_info$has_date)) blockers <- c(blockers, "No valid Period values")
+        if (date_info$invalid > 0) warnings <- c(warnings, paste0(date_info$invalid, " Analytical Period value(s) could not be parsed"))
+      } else if (kind == "vof") {
+        if (!any(c("Geography", "Geographies") %in% names(df))) blockers <- c(blockers, "Geography or Geographies")
+        if (date_info$invalid > 0) warnings <- c(warnings, paste0(date_info$invalid, " VOF Min/Max Period value(s) could not be parsed"))
+        if (!"Metric" %in% names(df)) warnings <- c(warnings, "Metric column not found; Activity/Spend keywords will be inferred")
+      } else if (kind == "details") {
+        type_chr <- stringr::str_to_lower(trimws(as.character(df$Type %||% character(0))))
+        n_modeled <- sum(stringr::str_detect(type_chr, "\\b(in|fixed)\\b"), na.rm = TRUE)
+        if (n_modeled == 0) warnings <- c(warnings, "No IN/FIXED variables detected after filtering ModelDetails")
+      } else if (kind == "rois") {
+        roi_cols <- roi_columns_detected(df)
+        if (!length(roi_cols)) blockers <- c(blockers, "ROI column")
+        if (!is.null(rv$main_data)) {
+          supported_meta <- c("MainModelVariableName", "Channel", "Geography",
+                              "Sourced VariableName", "VariableSplit", "SplitOrder", roi_cols)
+          candidate_keys <- setdiff(names(df), supported_meta)
+          unknown_keys <- setdiff(candidate_keys, names(rv$main_data))
+          unknown_keys <- unknown_keys[!vapply(df[unknown_keys], is.numeric, logical(1))]
+          if (length(unknown_keys)) {
+            warnings <- c(warnings, paste0(
+              "ROI key column(s) not found in RAE: ",
+              paste(head(unknown_keys, 5), collapse = ", "),
+              if (length(unknown_keys) > 5) " ..." else ""
+            ))
+          }
+        }
+      }
+
+      blockers <- unique(blockers[nzchar(as.character(blockers))])
+      warnings <- unique(warnings[nzchar(as.character(warnings))])
+      key_columns <- unique(c(cc$present_required, cc$present_optional))
+      list(
+        kind = kind,
+        label = label,
+        loaded = TRUE,
+        rule = rule %||% "",
+        rows = nrow(df),
+        cols = ncol(df),
+        key_columns = key_columns,
+        date_min = date_info$min,
+        date_max = date_info$max,
+        warnings = warnings,
+        blockers = blockers,
+        built_at = format(Sys.time(), "%Y-%m-%d %H:%M")
+      )
+    }
+
+    update_file_contract <- function(kind, rule = NULL) {
+      contracts <- rv$file_contracts
+      contracts[[kind]] <- build_file_contract(kind, rule)
+      rv$file_contracts <- contracts
+      refresh_cross_file_warnings()
+    }
+
+    clear_file_contract <- function(kind) {
+      contracts <- rv$file_contracts
+      contracts[[kind]] <- NULL
+      rv$file_contracts <- contracts
+      refresh_cross_file_warnings()
+    }
+
+    contract_warning_items <- function() {
+      items <- list()
+      for (kind in names(rv$file_contracts)) {
+        contract <- rv$file_contracts[[kind]]
+        for (msg in contract$warnings %||% character(0)) {
+          items[[length(items) + 1L]] <- list(
+            title = paste0(contract$label, " warning"),
+            message = msg
+          )
+        }
+        for (msg in contract$blockers %||% character(0)) {
+          items[[length(items) + 1L]] <- list(
+            title = paste0(contract$label, " blocker"),
+            message = msg
+          )
+        }
+      }
+      for (msg in rv$cross_file_warnings %||% list()) {
+        items[[length(items) + 1L]] <- msg
+      }
+      items
+    }
+
+    refresh_cross_file_warnings <- function() {
+      warnings <- list()
+      add_warning <- function(title, message) {
+        warnings[[length(warnings) + 1L]] <<- list(title = title, message = message)
+      }
+      if (!is.null(rv$vof_data) && !is.null(rv$analytical) &&
+          "AnalyticalVariableName" %in% names(rv$vof_data)) {
+        vof_vars <- unique(unlist(strsplit(as.character(rv$vof_data$AnalyticalVariableName), "\\|")))
+        vof_vars <- trimws(vof_vars[!is.na(vof_vars) & nzchar(vof_vars)])
+        missing_an <- setdiff(normalize_contract_key(vof_vars), normalize_contract_key(names(rv$analytical)))
+        if (length(missing_an)) {
+          sample <- vof_vars[normalize_contract_key(vof_vars) %in% head(missing_an, 5)]
+          add_warning(
+            "VOF to Analytical mapping",
+            paste0(length(missing_an), " VOF AnalyticalVariableName value(s) were not found as Analytical columns. Sample: ",
+                   paste(head(sample, 5), collapse = ", "))
+          )
+        }
+      }
+      if (!is.null(rv$vof_data) && !is.null(rv$main_data) &&
+          "AnalyticalVariableName" %in% names(rv$vof_data) &&
+          "VariableName" %in% names(rv$main_data)) {
+        vof_vars <- unique(unlist(strsplit(as.character(rv$vof_data$AnalyticalVariableName), "\\|")))
+        vof_vars <- trimws(vof_vars[!is.na(vof_vars) & nzchar(vof_vars)])
+        rae_vars <- unique(trimws(as.character(rv$main_data$VariableName)))
+        rae_vars <- rae_vars[!is.na(rae_vars) & nzchar(rae_vars)]
+        matched_vof <- vof_vars[vapply(vof_vars, function(v) {
+          expanded <- expand_analytical_keys_to_variable_names(rae_vars, v)
+          any(normalize_contract_key(expanded) %in% normalize_contract_key(rae_vars))
+        }, logical(1))]
+        missing_rae <- setdiff(normalize_contract_key(vof_vars), normalize_contract_key(matched_vof))
+        if (length(missing_rae)) {
+          sample <- vof_vars[normalize_contract_key(vof_vars) %in% head(missing_rae, 5)]
+          add_warning(
+            "VOF to RAE mapping",
+            paste0(length(missing_rae), " VOF AnalyticalVariableName value(s) did not resolve to RAE VariableName. Sample: ",
+                   paste(head(sample, 5), collapse = ", "))
+          )
+        }
+      }
+      if (!is.null(rv$details_raw) && !is.null(rv$analytical) &&
+          all(c("Type", "VariableName") %in% names(rv$details_raw))) {
+        d <- rv$details_raw
+        type_chr <- stringr::str_to_lower(trimws(as.character(d$Type)))
+        modeled <- unique(trimws(as.character(d$VariableName[stringr::str_detect(type_chr, "\\b(in|fixed)\\b")])))
+        modeled <- modeled[!is.na(modeled) & nzchar(modeled)]
+        analytical_names <- names(rv$analytical)
+        schema_lookup <- rv$schema_metadata$name_lookup %||% data.frame()
+        schema_names <- unique(c(
+          schema_lookup$OriginalName %||% character(0),
+          schema_lookup$VariableName %||% character(0)
+        ))
+        vof_names <- if (!is.null(rv$vof_data)) {
+          unique(c(
+            rv$vof_data$MainModelVariableName %||% character(0),
+            rv$vof_data$AnalyticalVariableName %||% character(0)
+          ))
+        } else character(0)
+        allowed_names <- unique(c(analytical_names, schema_names, vof_names))
+        allowed_norm <- unique(c(
+          normalize_contract_key(allowed_names),
+          normalize_contract_key(normalize_contract_model_var(allowed_names))
+        ))
+        modeled_norm <- normalize_contract_key(modeled)
+        modeled_mv_norm <- normalize_contract_key(normalize_contract_model_var(modeled))
+        missing_mask <- !(modeled_norm %in% allowed_norm | modeled_mv_norm %in% allowed_norm)
+        missing_details <- normalize_contract_key(modeled[missing_mask])
+        if (length(missing_details)) {
+          sample <- modeled[normalize_contract_key(modeled) %in% head(missing_details, 5)]
+          add_warning(
+            "ModelDetails to Analytical mapping",
+            paste0(length(missing_details), " IN/FIXED ModelDetails variable(s) were not found in Analytical, VOF, or usable longitudinal mapping. Sample: ",
+                   paste(head(sample, 5), collapse = ", "))
+          )
+        }
+      }
+      if (!is.null(rv$channels_rois) && !is.null(rv$vof_data) &&
+          all(c("MainModelVariableName") %in% names(rv$channels_rois)) &&
+          "MainModelVariableName" %in% names(rv$vof_data)) {
+        roi_mv <- unique(trimws(as.character(rv$channels_rois$MainModelVariableName)))
+        roi_mv <- roi_mv[!is.na(roi_mv) & nzchar(roi_mv)]
+        vof_mv <- unique(trimws(as.character(rv$vof_data$MainModelVariableName)))
+        extra_roi <- setdiff(normalize_contract_key(roi_mv), normalize_contract_key(vof_mv))
+        if (length(extra_roi)) {
+          sample <- roi_mv[normalize_contract_key(roi_mv) %in% head(extra_roi, 5)]
+          add_warning(
+            "ROI to VOF mapping",
+            paste0(length(extra_roi), " ROI MainModelVariableName value(s) were not found in VOF. Sample: ",
+                   paste(head(sample, 5), collapse = ", "))
+          )
+        }
+      }
+      rv$cross_file_warnings <- warnings
+    }
+
+    loaded_file_contract_text <- function(kind) {
+      contract <- rv$file_contracts[[kind]]
+      if (is.null(contract)) return("")
+      present <- contract$key_columns %||% character(0)
       txt <- paste0("keys: ", paste(head(present, 5), collapse = ", "))
       if (length(present) > 5) txt <- paste0(txt, " +", length(present) - 5)
-      if (length(missing)) txt <- paste0(txt, " | missing: ", paste(missing, collapse = ", "))
+      if (length(contract$blockers %||% character(0))) {
+        txt <- paste0(txt, " | blockers: ", paste(contract$blockers, collapse = ", "))
+      }
+      if (!is.null(contract$date_min) && !is.null(contract$date_max)) {
+        txt <- paste0(txt, " | dates: ", format(contract$date_min), " -> ", format(contract$date_max))
+      }
       txt
     }
 
@@ -459,7 +760,7 @@ mod_setup_server <- function(id) {
     }
 
     set_file_meta <- function(kind, file_row, rows = NULL, cols = NULL,
-                              source = "manual") {
+                              source = "manual", rule = NULL) {
       rv$media_index       <- NULL
       rv$validation_status <- "pending"
       rv$file_meta[[kind]] <- list(
@@ -470,12 +771,14 @@ mod_setup_server <- function(id) {
         loaded_at = format(Sys.time(), "%Y-%m-%d %H:%M"),
         source    = source
       )
+      update_file_contract(kind, rule %||% source)
     }
 
     clear_file_meta <- function(kind) {
       meta <- rv$file_meta
       meta[[kind]] <- NULL
       rv$file_meta <- meta
+      clear_file_contract(kind)
     }
 
     render_loaded_file_status <- function(kind) {
@@ -547,11 +850,23 @@ mod_setup_server <- function(id) {
 
       rv$media_index       <- NULL
       rv$validation_status <- "pending"
+      mi_signature(NULL)
       reset_update_outputs()
       clear_file_meta(kind)
       reset_file_input(base_file_input_ids[[kind]])
       reset_file_input("file_base_bundle")
       TRUE
+    }
+
+    media_index_signature <- function() {
+      kinds <- c(required_base_file_kinds, optional_base_file_kinds)
+      pieces <- vapply(kinds, function(kind) {
+        meta <- rv$file_meta[[kind]]
+        if (is.null(meta)) return(paste0(kind, ":missing"))
+        paste(kind, meta$name, meta$size, meta$rows %||% "", meta$cols %||% "",
+              meta$loaded_at %||% "", sep = ":")
+      }, character(1))
+      paste(pieces, collapse = "|")
     }
 
     load_main_base <- function(file_row, preloaded = NULL, source = "manual") {
@@ -560,7 +875,8 @@ mod_setup_server <- function(id) {
       df <- clean_data_columns(df)
       if (!validate_required_cols(df, "RAE Datafile")) return(FALSE)
       rv$main_data <- df
-      set_file_meta("main", file_row, nrow(rv$main_data), ncol(rv$main_data), source)
+      set_file_meta("main", file_row, nrow(rv$main_data), ncol(rv$main_data), source,
+                    rule = "Matched REQUIRED_COLS")
       if (!identical(source, "batch")) {
         showNotification(paste0("RAE Datafile loaded - ",
                                 format(nrow(rv$main_data), big.mark = ","),
@@ -646,7 +962,8 @@ mod_setup_server <- function(id) {
         rv$cross_cols <- auto_detect_cross_cols(rv$analytical)
       })
       reset_update_outputs()
-      set_file_meta("analytical", file_row, nrow(rv$analytical), ncol(rv$analytical), source)
+      set_file_meta("analytical", file_row, nrow(rv$analytical), ncol(rv$analytical), source,
+                    rule = sig$reason)
       if (!identical(source, "batch")) {
         showNotification(paste0("Analytical loaded - ",
                                 format(nrow(rv$analytical), big.mark = ","),
@@ -674,7 +991,8 @@ mod_setup_server <- function(id) {
         return(FALSE)
       }
       rv$vof_data <- vof_raw
-      set_file_meta("vof", file_row, nrow(rv$vof_data), ncol(rv$vof_data), source)
+      set_file_meta("vof", file_row, nrow(rv$vof_data), ncol(rv$vof_data), source,
+                    rule = "VOF required columns matched")
       if (!identical(source, "batch")) {
         showNotification(paste0("VOF loaded - ", format(nrow(vof_raw), big.mark = ","),
                                 " rows"),
@@ -697,7 +1015,8 @@ mod_setup_server <- function(id) {
       rv$details_raw <- tibble::as_tibble(details_raw)
       rv$details <- details_raw %>%
         dplyr::filter(!stringr::str_detect(stringr::str_to_lower(trimws(Type)), "none"))
-      set_file_meta("details", file_row, nrow(rv$details), ncol(rv$details), source)
+      set_file_meta("details", file_row, nrow(rv$details), ncol(rv$details), source,
+                    rule = sig$reason)
       n_in <- sum(stringr::str_detect(stringr::str_to_lower(trimws(rv$details$Type)),
                                       "\\b(in|fixed)\\b"), na.rm = TRUE)
       if (!identical(source, "batch")) {
@@ -741,7 +1060,8 @@ mod_setup_server <- function(id) {
           )
         }
       }
-      set_file_meta("rois", file_row, nrow(rv$channels_rois), ncol(rv$channels_rois), source)
+      set_file_meta("rois", file_row, nrow(rv$channels_rois), ncol(rv$channels_rois), source,
+                    rule = sig$reason)
       if (!identical(source, "batch")) {
         showNotification(paste0("ROIs loaded - ", nrow(rv$channels_rois), " rows"),
                          type = "message", duration = 4)
@@ -900,8 +1220,6 @@ mod_setup_server <- function(id) {
     observeEvent(input$file_base_bundle, {
       req(input$file_base_bundle)
       files <- input$file_base_bundle
-      expected <- c("main", "analytical", "vof", "details", "rois")
-      labels <- base_file_labels
       detected <- list()
       duplicates <- list()
       unrecognized <- list()
@@ -915,7 +1233,7 @@ mod_setup_server <- function(id) {
             list(kind = NA_character_, data = NULL, reason = e$message)
           })
 
-          if (is.na(det$kind) || !det$kind %in% expected) {
+          if (is.na(det$kind) || !det$kind %in% base_file_kinds) {
             unrecognized[[length(unrecognized) + 1L]] <- list(
               file = file_row$name,
               ext = tolower(tools::file_ext(file_row$name)),
@@ -928,7 +1246,7 @@ mod_setup_server <- function(id) {
             duplicates[[length(duplicates) + 1L]] <- list(
               file = file_row$name,
               kind = det$kind,
-              label = labels[[det$kind]],
+              label = base_file_labels[[det$kind]],
               kept_file = detected[[det$kind]]$file$name,
               reason = det$reason %||% "Duplicate detected type"
             )
@@ -938,16 +1256,16 @@ mod_setup_server <- function(id) {
                                        reason = det$reason)
         }
 
-        for (kind in expected) {
+        for (kind in base_file_kinds) {
           item <- detected[[kind]]
           if (is.null(item)) next
-          incProgress(0.10, detail = paste("Loading", labels[[kind]]))
+          incProgress(0.10, detail = paste("Loading", base_file_labels[[kind]]))
           ok <- tryCatch(load_base_by_kind(kind, item$file, item$data, source = "batch"),
                          error = function(e) {
                            errors[[length(errors) + 1L]] <<- list(
                              file = item$file$name,
                              kind = kind,
-                             label = labels[[kind]],
+                             label = base_file_labels[[kind]],
                              error = e$message
                            )
                            FALSE
@@ -957,8 +1275,8 @@ mod_setup_server <- function(id) {
               errors[[length(errors) + 1L]] <- list(
                 file = item$file$name,
                 kind = kind,
-                label = labels[[kind]],
-                error = paste(labels[[kind]], "failed validation")
+                label = base_file_labels[[kind]],
+                error = paste(base_file_labels[[kind]], "failed validation")
               )
             }
           }
@@ -1313,6 +1631,11 @@ mod_setup_server <- function(id) {
     observe({
       req(rv$main_data, rv$analytical, rv$vof_data, rv$details)
       if (isolate(isTRUE(mi_building()))) return()
+      sig <- media_index_signature()
+      if (!is.null(isolate(mi_signature())) && identical(isolate(mi_signature()), sig) &&
+          !is.null(isolate(rv$media_index))) {
+        return()
+      }
       mi_building(TRUE)
       tryCatch({
         mi <- build_media_index(main_data       = rv$main_data,
@@ -1323,6 +1646,7 @@ mod_setup_server <- function(id) {
                                 cross_cols      = rv$cross_cols %||% "Geography",
                                 schema_metadata = rv$schema_metadata)
         rv$media_index <- mi
+        mi_signature(sig)
         if (mi$summary$total_channels > 0)
           showNotification(paste0("Media Index - ", mi$summary$total_channels,
                                   " channels (", mi$summary$from_vof, " VOF, ",
@@ -1333,6 +1657,7 @@ mod_setup_server <- function(id) {
                            type = "warning", duration = 8)
       }, error = function(e) {
         rv$media_index <- NULL
+        mi_signature(NULL)
         showNotification(paste("Media Index error:", e$message), type = "error", duration = 10)
       })
       mi_building(FALSE)
@@ -1347,7 +1672,7 @@ mod_setup_server <- function(id) {
       if (is.null(mi))
         return(div(class = "mi-box-na",
                    div(class = "mi-box-na-inner",
-                       tags$span("Upload all 5 required files to auto-build the index."))))
+                       tags$span("Upload the 4 required files to auto-build the index. ROIs by Channel can be added for ROI values."))))
       if (mi$summary$total_channels == 0)
         return(div(class = "alert alert-warning alert-sm p-3",
                    "No channels found. Check ModelDetails has IN/FIXED variables."))
@@ -1372,6 +1697,39 @@ mod_setup_server <- function(id) {
                 tags$span("(all 'Total' in Analytical)", class = "text-muted",
                           style = "font-size:11px;font-style:italic;")))
       } else NULL
+      connection_info <- {
+        cm <- mi$connection_map
+        if (is.null(cm) || !nrow(cm)) {
+          NULL
+        } else {
+          issue_rows <- cm[cm$ConnectionStatus != "Matched", , drop = FALSE]
+          if (!nrow(issue_rows)) {
+            div(class = "d-flex align-items-center gap-2 flex-wrap",
+                tags$span("Connections:", class = "stat-label"),
+                tags$span("All matched", class = "stat-type"))
+          } else {
+            shown <- head(issue_rows, 4)
+            div(
+              class = "mi-connection-review",
+              div(class = "d-flex align-items-center gap-2 mb-1",
+                  tags$span("Connection review:", class = "stat-label"),
+                  tags$span(paste0(nrow(issue_rows), " item(s) need review"),
+                            class = "text-warning small fw-semibold")),
+              tags$ul(class = "mb-0 ps-3",
+                      lapply(seq_len(nrow(shown)), function(i) {
+                        tags$li(
+                          tags$span(shown$ConnectionStatus[i], class = "fw-semibold"),
+                          tags$span(" - "),
+                          tags$span(shown$MainModelVariableName[i])
+                        )
+                      })),
+              if (nrow(issue_rows) > nrow(shown))
+                tags$small(paste0("+", nrow(issue_rows) - nrow(shown), " more"),
+                           class = "text-muted")
+            )
+          }
+        }
+      }
       div(class = "mi-box",
           div(class = "mi-header",
               div(class = "mi-header-left",
@@ -1388,10 +1746,20 @@ mod_setup_server <- function(id) {
                     tags$span("keyword fallback",       class = "stat-label")),
               div(tags$span(mi$summary$with_roi,  class = "stat-number"),
                   tags$span("with ROI",           class = "stat-label")),
+              div(tags$span(mi$summary$connection_matched %||% 0, class = "stat-number"),
+                  tags$span("connections matched", class = "stat-label")),
+              if ((mi$summary$connection_partial %||% 0) > 0)
+                div(tags$span(mi$summary$connection_partial, class = "stat-number text-warning"),
+                    tags$span("partial connections", class = "stat-label")),
+              if ((mi$summary$connection_missing_rae %||% 0) > 0)
+                div(tags$span(mi$summary$connection_missing_rae, class = "stat-number text-danger"),
+                    tags$span("missing RAE", class = "stat-label")),
               div(tags$span(mi$summary$var_key_type, class = "stat-type"),
                   tags$span("var_key type",          class = "stat-label"))),
           if (!is.null(schema_info))
-            div(style = "border-top:1px solid #e2e8f0;padding:8px 16px 10px;", schema_info))
+            div(style = "border-top:1px solid #e2e8f0;padding:8px 16px 10px;", schema_info),
+          if (!is.null(connection_info))
+            div(style = "border-top:1px solid #e2e8f0;padding:8px 16px 10px;", connection_info))
     })
     
     output$update_label_ui <- renderUI({
@@ -1791,9 +2159,11 @@ mod_setup_server <- function(id) {
       n_required_loaded <- sum(required_loaded)
       base_ready <- required_files_ready()
       rois_missing <- is.null(rv$channels_rois)
+      contract_warnings <- contract_warning_items()
       status <- rv$validation_status %||% "pending"
       severity <- if (!base_ready) "blocker" else if (identical(status, "red")) "blocker"
       else if (rois_missing) "warning"
+      else if (length(contract_warnings)) "warning"
       else if (identical(status, "yellow")) "warning"
       else if (identical(status, "green")) "ok" else "pending"
       message <- if (!base_ready) {
@@ -1805,6 +2175,8 @@ mod_setup_server <- function(id) {
           "You can continue and use Channels, Process and Export.",
           "However, ROIs by Channel is not loaded, so seed_for_indices.csv will export without ROI values."
         )
+      } else if (length(contract_warnings)) {
+        "Files are loaded, but Setup found schema or mapping warnings. Review Upload summary before processing."
       } else if (identical(severity, "ok")) {
         "Files validated. Channels and processing can continue."
       } else if (identical(severity, "warning")) {
@@ -2074,9 +2446,12 @@ mod_setup_server <- function(id) {
           dates_df              = rv$dates_df,
           details_raw           = rv$details_raw,
           details               = rv$details,
-          channels_rois         = rv$channels_rois,
-          vof_data              = rv$vof_data,
-          schema_metadata       = rv$schema_metadata,
+               channels_rois         = rv$channels_rois,
+               vof_data              = rv$vof_data,
+               schema_metadata       = rv$schema_metadata,
+               variable_connection_map = rv$media_index$connection_map %||% NULL,
+               file_contracts        = rv$file_contracts,
+               cross_file_warnings   = rv$cross_file_warnings,
           side_mapping_nonfocus = if (mode == "update") rv$side_mapping_nonfocus else NULL,
           app_mode              = mode)
       }),
@@ -2093,6 +2468,10 @@ mod_setup_server <- function(id) {
              weight_variable_enabled = TRUE,
              weight_variable_name = input$weight_variable_name %||% "",
              weight_variable_smart_filter = weight_smart_enabled(),
+             required_ready = required_files_ready(),
+             roi_optional_missing = is.null(rv$channels_rois),
+             file_contracts = rv$file_contracts,
+             cross_file_warnings = rv$cross_file_warnings,
              app_mode          = mode)
       }),
       media_index       = reactive(rv$media_index),
@@ -2114,6 +2493,9 @@ mod_setup_server <- function(id) {
           missing_files     = unname(missing),
           optional_missing_files = unname(optional_missing),
           rois_loaded       = !is.null(rv$channels_rois),
+          roi_optional_missing = is.null(rv$channels_rois),
+          file_contracts     = rv$file_contracts,
+          cross_file_warnings = rv$cross_file_warnings,
           validation_status = rv$validation_status %||% "pending",
           media_ready       = !is.null(rv$media_index)
         )

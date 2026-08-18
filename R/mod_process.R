@@ -1,6 +1,6 @@
-# ═══════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # R/mod_process.R
-# ═══════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 mod_process_ui <- function(id) {
   ns <- NS(id)
@@ -27,11 +27,7 @@ mod_process_ui <- function(id) {
         div(class = "process-run-summary",
             uiOutput(ns("batch_summary")),
             uiOutput(ns("error_summary"))),
-        uiOutput(ns("status")),
-        hr(class = "hr-sm"),
-        downloadButton(ns("dl_config_process"),
-                       label = tagList(" Download config CSV"),
-                       class = "btn-outline-secondary btn-sm w-100 process-config-download")
+        uiOutput(ns("status"))
       ),
       uiOutput(ns("merge_history_card"))
     ),
@@ -63,7 +59,7 @@ mod_process_ui <- function(id) {
   )
 }
 
-# ── Server ──────────────────────────────────────────────────────────────────
+# â”€â”€ Server â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 mod_process_server <- function(id, data, config, channels,
                                update_merges = NULL,
                                config_import_event = reactive(NULL)) {
@@ -326,7 +322,7 @@ mod_process_server <- function(id, data, config, channels,
       })
     }
 
-    # ── Channel selector ───────────────────────────────────────────────────
+    # â”€â”€ Channel selector â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     observe({
       updateSelectInput(session, "channel_select", choices = names(channels()))
     })
@@ -354,7 +350,7 @@ mod_process_server <- function(id, data, config, channels,
                   class = "ch-editor-counter"))
     })
 
-    # ── Status panel ───────────────────────────────────────────────────────
+    # â”€â”€ Status panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     status_trigger <- reactive({
       results_trigger()
       names(channels())
@@ -397,7 +393,7 @@ mod_process_server <- function(id, data, config, channels,
               if (n_saved > 0)
                 tags$span(paste0(n_saved, " saved"), class = "badge-saved",
                           title = paste0(n_saved,
-                                         " merge(s) — auto-applied on process"))))
+                                         " merge(s) â€” auto-applied on process"))))
       }))
     })
 
@@ -411,51 +407,7 @@ mod_process_server <- function(id, data, config, channels,
                error = \(e) NULL)
     }, ignoreInit = TRUE)
 
-    # ── Download config CSV — same format as mod_channels ─────────────────
-    output$dl_config_process <- downloadHandler(
-      filename = function()
-        paste0("channel_config_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
-      content = function(file) {
-        cfg_data <- isolate(channels())
-        if (!length(cfg_data)) {
-          readr::write_csv(data.frame(), file); return()
-        }
-        df <- export_channels_csv(cfg_data, config())
-        if (nrow(df) > 0 && "Type" %in% names(df)) {
-          cfg_idx <- which(trimws(df$Type) == "Config")
-          if (length(cfg_idx) > 0) {
-            df$MinPeriod    <- ""
-            df$MaxPeriod    <- ""
-            df$MediaChannel <- ""
-            rois       <- tryCatch(data()$channels_rois, error = \(e) NULL)
-            has_roi_ch <- !is.null(rois) &&
-              all(c("MainModelVariableName", "Channel") %in% names(rois))
-            for (i in cfg_idx) {
-              ch_nm <- df$Channel[i]
-              if (ch_nm %in% names(cfg_data)) {
-                ch_cfg <- cfg_data[[ch_nm]]
-                min_d <- tryCatch(as.Date(ch_cfg$min_period), error = \(e) NA)
-                max_d <- tryCatch(as.Date(ch_cfg$max_period), error = \(e) NA)
-                if (!is.null(min_d) && !is.na(min_d))
-                  df$MinPeriod[i] <- format(min_d, "%Y-%m-%d")
-                if (!is.null(max_d) && !is.na(max_d))
-                  df$MaxPeriod[i] <- format(max_d, "%Y-%m-%d")
-                if (has_roi_ch) {
-                  mv       <- ch_cfg$model_variable %||% ch_nm
-                  rows_roi <- rois[trimws(rois$MainModelVariableName) == trimws(mv),
-                                   "Channel", drop = TRUE]
-                  rows_roi <- rows_roi[!is.na(rows_roi) & nzchar(trimws(rows_roi))]
-                  if (length(rows_roi)) df$MediaChannel[i] <- trimws(rows_roi[1])
-                }
-              }
-            }
-          }
-        }
-        readr::write_csv(df, file, na = "")
-      }
-    )
-
-    # ── run_one ────────────────────────────────────────────────────────────
+    # â”€â”€ run_one â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     run_one <- function(nm, do_gc = TRUE) {
       d    <- data()
       cfg  <- channels()[[nm]]; req(cfg)
@@ -625,7 +577,7 @@ mod_process_server <- function(id, data, config, channels,
       if (!length(imported)) return()
 
       showNotification(
-        paste0("Config imported for ", length(imported),
+        paste0("Splits Metadata imported for ", length(imported),
                " channel(s). Review Channels, then process when ready."),
         type = "message",
         duration = 7
@@ -665,7 +617,7 @@ mod_process_server <- function(id, data, config, channels,
                 tags$span(errs[[nm]], class = "process-error-message")))))
     })
 
-    # ── Process All — optimized ────────────────────────────────────────────
+    # â”€â”€ Process All â€” optimized â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     observeEvent(input$btn_all, {
       if (isTRUE(is_batch_processing())) {
         showNotification("Processing is already running.", type = "warning"); return()
@@ -927,7 +879,7 @@ mod_process_server <- function(id, data, config, channels,
                                skipped = 0L, failed = n_err, elapsed = elapsed))
     })
 
-    # ── Period filter UI ───────────────────────────────────────────────────
+    # â”€â”€ Period filter UI â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     output$period_filter_ui <- renderUI({
       nm  <- input$channel_select; if (!valid_nm(nm)) return(NULL)
       res <- results_store[[nm]]
@@ -951,7 +903,7 @@ mod_process_server <- function(id, data, config, channels,
               tags$span(paste0("Non-Focus: ", n_nf), class = "badge-nonfocus")))
     })
 
-    # ── current_act_data ───────────────────────────────────────────────────
+    # â”€â”€ current_act_data â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     build_current_act_data <- function(filter_val = "focus") {
       nm  <- req(input$channel_select)
       res <- req(results_store[[nm]])
@@ -1082,7 +1034,7 @@ mod_process_server <- function(id, data, config, channels,
       out
     }
 
-    # ── current_spend_data ─────────────────────────────────────────────────
+    # â”€â”€ current_spend_data â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     build_current_spend_from_rae <- function(nm, cfg, filter_val = "focus") {
       d <- tryCatch(data(), error = \(e) NULL)
       if (is.null(d) || is.null(d$all_rags) ||
@@ -1325,7 +1277,7 @@ mod_process_server <- function(id, data, config, channels,
       )
     }) %>% bindCache(input$channel_select, input$model_metric, results_trigger())
 
-    # ── Activity KPIs ──────────────────────────────────────────────────────
+    # â”€â”€ Activity KPIs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     output$activity_kpis <- renderUI({
       nm <- input$channel_select
       if (!valid_nm(nm) || is.null(results_store[[nm]])) return(NULL)
@@ -1365,7 +1317,7 @@ mod_process_server <- function(id, data, config, channels,
                     tags$small(k$label,  class = "kpi-label")))))
     })
 
-    # ── Threshold UI ───────────────────────────────────────────────────────
+    # â”€â”€ Threshold UI â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     output$threshold_ui <- renderUI({
       nm <- input$channel_select
       if (!valid_nm(nm) || is.null(results_store[[nm]])) return(NULL)
@@ -1383,7 +1335,7 @@ mod_process_server <- function(id, data, config, channels,
                     " Splits below threshold are shown in red. Default is 1%."))
     })
 
-    # ── Merge plan toolbar ─────────────────────────────────────────────────
+    # â”€â”€ Merge plan toolbar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     output$merge_plan_toolbar <- renderUI({
       nm <- input$channel_select
       if (!valid_nm(nm) || is.null(results_store[[nm]])) return(NULL)
@@ -1432,12 +1384,12 @@ mod_process_server <- function(id, data, config, channels,
       }
     )
 
-    # ── Plan merge ─────────────────────────────────────────────────────────
+    # â”€â”€ Plan merge â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     clean_merge_plan_names <- function(x) {
       x <- trimws(as.character(x))
       x <- sub("^\ufeff", "", x)
       x <- sub("^<U\\+FEFF>", "", x)
-      x <- sub("^Ã¯\\.\\.", "", x)
+      x <- sub("^ÃƒÂ¯\\.\\.", "", x)
       x
     }
 
@@ -1521,7 +1473,7 @@ mod_process_server <- function(id, data, config, channels,
       plan <- hydrate_plan_variable_split(plan)
       names(plan) <- sub("^\ufeff", "", names(plan))
       names(plan) <- sub("^<U\\+FEFF>", "", names(plan))
-      names(plan) <- sub("^ï\\.\\.", "", names(plan))
+      names(plan) <- sub("^Ã¯\\.\\.", "", names(plan))
 
       missing_cols <- setdiff(c("VariableSplit", "MergeName"), names(plan))
       if (length(missing_cols) > 0) {
@@ -1575,7 +1527,7 @@ mod_process_server <- function(id, data, config, channels,
                            VariableSplit %in% selected_splits,
                            period == merge_view))) {
             n_skipped <- n_skipped + 1L
-            showNotification(paste0("'", merge_name, "': no data — skipped."),
+            showNotification(paste0("'", merge_name, "': no data â€” skipped."),
                              type = "warning", duration = 5); next
           }
 
@@ -1619,7 +1571,7 @@ mod_process_server <- function(id, data, config, channels,
       showNotification(
         paste0(n_ok, " group(s) merged",
                if (n_skipped > 0) paste0(" (", n_skipped, " skipped)") else "",
-               if (!is.null(update_merges) && n_ok > 0) " — saved to config." else "."),
+               if (!is.null(update_merges) && n_ok > 0) " â€” saved to config." else "."),
         type = if (n_ok > 0) "message" else "warning")
     })
 
@@ -1670,7 +1622,7 @@ mod_process_server <- function(id, data, config, channels,
       )
     })
 
-    # ── Undo ───────────────────────────────────────────────────────────────
+    # â”€â”€ Undo â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     observeEvent(input$btn_undo, {
       nm <- req(input$channel_select); req(valid_nm(nm))
       hist <- get_hist(nm)
@@ -1691,7 +1643,7 @@ mod_process_server <- function(id, data, config, channels,
       showNotification("Last merge undone \u2014 removed from config.", type = "message")
     })
 
-    # ── Reset merges ───────────────────────────────────────────────────────
+    # â”€â”€ Reset merges â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     observeEvent(input$btn_reset_merges, {
       nm <- req(input$channel_select); req(valid_nm(nm))
       showModal(modalDialog(
@@ -1719,7 +1671,7 @@ mod_process_server <- function(id, data, config, channels,
                        type = "message")
     }, ignoreInit = TRUE)
 
-    # ── Merge history card ─────────────────────────────────────────────────
+    # â”€â”€ Merge history card â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     output$merge_history_card <- renderUI({
       nm   <- input$channel_select; if (!valid_nm(nm)) return(NULL)
       log  <- get_log(nm); hist <- get_hist(nm)
@@ -1768,7 +1720,7 @@ mod_process_server <- function(id, data, config, channels,
       )
     })
 
-    # ── Activity table ─────────────────────────────────────────────────────
+    # â”€â”€ Activity table â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     output$diag_act <- DT::renderDT({
       nm  <- req(input$channel_select); req(results_store[[nm]])
       metric <- active_model_metric()
@@ -1833,7 +1785,7 @@ mod_process_server <- function(id, data, config, channels,
                     color = styleInterval(threshold, c("#dc3545", "#333")))
     }, server = TRUE)
 
-    # ── Spend table ────────────────────────────────────────────────────────
+    # â”€â”€ Spend table â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     output$diag_cost <- DT::renderDT({
       nm <- input$channel_select
       if (!valid_nm(nm))
@@ -1901,7 +1853,7 @@ mod_process_server <- function(id, data, config, channels,
       dt
     }, server = TRUE)
 
-    # ── Total Check ────────────────────────────────────────────────────────
+    # â”€â”€ Total Check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     total_check_data <- reactive({
       results_trigger()
       nm  <- req(input$channel_select)
@@ -2153,7 +2105,7 @@ mod_process_server <- function(id, data, config, channels,
         formatStyle("Status", backgroundColor = "#f8d7da")
     })
 
-    # ── Return ─────────────────────────────────────────────────────────────
+    # â”€â”€ Return â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     list(
       results       = reactive(reactiveValuesToList(results_store)),
       clean_results = reactive(reactiveValuesToList(clean_store)),

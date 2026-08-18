@@ -555,6 +555,10 @@ export_channels_csv <- function(channels, global_config = NULL) {
   dplyr::select(out, dplyr::any_of(cfg_order), dplyr::everything())
 }
 
+export_splits_metadata_csv <- function(channels, global_config = NULL) {
+  export_channels_csv(channels, global_config)
+}
+
 # =============================================================================
 # KEYWORD DETECTORS
 # =============================================================================
@@ -725,6 +729,7 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
   channels_rois <- clean_data_columns(channels_rois)
 
   channels <- list()
+  connection_rows <- list()
   geo_col  <- cross_cols[1]
   normalize_model_var <- function(x) {
     out <- trimws(as.character(x))
@@ -858,6 +863,35 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
     unique(trimws(as.character(main_data$VariableName))) else character(0)
   all_main_vn <- all_main_vn[!is.na(all_main_vn) & nzchar(all_main_vn)]
 
+  # Build a light RAE view for connection auditing. The full RAE can be large,
+  # so channel-level diagnostics should start from indexed VariableName rows.
+  audit_cols <- unique(c(
+    "VariableName", "Period", "Geography",
+    cross_cols,
+    if (!is.null(schema_metadata)) schema_metadata$useful_long else character(0)
+  ))
+  audit_cols <- intersect(audit_cols, names(main_data))
+  main_audit_data <- if (!is.null(main_data) &&
+                         "VariableName" %in% names(main_data) &&
+                         length(audit_cols)) {
+    main_data[, audit_cols, drop = FALSE]
+  } else {
+    data.frame()
+  }
+  if (nrow(main_audit_data)) {
+    main_audit_data$.__vn_key <- tolower(trimws(as.character(main_audit_data$VariableName)))
+    if ("Period" %in% names(main_audit_data)) {
+      main_audit_data$.__period <- if (inherits(main_audit_data$Period, "Date")) {
+        main_audit_data$Period
+      } else {
+        parse_period_robust(main_audit_data$Period)
+      }
+    }
+    main_rows_by_vn <- split(seq_len(nrow(main_audit_data)), main_audit_data$.__vn_key)
+  } else {
+    main_rows_by_vn <- list()
+  }
+
  # OPT-4: Pre-index schema name_lookup as named list O(1) lookup
   schema_lookup_by_orig <- NULL
   if (!is.null(schema_metadata) &&
@@ -973,6 +1007,116 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
     if (!is.na(min_raw) && is.na(max_raw)) return(min_raw - 1)
     if (is.na(min_raw) && !is.na(max_raw)) return(max_raw)
     as.Date(NA_character_)
+  }
+
+  analytical_exists <- function(x) {
+    x <- trimws(as.character(x %||% character(0)))
+    if (!length(x) || !length(analytical_model_cols)) return(rep(FALSE, length(x)))
+    x %in% analytical_model_cols |
+      normalize_model_var(x) %in% analytical_model_norm
+  }
+
+  source_base_from_analytical <- function(anal_var_names) {
+    anal_var_names <- unique(trimws(as.character(anal_var_names %||% character(0))))
+    anal_var_names <- anal_var_names[!is.na(anal_var_names) & nzchar(anal_var_names)]
+    if (!length(anal_var_names)) return(character(0))
+    if (!is.null(schema_lookup_by_orig)) {
+      rows <- dplyr::bind_rows(
+        schema_lookup_by_orig[intersect(anal_var_names, names(schema_lookup_by_orig))]
+      )
+      if (nrow(rows) > 0 && "VariableName" %in% names(rows)) {
+        vals <- unique(trimws(as.character(rows$VariableName)))
+        vals <- vals[!is.na(vals) & nzchar(vals)]
+        if (length(vals)) return(vals)
+      }
+    }
+    unique(trimws(stringr::str_remove(anal_var_names, "_Total(_Total)*$")))
+  }
+
+  useful_longitudinal_filters <- function(anal_var_names) {
+    if (is.null(schema_metadata) ||
+        is.null(schema_metadata$name_lookup) ||
+        !length(schema_metadata$useful_long %||% character(0))) {
+      return(list(text = "", filters = list()))
+    }
+    lookup <- schema_metadata$name_lookup
+    filters <- list()
+    text <- character(0)
+    for (dim in schema_metadata$useful_long %||% character(0)) {
+      vals <- get_useful_long_values(anal_var_names, lookup, dim)
+      vals <- unique(trimws(as.character(vals)))
+      vals <- vals[!is.na(vals) & nzchar(vals)]
+      if (!length(vals)) next
+      filters[[dim]] <- vals
+      text <- c(text, paste0(dim, ": ", paste(vals, collapse = ", ")))
+    }
+    list(text = paste(text, collapse = " | "), filters = filters)
+  }
+
+  filter_effective_rae_for_channel <- function(cfg, min_p = NULL, max_p = NULL,
+                                               segment_overrides = list()) {
+    if (!nrow(main_audit_data) || !"VariableName" %in% names(main_audit_data)) {
+      return(data.frame())
+    }
+    vi <- as.character(cfg$varname_include %||% character(0))
+    vi <- vi[!is.na(vi) & nzchar(trimws(vi))]
+    if (length(vi)) {
+      vi <- expand_varname_include_with_spend(
+        all_main_vn,
+        vi,
+        cfg$spend_keyword %||% NULL,
+        keyword_dict
+      )
+      vi <- expand_analytical_keys_to_variable_names(all_main_vn, vi)
+      match_mode <- cfg$varname_match_mode %||%
+        if (identical(cfg$source %||% "", "vof")) "exact" else "prefix"
+      if (identical(match_mode, "exact")) {
+        keys <- intersect(tolower(trimws(vi)), names(main_rows_by_vn))
+        idx <- if (length(keys)) unlist(main_rows_by_vn[keys], use.names = FALSE) else integer(0)
+        d <- main_audit_data[idx, , drop = FALSE]
+      } else {
+        vn <- trimws(as.character(main_audit_data$VariableName))
+        pattern <- paste(paste0("^", stringr::str_replace_all(vi, "([\\W])", "\\\\\\1")), collapse = "|")
+        d <- main_audit_data[grepl(pattern, vn, ignore.case = TRUE, perl = TRUE), , drop = FALSE]
+      }
+    } else {
+      d <- main_audit_data
+    }
+    d <- filter_to_analytical_varkey_combinations(d, cfg, schema_metadata)
+    if ("Period" %in% names(d)) {
+      p <- if (".__period" %in% names(d)) d$.__period else if (inherits(d$Period, "Date")) d$Period else parse_period_robust(d$Period)
+      keep <- rep(TRUE, nrow(d))
+      if (!is.null(min_p) && !is.na(min_p)) keep <- keep & p >= as.Date(min_p)
+      if (!is.null(max_p) && !is.na(max_p)) keep <- keep & p <= as.Date(max_p)
+      keep[is.na(keep)] <- FALSE
+      d <- d[keep, , drop = FALSE]
+    }
+    geo_exc <- character(0)
+    if (length(segment_overrides) > 0) {
+      geo_exc <- unique(unlist(lapply(segment_overrides, function(o) {
+        o$geography_exclude %||% character(0)
+      }), use.names = FALSE))
+    }
+    if (length(geo_exc) && "Geography" %in% names(d)) {
+      for (g in geo_exc[nzchar(geo_exc)]) {
+        d <- d[!grepl(g, d$Geography, ignore.case = TRUE), , drop = FALSE]
+      }
+    }
+    d[, setdiff(names(d), c(".__vn_key", ".__period")), drop = FALSE]
+  }
+
+  metric_rows_from_scope <- function(scope, activity_keyword, spend_keyword) {
+    vn <- trimws(as.character(scope$VariableName %||% character(0)))
+    list(
+      activity_rows = if (nzchar(activity_keyword %||% "")) sum(grepl(activity_keyword, vn, ignore.case = TRUE), na.rm = TRUE) else 0L,
+      spend_rows = if (nzchar(spend_keyword %||% "")) sum(grepl(spend_keyword, vn, ignore.case = TRUE), na.rm = TRUE) else 0L,
+      activity_vars = if (nzchar(activity_keyword %||% "")) unique(vn[grepl(activity_keyword, vn, ignore.case = TRUE)]) else character(0),
+      spend_vars = if (nzchar(spend_keyword %||% "")) unique(vn[grepl(spend_keyword, vn, ignore.case = TRUE)]) else character(0)
+    )
+  }
+
+  add_connection_row <- function(...) {
+    connection_rows[[length(connection_rows) + 1L]] <<- data.frame(..., stringsAsFactors = FALSE)
   }
 
   # OPT-6: Fast schema derive using pre-indexed lookup
@@ -1148,6 +1292,55 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
       if (length(r_num)) roi_val <- mean(ri[[r_num[1]]], na.rm = TRUE)
     }
 
+    tmp_cfg <- list(
+      channel_name = mv,
+      model_variable = mv,
+      varname_include = varname_include,
+      varname_match_mode = "exact",
+      analytical_varkeys = anal_var_names,
+      source = "vof",
+      activity_keyword = act_kw,
+      spend_keyword = spend_kw
+    )
+    long_filters <- useful_longitudinal_filters(anal_var_names)
+    effective_scope <- filter_effective_rae_for_channel(
+      tmp_cfg,
+      min_p = min_p,
+      max_p = max_p,
+      segment_overrides = segment_overrides
+    )
+    metric_counts <- metric_rows_from_scope(effective_scope, act_kw, spend_kw)
+    paired_spend_candidates <- expand_varname_include_with_spend(
+      all_main_vn,
+      varname_include,
+      spend_kw,
+      keyword_dict
+    )
+    paired_spend_exists <- length(setdiff(
+      tolower(trimws(paired_spend_candidates)),
+      tolower(trimws(varname_include))
+    )) > 0
+    primary_rows <- if (identical(normalize_model_metric(model_metric), "spend")) {
+      metric_counts$spend_rows
+    } else {
+      metric_counts$activity_rows
+    }
+    analytical_ok <- any(analytical_exists(anal_var_names))
+    connection_status <- if (!isTRUE(analytical_ok)) {
+      "Missing Analytical"
+    } else if (!nrow(effective_scope)) {
+      "Missing RAE"
+    } else if (primary_rows == 0L ||
+               (metric_counts$spend_rows == 0L &&
+                isTRUE(paired_spend_exists))) {
+      "Partial"
+    } else {
+      "Matched"
+    }
+    source_rae_vars <- unique(trimws(as.character(effective_scope$VariableName %||% character(0))))
+    source_rae_vars <- source_rae_vars[!is.na(source_rae_vars) & nzchar(source_rae_vars)]
+    source_base_vars <- source_base_from_analytical(anal_var_names)
+
     channels[[mv]] <- list(
       channel_name      = mv,
       model_variable    = mv,
@@ -1172,7 +1365,36 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
       source            = "vof",
       media_channel     = media_channel,
       sub_channel       = sub_channel,
-      effect            = effect
+      effect            = effect,
+      connection_source = "VOF",
+      connection_status = connection_status,
+      matched_analytical_cols = anal_var_names,
+      source_variable_names_rae = source_rae_vars,
+      source_base_variables = source_base_vars,
+      activity_source_variables_rae = metric_counts$activity_vars,
+      spend_source_variables_rae = metric_counts$spend_vars,
+      activity_rows = metric_counts$activity_rows,
+      spend_rows = metric_counts$spend_rows,
+      useful_longitudinal_filters = long_filters$filters,
+      useful_longitudinal_filters_text = long_filters$text
+    )
+
+    add_connection_row(
+      MainModelVariableName = mv,
+      AnalyticalVariableName = paste(anal_var_names, collapse = " | "),
+      ModelDetailsVariableName = if (normalize_model_var(mv) %in% in_model_norm) mv else "",
+      SourceVariableNameRAE = paste(source_rae_vars, collapse = " | "),
+      MediaChannel = media_channel,
+      SubChannel = sub_channel,
+      Effect = effect,
+      Metric = if ("Metric" %in% names(vof_rows)) paste(unique(trimws(as.character(vof_rows$Metric))), collapse = " | ") else "",
+      ModelMetric = model_metric,
+      MinPeriod = if (!is.na(min_p)) as.character(min_p) else "",
+      MaxPeriod = if (!is.na(max_p)) as.character(max_p) else "",
+      GeographyRule = if (length(segment_overrides)) "VOF geography include/exclude" else "All",
+      UsefulLongitudinalFilters = long_filters$text,
+      ConnectionSource = "VOF",
+      ConnectionStatus = connection_status
     )
   }
 
@@ -1240,7 +1462,36 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
         source            = "keyword_fallback",
         media_channel     = "",
         sub_channel       = "",
-        effect            = ""
+        effect            = "",
+        connection_source = "Fallback",
+        connection_status = "Matched",
+        matched_analytical_cols = col,
+        source_variable_names_rae = varname_include,
+        source_base_variables = source_base_from_analytical(col),
+        activity_source_variables_rae = varname_include[grepl(act_kw, varname_include, ignore.case = TRUE)],
+        spend_source_variables_rae = character(0),
+        activity_rows = NA_integer_,
+        spend_rows = NA_integer_,
+        useful_longitudinal_filters = list(),
+        useful_longitudinal_filters_text = ""
+      )
+
+      add_connection_row(
+        MainModelVariableName = col,
+        AnalyticalVariableName = col,
+        ModelDetailsVariableName = if (normalize_model_var(col) %in% in_model_norm) col else "",
+        SourceVariableNameRAE = paste(varname_include, collapse = " | "),
+        MediaChannel = "",
+        SubChannel = "",
+        Effect = "",
+        Metric = act_kw,
+        ModelMetric = "activity",
+        MinPeriod = if (!is.na(an_min_date)) as.character(an_min_date) else "",
+        MaxPeriod = if (!is.na(an_max_date)) as.character(an_max_date) else "",
+        GeographyRule = "All",
+        UsefulLongitudinalFilters = "",
+        ConnectionSource = "Fallback",
+        ConnectionStatus = "Matched"
       )
     }
   }
@@ -1328,9 +1579,32 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
   n_vof      <- sum(sapply(channels, \(c) identical(c$source, "vof")))
   n_fallback <- sum(sapply(channels, \(c) identical(c$source, "keyword_fallback")))
   n_with_roi <- sum(sapply(channels, \(c) !is.na(c$roi %||% NA_real_)))
+  connection_map <- if (length(connection_rows)) {
+    dplyr::bind_rows(connection_rows)
+  } else {
+    data.frame(
+      MainModelVariableName = character(0),
+      AnalyticalVariableName = character(0),
+      ModelDetailsVariableName = character(0),
+      SourceVariableNameRAE = character(0),
+      MediaChannel = character(0),
+      SubChannel = character(0),
+      Effect = character(0),
+      Metric = character(0),
+      ModelMetric = character(0),
+      MinPeriod = character(0),
+      MaxPeriod = character(0),
+      GeographyRule = character(0),
+      UsefulLongitudinalFilters = character(0),
+      ConnectionSource = character(0),
+      ConnectionStatus = character(0),
+      stringsAsFactors = FALSE
+    )
+  }
 
   list(
     channels        = channels,
+    connection_map  = connection_map,
     var_key_info    = vk_info,
     schema_metadata = schema_metadata,
     summary = list(
@@ -1338,6 +1612,10 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
       from_vof       = n_vof,
       from_fallback  = n_fallback,
       with_roi       = n_with_roi,
+      connection_matched = sum(connection_map$ConnectionStatus == "Matched", na.rm = TRUE),
+      connection_partial = sum(connection_map$ConnectionStatus == "Partial", na.rm = TRUE),
+      connection_missing_rae = sum(connection_map$ConnectionStatus == "Missing RAE", na.rm = TRUE),
+      connection_missing_analytical = sum(connection_map$ConnectionStatus == "Missing Analytical", na.rm = TRUE),
       var_key_type   = vk_info$type,
       vof_coverage   = round(vk_info$coverage * 100, 1),
       xs_dims        = if (!is.null(schema_metadata))

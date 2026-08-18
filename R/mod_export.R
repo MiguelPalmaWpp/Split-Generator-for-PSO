@@ -1057,8 +1057,9 @@ mod_export_server <- function(id, results, data, config, channels,
           VariableSplit = dplyr::coalesce(.data$MergedSplitName, .data$VariableSplit)
         ) %>%
         dplyr::select(-dplyr::any_of("MergedSplitName")) %>%
-        dplyr::group_by(.data$VariableSplit, .data$Geography) %>%
+        dplyr::group_by(.data$VariableSplit) %>%
         dplyr::summarise(
+          Geography = stable_seed_meta(.data$Geography),
           total_activity = sum(.data$total_activity, na.rm = TRUE),
           total_spend = sum(.data$total_spend, na.rm = TRUE),
           dplyr::across(dplyr::all_of(seed_meta_cols), stable_seed_meta),

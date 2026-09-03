@@ -1339,6 +1339,163 @@ min-width: 0;
 min-width: 0;
 }
 
+.setup-validation-shell {
+background: #ffffff;
+border: 1px solid #dbe5f1;
+border-radius: 8px;
+box-shadow: 0 1px 4px rgba(31, 45, 61, 0.04);
+overflow: hidden;
+}
+
+.setup-validation-shell summary::-webkit-details-marker {
+display: none;
+}
+
+.setup-validation-summary-toggle {
+align-items: center;
+cursor: pointer;
+display: grid;
+gap: 10px;
+grid-template-columns: minmax(220px, auto) minmax(240px, 1fr) auto auto;
+list-style: none;
+min-height: 48px;
+padding: 10px 16px;
+}
+
+.setup-validation-title {
+align-items: center;
+display: flex;
+gap: 10px;
+min-width: 0;
+}
+
+.setup-validation-title strong {
+color: #1f2d3d;
+font-size: 13px;
+font-weight: 700;
+}
+
+.setup-validation-status {
+color: #64748b;
+display: block;
+font-size: 11px;
+font-weight: 700;
+line-height: 1.25;
+margin-top: 2px;
+}
+
+.setup-validation-icon {
+align-items: center;
+border-radius: 8px;
+display: inline-flex;
+height: 28px;
+justify-content: center;
+width: 28px;
+}
+
+.setup-validation-message {
+color: #64748b;
+font-size: 12px;
+line-height: 1.35;
+min-width: 0;
+overflow: hidden;
+text-overflow: ellipsis;
+white-space: nowrap;
+}
+
+.setup-validation-count,
+.setup-validation-action {
+border-radius: 999px;
+font-size: 11px;
+font-weight: 700;
+line-height: 1;
+padding: 7px 10px;
+white-space: nowrap;
+}
+
+.setup-validation-action {
+background: #f1f5fb;
+color: #5b9bd5;
+}
+
+.setup-validation-count {
+background: #f8fafc;
+color: #64748b;
+}
+
+.setup-validation-ok .setup-validation-icon,
+.setup-validation-ok .setup-validation-count {
+background: #e8f8ef;
+color: #159447;
+}
+
+.setup-validation-warning .setup-validation-icon,
+.setup-validation-warning .setup-validation-count,
+.setup-validation-pending .setup-validation-icon,
+.setup-validation-pending .setup-validation-count {
+background: #fff7df;
+color: #b45309;
+}
+
+.setup-validation-blocker .setup-validation-icon,
+.setup-validation-blocker .setup-validation-count {
+background: #fdecec;
+color: #dc2626;
+}
+
+.setup-validation-ok {
+border-color: #cfeedd;
+}
+
+.setup-validation-warning,
+.setup-validation-pending {
+border-color: #f5d776;
+}
+
+.setup-validation-blocker {
+border-color: #f8b4b4;
+}
+
+.setup-validation-body {
+border-top: 1px solid #e6edf5;
+padding: 12px 16px 16px;
+}
+
+.setup-validation-shell:not([open]) .setup-validation-body {
+display: none;
+}
+
+.setup-validation-shell .validation-toggle-hide {
+display: none;
+}
+
+.setup-validation-shell[open] .validation-toggle-show {
+display: none;
+}
+
+.setup-validation-shell[open] .validation-toggle-hide {
+display: inline;
+}
+
+.setup-validation-collapsed-ok:not([open]) .setup-validation-message {
+color: #166534;
+}
+
+@media (max-width: 900px) {
+.setup-validation-summary-toggle {
+grid-template-columns: 1fr;
+}
+
+.setup-validation-message {
+white-space: normal;
+}
+
+.setup-validation-count,
+.setup-validation-action {
+justify-self: start;
+}
+}
+
 .global-params-card .card-body {
 padding: 16px 20px 18px;
 }

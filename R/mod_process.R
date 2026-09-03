@@ -147,6 +147,198 @@ mod_process_server <- function(id, data, config, channels,
       df
     }
 
+    collapse_total_check_values <- function(df, group_cols, value_col, out_col,
+                                            tolerance = 0.01) {
+      if (is.null(df) || !nrow(df) || !length(group_cols) ||
+          !value_col %in% names(df)) {
+        return(tibble::tibble())
+      }
+      group_cols <- intersect(group_cols, names(df))
+      if (!length(group_cols)) return(tibble::tibble())
+
+      df %>%
+        dplyr::select(dplyr::all_of(c(group_cols, value_col))) %>%
+        dplyr::rename(.__value = dplyr::all_of(value_col)) %>%
+        dplyr::mutate(.__value = suppressWarnings(as.numeric(.__value))) %>%
+        dplyr::group_by(dplyr::across(dplyr::all_of(group_cols))) %>%
+        dplyr::summarise(
+          .__total = {
+            vals <- .__value[!is.na(.__value) & .__value != 0]
+            if (!length(vals)) {
+              0
+            } else if ((max(vals) - min(vals)) <= tolerance) {
+              vals[1]
+            } else {
+              sum(vals, na.rm = TRUE)
+            }
+          },
+          .groups = "drop"
+        ) %>%
+        dplyr::rename(!!out_col := .__total)
+    }
+
+    build_total_check_splits_from_rae <- function(d, cfg, gcfg, nm, cross_cols,
+                                                  model_metric,
+                                                  scope_min_p, scope_max_p) {
+      empty <- function(reason) {
+        list(data = tibble::tibble(), reason = reason)
+      }
+      if (is.null(d) || is.null(d$all_rags) ||
+          !"Period" %in% names(d$all_rags) ||
+          !"VariableName" %in% names(d$all_rags) ||
+          !"VariableValue" %in% names(d$all_rags)) {
+        return(empty("RAE data is not available or is missing Period, VariableName or VariableValue."))
+      }
+
+      source_data <- as.data.frame(d$all_rags)
+      source_data$Period <- if (inherits(source_data$Period, "Date")) {
+        source_data$Period
+      } else {
+        parse_period_robust(source_data$Period)
+      }
+      source_data <- source_data[!is.na(source_data$Period), , drop = FALSE]
+      if (!nrow(source_data)) return(empty("No parseable RAE periods found."))
+
+      if (!is.na(scope_min_p)) source_data <- source_data[source_data$Period >= scope_min_p, , drop = FALSE]
+      if (!is.na(scope_max_p)) source_data <- source_data[source_data$Period <= scope_max_p, , drop = FALSE]
+      if (!nrow(source_data)) return(empty("No RAE rows in the effective channel/date range."))
+
+      vi <- cfg$varname_include %||% character(0)
+      vi <- vi[!is.na(vi) & nzchar(trimws(as.character(vi)))]
+      if (length(vi) > 0) {
+        vi <- expand_varname_include_with_spend(
+          unique(source_data$VariableName),
+          vi,
+          cfg$spend_keyword %||% NULL
+        )
+        vi <- expand_analytical_keys_to_variable_names(unique(source_data$VariableName), vi)
+        vi <- unique(trimws(as.character(vi)))
+        vi <- vi[!is.na(vi) & nzchar(vi)]
+      }
+      if (length(vi) > 0) {
+        vn <- trimws(as.character(source_data$VariableName))
+        match_mode <- cfg$varname_match_mode %||%
+          if (identical(cfg$source %||% "", "vof")) "exact" else "prefix"
+        keep <- if (identical(match_mode, "exact")) {
+          tolower(vn) %in% tolower(vi)
+        } else {
+          pattern <- paste(
+            paste0("^", stringr::str_replace_all(vi, "([\\W])", "\\\\\\1")),
+            collapse = "|"
+          )
+          grepl(pattern, vn, ignore.case = TRUE, perl = TRUE)
+        }
+        source_data <- source_data[keep %in% TRUE, , drop = FALSE]
+      }
+      if (!nrow(source_data)) return(empty("No RAE rows matched the channel VariableName filter."))
+
+      filter_regex <- function(df, col, pats) {
+        if (!col %in% names(df)) return(df)
+        for (p in pats %||% character(0)) {
+          if (nchar(p %||% "") > 0) {
+            df <- df[!grepl(p, df[[col]], ignore.case = TRUE), , drop = FALSE]
+          }
+        }
+        df
+      }
+
+      source_data <- filter_regex(source_data, "VariableName", cfg$varname_exclude)
+      source_data <- filter_regex(source_data, "Campaign", cfg$campaign_exclude)
+      source_data <- filter_regex(source_data, "Outlet", cfg$outlet_exclude)
+      source_data <- filter_regex(source_data, "Creative", cfg$creative_exclude)
+
+      has_geo_overrides <- length(cfg$segment_overrides %||% list()) > 0 &&
+        any(vapply(cfg$segment_overrides %||% list(), function(o) {
+          length(o$geography_exclude %||% character(0)) > 0
+        }, logical(1)))
+      if (!has_geo_overrides) {
+        source_data <- filter_regex(source_data, "Geography", cfg$geography_exclude)
+      }
+
+      source_data <- tryCatch(
+        filter_to_analytical_varkey_combinations(
+          source_data,
+          cfg,
+          d$schema_metadata %||% NULL
+        ),
+        error = function(e) source_data
+      )
+
+      if (has_geo_overrides) {
+        seg_ovr <- Filter(\(o) isTRUE(o$seg == 1L), cfg$segment_overrides %||% list())
+        geo_exc <- if (length(seg_ovr) > 0) {
+          seg_ovr[[1]]$geography_exclude %||% character(0)
+        } else {
+          cfg$geography_exclude %||% character(0)
+        }
+        source_data <- filter_regex(source_data, "Geography", geo_exc)
+      }
+      if (!nrow(source_data)) {
+        return(empty("No RAE rows remained after geo, exclusion and useful-longitudinal filters."))
+      }
+
+      source_data$VariableValue <- suppressWarnings(as.numeric(as.character(source_data$VariableValue)))
+      source_data$VariableValue[is.na(source_data$VariableValue)] <- 0
+      source_data <- apply_dimension_breaks(
+        source_data,
+        cfg$dimension_breaks %||% list(),
+        channel_name = cfg$channel_name %||% nm
+      )
+      source_data <- apply_dimension_aliases(source_data, cfg$dimension_aliases %||% list())
+
+      split_cols_technical <- unique(c("VariableName", cfg$split_columns %||% character(0)))
+      source_data$SplitName <- build_split_name_from_columns(source_data, split_cols_technical)
+
+      start_d <- tryCatch(as.Date(gcfg$start_report_date), error = \(e) as.Date(NA))
+      update_label <- gcfg$update_label %||% "Focus"
+      period_tag <- rep("focus", nrow(source_data))
+      if (!is.na(start_d)) {
+        period_tag[source_data$Period < start_d] <- "nonfocus"
+      }
+      nf_sfx <- build_split_period_suffix(
+        update_label,
+        focus = FALSE,
+        time_break_label = cfg$time_break_label %||% "",
+        geo_label = cfg$geo_label %||% ""
+      )
+      source_data$VariableSplit <- ifelse(
+        period_tag == "focus",
+        paste0(source_data$SplitName, "_", build_split_period_suffix(
+          update_label,
+          focus = TRUE,
+          geo_label = cfg$geo_label %||% ""
+        )),
+        paste0(source_data$SplitName, "_", nf_sfx)
+      )
+
+      spend_kw <- cfg$spend_keyword %||% "Spend"
+      act_kw <- cfg$activity_keyword %||% "Activity"
+      keep_metric <- if (identical(normalize_model_metric(model_metric), "spend")) {
+        grepl(spend_kw, source_data$VariableSplit, ignore.case = TRUE)
+      } else {
+        grepl(act_kw, source_data$VariableSplit, ignore.case = TRUE) &
+          !grepl(spend_kw, source_data$VariableSplit, ignore.case = TRUE)
+      }
+      source_data <- source_data[keep_metric %in% TRUE, , drop = FALSE]
+      if (!nrow(source_data)) {
+        metric_txt <- metric_label(model_metric)
+        keyword_txt <- if (identical(normalize_model_metric(model_metric), "spend")) spend_kw else act_kw
+        return(empty(paste0("No ", metric_txt, " RAE rows found after applying keyword '", keyword_txt, "'.")))
+      }
+
+      group_cols <- intersect(c(cross_cols, "Period"), names(source_data))
+      if (!"Period" %in% group_cols) group_cols <- c(group_cols, "Period")
+      group_cols <- unique(group_cols)
+      if (!length(group_cols)) return(empty("No common cross-section/date columns available in RAE."))
+
+      agg <- data.table::as.data.table(source_data)[
+        ,
+        .(SplitsTotal = sum(VariableValue, na.rm = TRUE)),
+        by = group_cols
+      ]
+      list(data = as.data.frame(agg), reason = "")
+    }
+
     output$model_metric_ui <- renderUI({
       nm <- input$channel_select
       if (!valid_nm(nm)) return(NULL)
@@ -1888,33 +2080,69 @@ mod_process_server <- function(id, data, config, channels,
                         fontWeight = "600", backgroundColor = "#f8d7da"))
       }
 
-      rag_df     <- as.data.frame(res$rag)
-      an_periods <- sort(unique(d$analytical$Period))
+      analytical_df <- as.data.frame(d$analytical)
+      analytical_df$Period <- if (inherits(analytical_df$Period, "Date")) {
+        analytical_df$Period
+      } else {
+        parse_period_robust(analytical_df$Period)
+      }
+      analytical_df <- analytical_df[!is.na(analytical_df$Period), , drop = FALSE]
+      if (!nrow(analytical_df)) {
+        return(datatable(
+          data.frame(Message = "Cannot perform Total Check: Analytical has no parseable Period values."),
+          options = list(initComplete = dt_blue_callback, dom = "t"), rownames = FALSE) %>%
+            formatStyle("Message", color = "#856404", backgroundColor = "#fff3cd"))
+      }
+      an_periods <- sort(unique(analytical_df$Period))
       an_min_p   <- min(an_periods); an_max_p <- max(an_periods)
+      date_spine <- if (!is.null(d$dates_df) && "Period" %in% names(d$dates_df)) {
+        p <- d$dates_df$Period
+        p <- if (inherits(p, "Date")) p else parse_period_robust(p)
+        p[!is.na(p)]
+      } else {
+        as.Date(character(0))
+      }
+      end_report_date <- tryCatch(as.Date(gcfg$end_report_date), error = \(e) as.Date(NA))
 
       scope_min_p <- tryCatch({
+        candidates <- c(an_min_p)
         if (!is.null(cfg$min_period) && !is.na(as.Date(cfg$min_period)))
-          max(an_min_p, as.Date(cfg$min_period)) else an_min_p
+          candidates <- c(candidates, as.Date(cfg$min_period))
+        if (length(date_spine)) candidates <- c(candidates, min(date_spine))
+        max(candidates, na.rm = TRUE)
       }, error = function(e) an_min_p)
       scope_max_p <- tryCatch({
+        candidates <- c(an_max_p)
         if (!is.null(cfg$max_period) && !is.na(as.Date(cfg$max_period)))
-          min(an_max_p, as.Date(cfg$max_period)) else an_max_p
+          candidates <- c(candidates, as.Date(cfg$max_period))
+        if (length(date_spine)) candidates <- c(candidates, max(date_spine))
+        if (!is.na(end_report_date)) candidates <- c(candidates, end_report_date)
+        min(candidates, na.rm = TRUE)
       }, error = function(e) an_max_p)
       if (is.na(scope_min_p) || is.na(scope_max_p) || scope_min_p > scope_max_p) {
         scope_min_p <- an_min_p; scope_max_p <- an_max_p
       }
 
-      rag_periods_all <- sort(unique(rag_df$Period))
-      rag_periods <- {
-        in_scope <- rag_periods_all[rag_periods_all >= scope_min_p &
-                                      rag_periods_all <= scope_max_p]
-        if (length(in_scope) > 0) in_scope else rag_periods_all
-      }
-      if (length(rag_periods) == 0) {
+      splits_result <- build_total_check_splits_from_rae(
+        d = d,
+        cfg = cfg,
+        gcfg = gcfg,
+        nm = nm,
+        cross_cols = cross_cols,
+        model_metric = model_metric,
+        scope_min_p = scope_min_p,
+        scope_max_p = scope_max_p
+      )
+      splits_side <- splits_result$data
+      if (is.null(splits_side) || !nrow(splits_side)) {
         return(datatable(
-          data.frame(Message = "No RAG data within channel date range."),
+          data.frame(
+            Message = "Cannot perform Total Check: SplitTotal has no RAE rows after channel filters.",
+            Hint = splits_result$reason %||% "Review channel filters, date range, useful longitudinal filters and metric keyword."
+          ),
           options = list(initComplete = dt_blue_callback, dom = "t"), rownames = FALSE) %>%
-            formatStyle("Message", color = "#856404", backgroundColor = "#fff3cd"))
+            formatStyle("Message", color = "#856404",
+                        fontWeight = "600", backgroundColor = "#fff3cd"))
       }
 
       an_periods_scoped <- an_periods[an_periods >= scope_min_p & an_periods <= scope_max_p]
@@ -1927,24 +2155,25 @@ mod_process_server <- function(id, data, config, channels,
             formatStyle("Message", color = "#856404", backgroundColor = "#fff3cd"))
       }
 
+      split_periods <- sort(unique(splits_side$Period))
       period_map <- tibble(
         an_period  = an_periods_scoped,
-        rag_period = rag_periods[vapply(
+        rag_period = split_periods[vapply(
           an_periods_scoped,
-          function(p) which.min(abs(as.numeric(rag_periods) - as.numeric(p))),
+          function(p) which.min(abs(as.numeric(split_periods) - as.numeric(p))),
           integer(1))])
       max_offset_days <- max(
         abs(as.numeric(period_map$an_period) - as.numeric(period_map$rag_period)),
         na.rm = TRUE)
 
       model_at_an_full <- build_model_total(
-        d$analytical, full_cross_id, c(model_var), character(0)) %>%
+        analytical_df, full_cross_id, c(model_var), character(0)) %>%
         filter(Period >= scope_min_p & Period <= scope_max_p)
 
       normalize_geo <- function(x)
         trimws(gsub("\\s+", " ", tolower(gsub("[,.]", " ", as.character(x)))))
 
-      rag_geos <- if (geo_col %in% names(rag_df)) unique(rag_df[[geo_col]]) else character(0)
+      rag_geos <- if (geo_col %in% names(splits_side)) unique(splits_side[[geo_col]]) else character(0)
       an_geos  <- if (geo_col %in% names(model_at_an_full))
         unique(model_at_an_full[[geo_col]]) else character(0)
 
@@ -1990,33 +2219,7 @@ mod_process_server <- function(id, data, config, channels,
         df
       }
 
-      rag_in_scope <- rag_df %>% filter(Period >= scope_min_p & Period <= scope_max_p)
-      rag_in_scope <- apply_geo_filters(rag_in_scope, geo_col)
       model_at_an  <- apply_geo_filters(model_at_an,  geo_col)
-
-      id_in_rag  <- intersect(full_cross_id, names(rag_in_scope))
-      spend_kw_f <- cfg$spend_keyword %||% "Spend"
-      act_kw_f   <- cfg$activity_keyword %||% "Activity"
-      all_num    <- setdiff(names(rag_in_scope)[sapply(rag_in_scope, is.numeric)], id_in_rag)
-      split_cols <- if (identical(model_metric, "spend")) {
-        all_num[grepl(spend_kw_f, all_num, ignore.case = TRUE)]
-      } else {
-        all_num[!grepl(spend_kw_f, all_num, ignore.case = TRUE)]
-      }
-      if (identical(model_metric, "spend") && !length(split_cols)) {
-        split_cols <- intersect(res$cost_diagnoses$VariableSplit %||% character(0), all_num)
-      } else if (!identical(model_metric, "spend") && !length(split_cols)) {
-        split_cols <- all_num[grepl(act_kw_f, all_num, ignore.case = TRUE)]
-      }
-
-      rag_in_scope$row_splits <- if (length(split_cols) > 0)
-        rowSums(rag_in_scope[, split_cols, drop = FALSE], na.rm = TRUE) else 0
-
-      group_cols  <- intersect(tc_cross_id, names(rag_in_scope))
-      splits_side <- rag_in_scope %>%
-        select(any_of(c(group_cols, "row_splits"))) %>%
-        group_by(across(all_of(group_cols))) %>%
-        summarise(SplitsTotal = sum(row_splits, na.rm = TRUE), .groups = "drop")
 
       model_side <- model_at_an %>%
         rename(an_period = Period) %>%
@@ -2037,8 +2240,7 @@ mod_process_server <- function(id, data, config, channels,
       }
 
       model_side <- model_side %>%
-        group_by(across(all_of(tc_cross_id_join))) %>%
-        summarise(ModelTotal = sum(ModelTotal, na.rm = TRUE), .groups = "drop") %>%
+        collapse_total_check_values(tc_cross_id_join, "ModelTotal", "ModelTotal") %>%
         filter(ModelTotal > 0)
 
       check_df <- model_side %>%

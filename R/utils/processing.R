@@ -92,6 +92,31 @@ build_split_name_from_columns <- function(d, split_cols, fallback_col = "Variabl
   combined
 }
 
+normalize_geo_label <- function(x) {
+  x <- trimws(as.character(x %||% ""))
+  if (!length(x) || is.na(x[1]) || !nzchar(x[1])) return("")
+  x <- gsub("\\s+", "", x[1])
+  if (grepl("^GeoLabel\\d+$", x, ignore.case = TRUE)) {
+    num <- sub("^GeoLabel", "", x, ignore.case = TRUE)
+    return(paste0("GeoLabel", num))
+  }
+  x
+}
+
+build_split_period_suffix <- function(update_label, focus = TRUE,
+                                      time_break_label = "",
+                                      geo_label = "") {
+  update_label <- trimws(as.character(update_label %||% ""))
+  time_break_label <- trimws(as.character(time_break_label %||% ""))
+  geo_label <- normalize_geo_label(geo_label)
+
+  suffix <- if (isTRUE(focus)) update_label else paste0("Before ", update_label)
+  extras <- c(time_break_label, geo_label)
+  extras <- extras[nzchar(extras)]
+  if (length(extras)) suffix <- paste0(suffix, "|", paste(extras, collapse = "|"))
+  suffix
+}
+
 expand_analytical_keys_to_variable_names <- function(all_variable_names,
                                                      varname_include) {
   vi <- unique(trimws(as.character(varname_include %||% character(0))))
@@ -848,11 +873,12 @@ process_channel <- function(all_rags,
     d_wide <- d_wide[order(d_wide$Period), ]
 
  # Non-focus suffix
-    nf_sfx <- {
-      tbr <- cfg$time_break_label %||% ""
-      if (nzchar(tbr)) paste0("Before ", update_label, "|", tbr)
-      else             paste0("Before ", update_label)
-    }
+    nf_sfx <- build_split_period_suffix(
+      update_label,
+      focus = FALSE,
+      time_break_label = cfg$time_break_label %||% "",
+      geo_label = cfg$geo_label %||% ""
+    )
 
  # Non-focus slice
     nf_raw <- as.data.frame(d_wide[d_wide$Period < start_d, ])
@@ -896,7 +922,11 @@ process_channel <- function(all_rags,
       split_cols_fc <- setdiff(names(fc), id_protect)
       if (length(split_cols_fc) > 0)
         names(fc)[names(fc) %in% split_cols_fc] <-
-          paste0(split_cols_fc, "_", update_label)
+          paste0(split_cols_fc, "_", build_split_period_suffix(
+            update_label,
+            focus = TRUE,
+            geo_label = cfg$geo_label %||% ""
+          ))
 
       act_col_fc <- grep(cfg$activity_keyword, names(fc),
                          ignore.case = TRUE, value = TRUE)

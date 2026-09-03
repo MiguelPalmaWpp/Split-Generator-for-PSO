@@ -126,12 +126,7 @@ mod_setup_ui <- function(id) {
       )
     ),
     
-    card(
-      class = "setup-comparison-card setup-validation-section", full_screen = TRUE,
-      card_header("File Validation"),
-      uiOutput(ns("validation_summary")),
-      uiOutput(ns("file_comparison"))
-    ),
+    uiOutput(ns("validation_card")),
 
     card(
       class = "global-params-card setup-global-card",
@@ -2153,8 +2148,7 @@ mod_setup_server <- function(id) {
     })
     
     # ── File Validation — mode-aware ──────────────────────────────────
-    output$validation_summary <- renderUI({
-      loaded <- vapply(base_file_kinds, \(k) !is.null(rv$file_meta[[k]]), logical(1))
+    validation_view_state <- reactive({
       required_loaded <- vapply(required_base_file_kinds, \(k) !is.null(rv$file_meta[[k]]), logical(1))
       n_required_loaded <- sum(required_loaded)
       base_ready <- required_files_ready()
@@ -2186,6 +2180,68 @@ mod_setup_server <- function(id) {
       } else {
         "Validation pending. The comparison will update automatically."
       }
+      list(
+        severity = severity,
+        message = message,
+        n_required_loaded = n_required_loaded,
+        rois_missing = rois_missing,
+        base_ready = base_ready
+      )
+    })
+
+    output$validation_card <- renderUI({
+      state <- validation_view_state()
+      severity <- state$severity
+      is_open <- !identical(severity, "ok")
+      title <- if (severity == "ok") "Validation OK"
+      else if (state$rois_missing && state$base_ready) "ROIs by Channel missing"
+      else if (severity == "warning") "Warnings found"
+      else if (severity == "blocker") "Action needed"
+      else "Pending validation"
+      icon_name <- if (severity == "ok") "circle-check"
+      else if (severity == "warning") "triangle-exclamation"
+      else if (severity == "blocker") "circle-xmark" else "clock"
+      count_text <- paste0(
+        state$n_required_loaded, "/4 required",
+        if (state$rois_missing) " | ROI values missing" else ""
+      )
+
+      tags$details(
+        class = paste("setup-validation-shell setup-validation-section",
+                      paste0("setup-validation-", severity),
+                      if (identical(severity, "ok")) "setup-validation-collapsed-ok" else ""),
+        open = if (is_open) "open" else NULL,
+        tags$summary(
+          class = "setup-validation-summary-toggle",
+          div(
+            class = "setup-validation-title",
+            icon(icon_name, class = "setup-validation-icon"),
+            div(
+              tags$strong("File Validation"),
+              tags$span(title, class = "setup-validation-status")
+            )
+          ),
+          tags$span(state$message, class = "setup-validation-message"),
+          tags$span(count_text, class = "setup-validation-count"),
+          tags$span(
+            class = "setup-validation-action",
+            tags$span(class = "validation-toggle-show", "Show details"),
+            tags$span(class = "validation-toggle-hide", "Hide details")
+          )
+        ),
+        div(
+          class = "setup-validation-body",
+          uiOutput(ns("validation_summary")),
+          uiOutput(ns("file_comparison"))
+        )
+      )
+    })
+
+    output$validation_summary <- renderUI({
+      state <- validation_view_state()
+      severity <- state$severity
+      rois_missing <- state$rois_missing
+      base_ready <- state$base_ready
       div(
         class = paste("qa-summary", paste0("qa-summary-", severity),
                       if (rois_missing && base_ready) "qa-summary-roi-missing" else ""),
@@ -2199,9 +2255,9 @@ mod_setup_server <- function(id) {
                             else if (severity == "warning") "Warnings found"
                             else if (severity == "blocker") "Action needed"
                             else "Pending validation"),
-                tags$span(message, class = "qa-summary-text"))),
+                tags$span(state$message, class = "qa-summary-text"))),
         tags$span(
-          paste0(n_required_loaded, "/4 required",
+          paste0(state$n_required_loaded, "/4 required",
                  if (rois_missing) " | ROI values missing" else ""),
           class = "qa-summary-count"
         )

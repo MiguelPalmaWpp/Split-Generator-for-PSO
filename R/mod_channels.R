@@ -267,6 +267,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
         as.character(cfg$min_period %||% ""),
         as.character(cfg$max_period %||% ""),
         cfg$time_break_label %||% "",
+        cfg$geo_label %||% "",
         sep = "::"
       )
     }
@@ -279,6 +280,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
         cfg$spend_keyword %||% "",
         as.character(cfg$min_period %||% ""),
         as.character(cfg$max_period %||% ""),
+        cfg$geo_label %||% "",
         sep = "::"
       )
     }
@@ -682,6 +684,12 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
       audit <- audit %||% selected_channel_audit(nm, cfg)
       roi_text <- if (is.na(audit$roi)) "Missing" else paste0(round(audit$roi, 1))
       time_text <- if (nzchar(cfg$time_break_label %||% "")) cfg$time_break_label else "None"
+      geo_label_raw <- normalize_geo_label(cfg$geo_label %||% "")
+      geo_text <- if (nzchar(geo_label_raw)) {
+        paste("GeoLabel", sub("^GeoLabel", "", geo_label_raw))
+      } else {
+        "None"
+      }
       spend_label <- cfg$spend_keyword %||% "Spend"
       status_tone <- switch(audit$status, Ready = "ok", `Needs review` = "warn", Blocked = "error")
       source_text <- source_label(cfg)
@@ -716,6 +724,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
                        if (audit$spend_rows > 0) "ok" else "warn"),
             audit_pill("ROI", roi_text, if (isTRUE(audit$roi_missing)) "error" else "ok"),
             audit_pill("TimeBreak", time_text, if (nzchar(cfg$time_break_label %||% "")) "info" else "neutral"),
+            audit_pill("GeoLabel", geo_text, if (nzchar(geo_label_raw)) "info" else "neutral"),
             audit_pill("Merges", audit$n_merges, if (audit$n_merges > 0) "info" else "neutral")),
         div(class = paste("channel-audit-status-explain", paste0("audit-explain-", status_tone)),
             div(class = "channel-audit-status-title",
@@ -731,7 +740,8 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
               icon("triangle-exclamation"),
               div(tags$strong("ROIs by Channel missing"),
                   tags$span("seed_for_indices.csv will export without ROI values until the ROI file is loaded in Setup."))),
-        if (length(audit$blockers) || length(audit$warnings) || length(messages_notes))
+        if (length(audit$blockers) || length(audit$warnings) ||
+            length(messages_notes) || nzchar(geo_label_raw))
           div(class = "channel-audit-messages",
               tagList(lapply(audit$blockers, \(msg)
                 div(class = "channel-audit-message audit-msg-error",
@@ -741,7 +751,11 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
                     icon("triangle-exclamation"), tags$span(msg)))),
               tagList(lapply(messages_notes, \(msg)
                 div(class = "channel-audit-message audit-msg-info",
-                    icon("circle-info"), tags$span(msg)))))
+                    icon("circle-info"), tags$span(msg)))),
+              if (nzchar(geo_label_raw))
+                div(class = "channel-audit-message audit-msg-info",
+                    icon("circle-info"),
+                    tags$span("GeoLabel is applied because this same time partition exists with multiple geography rules.")))
       )
     }
 
@@ -894,6 +908,14 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
           rv$channels[[nm]]$min_period        <- new_cfg$min_period
           rv$channels[[nm]]$max_period        <- new_cfg$max_period
           rv$channels[[nm]]$time_break_label  <- new_cfg$time_break_label %||% ""
+          if (!isTRUE(rv$channels[[nm]]$config_imported) ||
+              !nzchar(rv$channels[[nm]]$geo_label %||% "")) {
+            rv$channels[[nm]]$geo_label <- new_cfg$geo_label %||% ""
+          }
+          rv$channels[[nm]]$vof_geo_group <- new_cfg$vof_geo_group %||% ""
+          rv$channels[[nm]]$vof_geo_order <- new_cfg$vof_geo_order %||% NA_integer_
+          rv$channels[[nm]]$vof_geo_group_size <- new_cfg$vof_geo_group_size %||% 0L
+          rv$channels[[nm]]$vof_geo_signature <- new_cfg$vof_geo_signature %||% "all"
         }
       }
       clear_preview_caches(cards = TRUE)
@@ -1261,6 +1283,23 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
                                      format(cfg$max_period, "%Y-%m-%d"))
                             else "Full range"),
                 mk_info_row("Geo overrides", geo_display),
+                mk_info_row("GeoLabel",
+                            {
+                              gl <- normalize_geo_label(cfg$geo_label %||% "")
+                              if (nzchar(gl)) paste("GeoLabel", sub("^GeoLabel", "", gl)) else "None"
+                            }),
+                if ((cfg$vof_geo_group_size %||% 0L) > 1L)
+                  mk_info_row("Geo group",
+                              paste0(cfg$vof_geo_order %||% NA_integer_,
+                                     " of ", cfg$vof_geo_group_size %||% 0L)),
+                mk_info_row("Geo rule",
+                            {
+                              sig <- cfg$vof_geo_signature %||% "all"
+                              sig <- sub("^token:", "", sig)
+                              sig <- sub("^include:", "include ", sig)
+                              sig <- sub("^exclude:", "exclude ", sig)
+                              if (nzchar(sig)) sig else "all"
+                            }),
                 if (!is.na(roi_val))
                   mk_info_row("ROI", format(round(roi_val, 2), big.mark = ",")),
                 mk_info_row("Breaks", audit$n_breaks),
@@ -1467,6 +1506,8 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
         paste(splits, collapse = "|"),
         if (!is.null(cfg_p)) breaks_signature(cfg_p$dimension_breaks %||% list()) else "none",
         if (!is.null(cfg_p)) aliases_signature(cfg_p$dimension_aliases %||% list()) else "none",
+        if (!is.null(cfg_p)) cfg_p$geo_label %||% "" else "",
+        config()$update_label %||% "",
         date_filter$key,
         date_filter$mode,
         sep = "::"
@@ -1520,6 +1561,18 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
         examples[which.max(nchar(examples, type = "width"))]
       } else {
         ""
+      }
+      if (nzchar(example) && !is.null(cfg_p) &&
+          nzchar(normalize_geo_label(cfg_p$geo_label %||% ""))) {
+        example <- paste0(
+          example,
+          "_",
+          build_split_period_suffix(
+            config()$update_label %||% "Focus",
+            focus = TRUE,
+            geo_label = cfg_p$geo_label %||% ""
+          )
+        )
       }
       
       ui <- div(class = "split-preview-box",
@@ -2566,10 +2619,13 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
       time_break_token <- function(x) {
         grepl("^[[:alpha:]]+TimeBreak$", x, ignore.case = TRUE)
       }
+      geo_label_token <- function(x) {
+        grepl("^GeoLabel\\d+$", x, ignore.case = TRUE)
+      }
 
       out <- character(0)
       for (tok in tokens) {
-        if (time_break_token(tok) && length(out) > 0) {
+        if ((time_break_token(tok) || geo_label_token(tok)) && length(out) > 0) {
           out[length(out)] <- paste0(out[length(out)], "|", tok)
         } else {
           out <- c(out, tok)
@@ -2608,6 +2664,10 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
       if ("TimeBreakLabel" %in% names(row)) {
         tbr <- trimws(as.character(row$TimeBreakLabel[[1]] %||% ""))
         cfg$time_break_label <- if (!is.na(tbr)) tbr else ""
+      }
+      if ("GeoLabel" %in% names(row)) {
+        gl <- normalize_geo_label(row$GeoLabel[[1]] %||% "")
+        cfg$geo_label <- gl
       }
       if ("BreakMissingPartValue" %in% names(row)) {
         missing_value <- trimws(as.character(row$BreakMissingPartValue[[1]] %||% ""))
@@ -2759,6 +2819,8 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
             spend_keyword = spend_kw, split_columns = splits,
             saved_merges = list(), dimension_breaks = list(), dimension_aliases = list(),
             roi = roi_info$value, source = "manual",
+            geo_label = "", vof_geo_group = "", vof_geo_order = NA_integer_,
+            vof_geo_group_size = 0L, vof_geo_signature = "all",
             media_channel = if (!is.na(roi_info$channel)) roi_info$channel else "",
             sub_channel = "", effect = "", config_imported = TRUE)
           cfg <- apply_config_keywords(cfg, row)

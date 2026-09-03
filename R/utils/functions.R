@@ -394,6 +394,31 @@ apply_dimension_aliases <- function(d, dimension_aliases) {
   d
 }
 
+normalize_geo_label <- function(x) {
+  x <- trimws(as.character(x %||% ""))
+  if (!length(x) || is.na(x[1]) || !nzchar(x[1])) return("")
+  x <- gsub("\\s+", "", x[1])
+  if (grepl("^GeoLabel\\d+$", x, ignore.case = TRUE)) {
+    num <- sub("^GeoLabel", "", x, ignore.case = TRUE)
+    return(paste0("GeoLabel", num))
+  }
+  x
+}
+
+build_split_period_suffix <- function(update_label, focus = TRUE,
+                                      time_break_label = "",
+                                      geo_label = "") {
+  update_label <- trimws(as.character(update_label %||% ""))
+  time_break_label <- trimws(as.character(time_break_label %||% ""))
+  geo_label <- normalize_geo_label(geo_label)
+
+  suffix <- if (isTRUE(focus)) update_label else paste0("Before ", update_label)
+  extras <- c(time_break_label, geo_label)
+  extras <- extras[nzchar(extras)]
+  if (length(extras)) suffix <- paste0(suffix, "|", paste(extras, collapse = "|"))
+  suffix
+}
+
 normalize_model_metric <- function(x, default = "activity") {
   x <- tolower(trimws(as.character(x %||% default)[1]))
   if (is.na(x) || !nzchar(x)) return(default)
@@ -476,6 +501,7 @@ export_channels_csv <- function(channels, global_config = NULL) {
       VarNameInclude  = paste(cfg$varname_include %||% character(0), collapse = " ||| "),
       UpdateLabel = update_label,
       TimeBreakLabel = cfg$time_break_label %||% "",
+      GeoLabel = normalize_geo_label(cfg$geo_label %||% ""),
       ConfigVersion = "2",
       BreakMissingPartValue = cfg$break_missing_part_value %||% "Total",
       BreakDefaultSeparator = cfg$break_default_separator %||% " - ",
@@ -495,6 +521,7 @@ export_channels_csv <- function(channels, global_config = NULL) {
         VarNameInclude  = "",
         UpdateLabel = "",
         TimeBreakLabel = "",
+        GeoLabel = "",
         ConfigVersion = "",
         BreakMissingPartValue = b$missing_part_value %||% cfg$break_missing_part_value %||% "Total",
         BreakDefaultSeparator = cfg$break_default_separator %||% " - ",
@@ -515,6 +542,7 @@ export_channels_csv <- function(channels, global_config = NULL) {
         VarNameInclude  = "",
         UpdateLabel = "",
         TimeBreakLabel = "",
+        GeoLabel = "",
         ConfigVersion = "",
         BreakMissingPartValue = "",
         BreakDefaultSeparator = "",
@@ -536,6 +564,7 @@ export_channels_csv <- function(channels, global_config = NULL) {
         VarNameInclude  = "",
         UpdateLabel = "",
         TimeBreakLabel = "",
+        GeoLabel = "",
         ConfigVersion = "",
         BreakMissingPartValue = "",
         BreakDefaultSeparator = "",
@@ -549,7 +578,7 @@ export_channels_csv <- function(channels, global_config = NULL) {
   cfg_order <- c(
     "Channel", "Type", "SplitOrder", "Name", "RenameSource", "RenameAlias",
     "Splits", "ActivityKeyword", "SpendKeyword", "ModelMetric", "VarNameInclude",
-    "UpdateLabel", "TimeBreakLabel", "ConfigVersion",
+    "UpdateLabel", "TimeBreakLabel", "GeoLabel", "ConfigVersion",
     "BreakMissingPartValue", "BreakDefaultSeparator"
   )
   dplyr::select(out, dplyr::any_of(cfg_order), dplyr::everything())
@@ -994,6 +1023,47 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
     trimws(x)
   }
 
+  extract_vof_geo_token <- function(x) {
+    x <- trimws(as.character(x %||% ""))
+    x <- stringr::str_remove(
+      x,
+      stringr::regex("-+\\s*(Spend|Cost|Investment|Budget)\\s*$", ignore_case = TRUE)
+    )
+    m <- stringr::str_match(
+      x,
+      stringr::regex("\\s+--g\\s+(.+?)(?=\\s+--[a-z]\\s+|$)", ignore_case = TRUE)
+    )
+    token <- m[, 2]
+    ifelse(is.na(token), "", stringr::str_squish(token))
+  }
+
+  vof_geo_family <- function(x) {
+    vof_period_family(x)
+  }
+
+  vof_geo_signature <- function(geo_token = "", geo_values = character(0),
+                                segment_overrides = list()) {
+    geo_token <- stringr::str_squish(as.character(geo_token %||% ""))
+    if (nzchar(geo_token)) return(paste0("token:", tolower(geo_token)))
+
+    vals <- unique(stringr::str_squish(unlist(
+      strsplit(as.character(geo_values %||% character(0)), ","),
+      use.names = FALSE
+    )))
+    vals <- vals[!is.na(vals) & nzchar(vals)]
+    vals <- vals[!toupper(vals) %in% c("ALL", "TOTAL", "NATIONAL")]
+    if (length(vals)) return(paste0("include:", paste(sort(tolower(vals)), collapse = "|")))
+
+    geo_exc <- unique(unlist(lapply(segment_overrides %||% list(), function(o) {
+      o$geography_exclude %||% character(0)
+    }), use.names = FALSE))
+    geo_exc <- stringr::str_squish(as.character(geo_exc))
+    geo_exc <- geo_exc[!is.na(geo_exc) & nzchar(geo_exc)]
+    if (length(geo_exc)) return(paste0("exclude:", paste(sort(tolower(geo_exc)), collapse = "|")))
+
+    "all"
+  }
+
   vof_period_boundary <- function(token, min_raw, max_raw) {
     token <- trimws(as.character(token %||% ""))
     token_date <- parse_period_token_date(token)
@@ -1242,6 +1312,8 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
       vof_min_raw,
       vof_max_raw
     )
+    vof_geo_token_val <- extract_vof_geo_token(mv)
+    vof_geo_family_val <- vof_geo_family(mv)
 
     min_p <- vof_min_raw
     max_p <- vof_max_raw
@@ -1250,8 +1322,13 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
 
     # Geography exclusions
     geo_col_vof       <- detect_geo_col(vof_rows)
+    geo_values_raw <- if (!is.null(geo_col_vof)) {
+      vof_rows[[geo_col_vof]]
+    } else {
+      character(0)
+    }
     segment_overrides <- if (!is.null(geo_col_vof) && length(an_geos) > 0) {
-      geo_strs <- vof_rows[[geo_col_vof]]
+      geo_strs <- geo_values_raw
       geo_strs <- geo_strs[!is.na(geo_strs) & nzchar(trimws(geo_strs))]
       if (length(geo_strs) > 0 &&
           !any(toupper(geo_strs) %in% c("ALL", "TOTAL", "NATIONAL"))) {
@@ -1264,6 +1341,11 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
         else list()
       } else list()
     } else list()
+    vof_geo_signature_val <- vof_geo_signature(
+      geo_token = vof_geo_token_val,
+      geo_values = geo_values_raw,
+      segment_overrides = segment_overrides
+    )
 
     # VOF metadata fields
     media_channel <- if ("MediaChannel" %in% names(vof_rows)) {
@@ -1354,6 +1436,13 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
       vof_period_token  = vof_period_token_val,
       vof_period_family = vof_period_family_val,
       vof_period_boundary = vof_period_boundary_val,
+      vof_geo_token     = vof_geo_token_val,
+      vof_geo_family    = vof_geo_family_val,
+      vof_geo_signature = vof_geo_signature_val,
+      geo_label         = "",
+      vof_geo_group     = "",
+      vof_geo_order     = NA_integer_,
+      vof_geo_group_size = 0L,
       segment_overrides = segment_overrides,
       model_metric      = model_metric,
       activity_keyword  = act_kw,
@@ -1452,6 +1541,11 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
         min_period        = an_min_date,
         max_period        = an_max_date,
         segment_overrides = list(),
+        geo_label         = "",
+        vof_geo_group     = "",
+        vof_geo_order     = NA_integer_,
+        vof_geo_group_size = 0L,
+        vof_geo_signature = "all",
         model_metric      = "activity",
         activity_keyword  = act_kw,
         spend_keyword     = spend_kw,
@@ -1573,6 +1667,71 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
       channels[[nm]]$vof_time_break_group <- sig
       channels[[nm]]$vof_time_break_order <- range_orders[[key]] %||% NA_integer_
       channels[[nm]]$vof_time_break_group_size <- nrow(unique_ranges)
+    }
+  }
+
+ # Step 8: geo_labels
+  for (nm in names(channels)) {
+    channels[[nm]]$geo_label <- channels[[nm]]$geo_label %||% ""
+    channels[[nm]]$vof_geo_group <- channels[[nm]]$vof_geo_group %||% ""
+    channels[[nm]]$vof_geo_order <- channels[[nm]]$vof_geo_order %||% NA_integer_
+    channels[[nm]]$vof_geo_group_size <- channels[[nm]]$vof_geo_group_size %||% 0L
+    channels[[nm]]$vof_geo_signature <- channels[[nm]]$vof_geo_signature %||% "all"
+  }
+
+  vof_geo_groups <- vapply(names(channels), function(nm) {
+    ch <- channels[[nm]]
+    if (!identical(ch$source, "vof")) return(NA_character_)
+    family_key <- ch$vof_geo_family %||% vof_geo_family(ch$channel_name %||% nm)
+    date_key <- function(x) {
+      if (is.null(x) || !length(x) || is.na(x[1])) return("")
+      out <- tryCatch(as.Date(x[1]), error = function(e) as.Date(NA))
+      if (is.na(out)) "" else as.character(out)
+    }
+    period_key <- ch$vof_period_token %||% ""
+    if (!nzchar(period_key)) {
+      min_key <- date_key(ch$vof_min_raw)
+      max_key <- date_key(ch$vof_max_raw)
+      period_key <- paste(min_key, max_key, sep = "|")
+    }
+    long_filters <- ch$useful_longitudinal_filters %||% list()
+    long_sig <- if (length(long_filters)) {
+      paste(vapply(names(long_filters), function(dim) {
+        vals <- sort(unique(trimws(as.character(long_filters[[dim]]))))
+        paste0(dim, "=", paste(vals, collapse = ","))
+      }, character(1)), collapse = "||")
+    } else {
+      ""
+    }
+    paste(
+      paste(sort(unique(ch$analytical_varkeys)), collapse = "||"),
+      ch$media_channel %||% "",
+      ch$effect %||% "",
+      normalize_model_metric(ch$model_metric %||% "activity"),
+      family_key,
+      period_key,
+      long_sig,
+      sep = "::::"
+    )
+  }, character(1))
+
+  vof_geo_groups <- vof_geo_groups[!is.na(vof_geo_groups)]
+  for (sig in unique(vof_geo_groups)) {
+    group_nms <- names(vof_geo_groups[vof_geo_groups == sig])
+    geo_signatures <- vapply(group_nms, function(nm) {
+      channels[[nm]]$vof_geo_signature %||% "all"
+    }, character(1))
+    unique_geo <- unique(geo_signatures)
+    if (length(unique_geo) <= 1L) next
+
+    label_map <- setNames(paste0("GeoLabel", seq_along(unique_geo)), unique_geo)
+    order_map <- setNames(seq_along(unique_geo), unique_geo)
+    for (nm in group_nms) {
+      geo_sig <- channels[[nm]]$vof_geo_signature %||% "all"
+      channels[[nm]]$geo_label <- label_map[[geo_sig]] %||% ""
+      channels[[nm]]$vof_geo_group <- sig
+      channels[[nm]]$vof_geo_order <- order_map[[geo_sig]] %||% NA_integer_
+      channels[[nm]]$vof_geo_group_size <- length(unique_geo)
     }
   }
 
@@ -1870,11 +2029,12 @@ process_channel_legacy <- function(all_rags,
     d_wide <- d_wide[order(d_wide$Period), ]
 
  # Non-focus suffix
-    nf_sfx <- {
-      tbr <- cfg$time_break_label %||% ""
-      if (nzchar(tbr)) paste0("Before ", update_label, "|", tbr)
-      else             paste0("Before ", update_label)
-    }
+    nf_sfx <- build_split_period_suffix(
+      update_label,
+      focus = FALSE,
+      time_break_label = cfg$time_break_label %||% "",
+      geo_label = cfg$geo_label %||% ""
+    )
 
  # Non-focus slice
     nf_raw <- as.data.frame(d_wide[d_wide$Period < start_d, ])
@@ -1918,7 +2078,11 @@ process_channel_legacy <- function(all_rags,
       split_cols_fc <- setdiff(names(fc), id_protect)
       if (length(split_cols_fc) > 0)
         names(fc)[names(fc) %in% split_cols_fc] <-
-          paste0(split_cols_fc, "_", update_label)
+          paste0(split_cols_fc, "_", build_split_period_suffix(
+            update_label,
+            focus = TRUE,
+            geo_label = cfg$geo_label %||% ""
+          ))
 
       act_col_fc <- grep(cfg$activity_keyword, names(fc),
                          ignore.case = TRUE, value = TRUE)

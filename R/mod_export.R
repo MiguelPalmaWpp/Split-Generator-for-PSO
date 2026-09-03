@@ -452,13 +452,20 @@ mod_export_server <- function(id, results, data, config, channels,
       if (!nrow(source_data)) return(empty)
 
       nf_sfx <- {
-        tbr <- cfg$time_break_label %||% ""
-        if (nzchar(tbr)) paste0("Before ", update_label, "|", tbr)
-        else paste0("Before ", update_label)
+        build_split_period_suffix(
+          update_label,
+          focus = FALSE,
+          time_break_label = cfg$time_break_label %||% "",
+          geo_label = cfg$geo_label %||% ""
+        )
       }
       source_data$VariableSplit <- ifelse(
         period_tag == "focus",
-        paste0(source_data$SplitName, "_", update_label),
+        paste0(source_data$SplitName, "_", build_split_period_suffix(
+          update_label,
+          focus = TRUE,
+          geo_label = cfg$geo_label %||% ""
+        )),
         paste0(source_data$SplitName, "_", nf_sfx)
       )
 

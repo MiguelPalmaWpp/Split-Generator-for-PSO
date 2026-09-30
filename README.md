@@ -483,14 +483,16 @@ This repository includes a generated `manifest.json` for source-based deployment
 | --- | --- |
 | Repository | `MiguelPalmaWpp/Split-Generator-for-PSO` |
 | Branch | The branch you want to publish, usually `main`. |
-| Primary file | `ui.R` for the current Shiny `ui.R` + `server.R` structure. |
+| Primary file | `app.R` (the repository includes a Shiny entry-point wrapper). |
 | Auto publish on push | Enable for stable branches; disable while testing heavy changes. |
 
-The manifest is generated with explicit app files so local testing data is not deployed:
+The manifest must be regenerated after dependency or application changes. It should
+use the project R version and `renv.lock` package versions. Generate it from the
+repository root with R 4.5.2:
 
 ```r
 files <- c(
-  "global.R", "ui.R", "server.R", "Description", "README.md", "LICENSE",
+  "app.R", "global.R", "ui.R", "server.R", "Description", "LICENSE",
   list.files("R", recursive = TRUE, full.names = TRUE),
   list.files("www", recursive = TRUE, full.names = TRUE)
 )
@@ -498,20 +500,14 @@ files <- c(
 rsconnect::writeManifest(
   appDir = getwd(),
   appFiles = gsub("\\\\", "/", files),
-  dependencyResolution = "library"
+  appPrimaryDoc = "app.R",
+  appMode = "shiny"
 )
 ```
 
-If Connect does not accept `ui.R` as the primary file, add an `app.R` wrapper:
-
-```r
-source("global.R")
-source("ui.R")
-source("server.R")
-shinyApp(ui, server)
-```
-
-Then set Primary file to `app.R`.
+In Posit Connect Cloud, select `app.R` as the primary file. The `manifest.json`
+must be committed beside it; Connect Cloud uses this manifest for R and package
+versions rather than restoring the project library from `renv`.
 
 ---
 

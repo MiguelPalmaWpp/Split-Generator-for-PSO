@@ -6,6 +6,8 @@ total_check_values_match <- function(left, right, absolute_tolerance = 0.01,
   right <- suppressWarnings(as.numeric(right))
   scale <- pmax(abs(left), abs(right), 1, na.rm = TRUE)
   abs(left - right) <= pmax(absolute_tolerance, relative_tolerance * scale)
+}
+
 collapse_total_check_source <- function(df, key_cols, value_col, output_col,
                                         tolerance = 0.01) {
   if (is.null(df) || !nrow(df) || !value_col %in% names(df)) {

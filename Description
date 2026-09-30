@@ -6,4 +6,4 @@ Maintainer: Advanced Analytics Colombia <analytics@wppmedia.com>
 Description: Shiny app for generating and validating media activity splits used in PSO Marketing Mix Models.
 License: MIT
 Encoding: UTF-8
-Imports: shiny, bslib, DT, tidyverse, readxl, janitor, sortable, data.table, jsonlite, arrow, lubridate
+Imports: shiny, bslib, DT, dplyr, tidyr, stringr, readr, purrr, readxl, openxlsx, janitor, sortable, data.table, jsonlite, arrow, lubridate, cachem, digest, zip, here, mirai, promises

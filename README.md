@@ -8,7 +8,7 @@ Advanced Analytics Colombia / WPP Media
 
 <br>
 
-![R](https://img.shields.io/badge/R-4.3.1-276DC3?style=flat-square)
+![R](https://img.shields.io/badge/R-4.5.2-276DC3?style=flat-square)
 ![Shiny](https://img.shields.io/badge/Shiny-App-5B9BD5?style=flat-square)
 ![PSO](https://img.shields.io/badge/Output-6%20standard%20files-1F8A70?style=flat-square)
 ![Status](https://img.shields.io/badge/Workflow-Setup%20%7C%20Channels%20%7C%20Process%20%7C%20Export-6B7280?style=flat-square)
@@ -128,9 +128,11 @@ flowchart TB
 
 | File | Accepted formats | Purpose |
 | --- | --- | --- |
-| **Past Analytical Splits** | `.csv`, `.RData` | Previous `analytical_splits_extended` output. |
-| **Past Side Model Mapping** | `.csv` | Previous `side_model_mapping` output. |
+| **Previous Results ZIP** | App-generated `.zip` | Analytical Splits Extended, Side Model Mapping, Splits Metadata, and inherited SAP. |
+| **Current model files** | Same formats as Model Build | RAE, Analytical, VOF, ModelDetails, and optional ROIs for the new update. |
 | **MainVars Mapping** | `.xlsx`, `.xls` | Detects and carries update IDs. |
+
+The previous update ID is inferred from the ZIP and MainVars Mapping when unambiguous. Enter the current update ID and label. Historical columns use `Before <current label>`. Compatible SAP rules are carried forward with their labels updated automatically; references that cannot be matched are reported for review.
 
 > [!TIP]
 > In Model Update mode, Reporting Period is fixed to **All Period** because the uploaded RAE Datafile is treated as the current focus period. When returning to Model Build, the previous build-period setting is restored.
@@ -249,7 +251,8 @@ Config import is intentionally an overwrite operation for channels present in th
 
 Supported config formats:
 
-- Current format: `Name` + `Splits`.
+- Splits Metadata v3: one `Channel` row per channel, plus `Break`, `Rename`, and one `SAP` row per aggregation component. `RecordType` identifies each row; fields such as `BreakDimension`, `BreakPart1`, `RenameAlias`, `VariableSplit`, and `MergeName` have dedicated columns.
+- Previous format using `Type`, `Name`, and `Splits`.
 - Legacy format using `BreakInfo`.
 
 ### Dimension Breaks
@@ -291,7 +294,7 @@ stateDiagram-v2
 | **Activity** | Shows generated activity splits and supports merge selection. |
 | **Spend** | Shows spend diagnostics. If spend is missing or unmatched, the UI shows an inline message instead of going blank. |
 | **Total Check** | Compares processed output against Analytical expectations. |
-| **Merge Plan** | Documents active merge operations and can be downloaded. |
+| **Splits Aggregation Plan (SAP)** | Documents active split aggregations and can be downloaded. |
 | **Warnings / Errors** | Captures channel-level failures so the user does not depend only on notifications. |
 
 ---
@@ -340,7 +343,7 @@ flowchart TB
     A --> A1["analytical_splits_extended.csv"]
     A --> A2["analytical_splits_extended.RData"]
     B --> B1["side_model_mapping.csv"]
-    B --> B2["seed_for_indices.csv"]
+    B --> B2["Seed For Indices.csv"]
     B --> B3["split_composition.csv"]
     C --> C1["channel_config.csv"]
 ```
@@ -350,7 +353,7 @@ flowchart TB
 | `analytical_splits_extended.csv` | Analytical dataset plus appended split columns. |
 | `analytical_splits_extended.RData` | Same dataset as an RData object for the next update cycle. |
 | `side_model_mapping.csv` | Split-to-model mapping with PSO weight structure. |
-| `seed_for_indices.csv` | Activity, spend, ROI, channel, and split-order seed data. |
+| `Seed For Indices.csv` | Activity, spend, ROI, channel, and split-order seed data. |
 | `split_composition.csv` | Split lineage and merge composition. |
 | `channel_config.csv` | Reusable channel configuration, including split order, breaks, merges, and dates. |
 
@@ -395,8 +398,8 @@ Use Model Update when extending a previous model with a new focus period.
 
 1. Switch Setup to Model Update.
 2. Upload base files.
-3. Upload past split files and mapping files.
-4. Confirm Past Update ID, Past Label, and Current Update ID.
+3. Upload the previous results ZIP and MainVars Mapping.
+4. Confirm the detected Previous Update ID, then enter Current Update ID and label.
 5. Review update processing status.
 6. Configure and process the current focus period.
 7. Export the updated six-file ZIP.
@@ -433,20 +436,40 @@ Split-Generator-for-PSO/
 
 ## Installation
 
-Recommended local setup:
+The lockfile targets **R 4.5.2**, Shiny 1.13, promises 1.5 and mirai 2.7.2.
+Start from a new R session in the repository root:
 
 ```r
-renv::restore()
+install.packages("renv")
+renv::restore(prompt = FALSE)
+renv::status()
 shiny::runApp(".")
 ```
 
-If `renv::restore()` cannot complete, install the required packages loaded in `global.R`:
+Restart R after `renv::restore()` so the app uses the restored project library.
+Do not run `renv::snapshot()` from another R version because it can rewrite the
+versions recorded for deployment.
+
+If only the asynchronous dependencies need repair, run:
+
+```r
+renv::install(c(
+  "shiny@1.13.0",
+  "promises@1.5.0",
+  "mirai@2.7.2",
+  "nanonext@1.10.2"
+))
+```
+
+If a full `renv::restore()` cannot complete, install the required application
+packages and restart R:
 
 ```r
 install.packages(c(
   "shiny", "bslib", "DT", "dplyr", "tidyr", "stringr",
-  "readr", "purrr", "readxl", "janitor", "sortable",
-  "data.table", "arrow", "zip", "here", "future", "future.apply"
+  "readr", "purrr", "readxl", "openxlsx", "janitor", "sortable",
+  "data.table", "jsonlite", "arrow", "lubridate", "cachem",
+  "digest", "zip", "here", "mirai", "nanonext", "promises"
 ))
 ```
 
@@ -501,7 +524,7 @@ git diff --check
 ```
 
 ```powershell
-& 'C:\Program Files\R\R-4.3.1\bin\x64\Rscript.exe' -e "files <- c('global.R','ui.R','server.R', list.files('R', pattern='\\.R$', recursive=TRUE, full.names=TRUE)); for (f in files) { invisible(parse(f)); cat('OK', f, '\n') }"
+Rscript -e "files <- c('global.R','ui.R','server.R', list.files('R', pattern='\\.R$', recursive=TRUE, full.names=TRUE)); for (f in files) { invisible(parse(f)); cat('OK', f, '\n') }"
 ```
 
 Regression areas to test after changes:
@@ -512,6 +535,47 @@ Regression areas to test after changes:
 | Channels | VOF import, MFF fallback, config preview/apply, overwrite existing channels, remove/add state. |
 | Process | Spend tab, Total Check, failed channels, stale channels, reprocess changed. |
 | Export | Warnings, stale/failed/pending states, ZIP contains exactly six files. |
+
+Performance diagnostics can be enabled before starting the app:
+
+```r
+options(pso.profile = TRUE)
+shiny::runApp()
+```
+
+Derived data is cached in memory per session for 30 minutes, with a default
+limit of 256 MB. Development runs can override these limits with
+`options(pso.cache.max_size = ..., pso.cache.max_age = ...)` before startup.
+
+Channel processing uses two global `mirai` workers per R application process.
+The worker count and queue budget can be configured before startup:
+
+```r
+options(
+  pso.async.enabled = TRUE,
+  pso.mirai.workers = 2L,
+  pso.mirai.queue_memory_mb = 512,
+  pso.mirai.channel_timeout_ms = 15 * 60 * 1000
+)
+```
+
+On Posit Connect, these workers are created for every running R process. Include
+them when sizing process limits and memory. If worker initialization fails, the
+app reports the condition and keeps the existing synchronous processing path.
+
+Verify the asynchronous runtime independently with:
+
+```r
+source("R/utils/async_processing.R")
+options(pso.async.enabled = TRUE)
+ensure_pso_async(getwd())
+mirai::status(.compute = "pso_process")
+shutdown_pso_async()
+```
+
+The expected status reports two connections. Always stop and restart the R
+process after installing or updating worker dependencies; refreshing the browser
+does not restart `mirai` daemons.
 
 ---
 
@@ -525,6 +589,7 @@ Regression areas to test after changes:
 | Export reports stale channels | Channel config changed after processing. | Use `Reprocess Changed`. |
 | Export reports pending channels | Active channels have not been processed. | Use `Process All` or `Process Selected`. |
 | Export reports ROI issues | ROIs file missing or incomplete. | Upload or correct ROIs by Channel before final export. |
+| Background workers unavailable | The app process started before `mirai`, `nanonext` or `promises` was restored, or worker bootstrap failed. | Run `renv::restore()`, restart R completely and verify `mirai::status(.compute = "pso_process")`. |
 
 ---
 

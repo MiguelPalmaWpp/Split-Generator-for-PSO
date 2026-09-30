@@ -1,7 +1,9 @@
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# -----------------------------------------------------------------------
 # R/mod_process.R
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-
+# -----------------------------------------------------------------------
+# Process turns a channel configuration and source files into split results.
+# It also owns asynchronous batch scheduling, SAP edits, metric tables, and
+# the canonical Total Check displayed to users.
 mod_process_ui <- function(id) {
   ns <- NS(id)
   layout_columns(
@@ -13,16 +15,16 @@ mod_process_ui <- function(id) {
         div(class = "process-run-panel",
             div(class = "process-field-block",
                 selectInput(ns("channel_select"), "Select Channel", choices = NULL)),
-            uiOutput(ns("model_metric_ui")),
+            uiOutput(ns("role_summary_ui")),
             div(class = "process-run-actions",
                 actionButton(ns("btn_one"), "Process Selected",
-                             class = "btn-success btn-sm process-action-primary"),
+                             class = "btn-success btn-sm process-action-primary operation-trigger"),
                 actionButton(ns("btn_all"), "Process All",
-                             class = "btn-warning btn-sm process-action-primary"),
+                             class = "btn-warning btn-sm process-action-primary operation-trigger"),
                 actionButton(ns("btn_failed"), "Reprocess Failed Only",
-                             class = "btn-outline-danger btn-sm process-action-secondary"),
+                             class = "btn-outline-danger btn-sm process-action-secondary operation-trigger"),
                 actionButton(ns("btn_changed"), "Reprocess Changed",
-                             class = "btn-outline-secondary btn-sm process-action-secondary"))),
+                             class = "btn-outline-secondary btn-sm process-action-secondary operation-trigger"))),
         hr(class = "hr-sm"),
         div(class = "process-run-summary",
             uiOutput(ns("batch_summary")),
@@ -44,26 +46,21 @@ mod_process_ui <- function(id) {
                        class = "btn-outline-secondary btn-sm btn-nav-icon")
         )
       ),
-      navset_card_underline(
-        nav_panel("Activity",
-                  uiOutput(ns("period_filter_ui")),
-                  uiOutput(ns("activity_kpis")),
-                  uiOutput(ns("threshold_ui")),
-                  uiOutput(ns("merge_plan_toolbar")),
-                  uiOutput(ns("config_merge_report")),
-                  DTOutput(ns("diag_act"))),
-        nav_panel("Spend",       DTOutput(ns("diag_cost"))),
-        nav_panel("Total Check", DTOutput(ns("diag_check")))
-      )
+      uiOutput(ns("process_tabs"))
     )
   )
 }
-
-# â”€â”€ Server â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -----------------------------------------------------------------------
+# Server: result stores, processing pipelines, SAP, and metric views.
+# -----------------------------------------------------------------------
 mod_process_server <- function(id, data, config, channels,
                                update_merges = NULL,
-                               config_import_event = reactive(NULL)) {
+                               config_import_event = reactive(NULL),
+                               performance_cache = NULL,
+                               operation_status = NULL) {
   moduleServer(id, function(input, output, session) {
+    performance_cache <- ensure_performance_cache(performance_cache)
+    operation_status <- operation_status %||% new_operation_status(session)
 
     results_store       <- reactiveValues()
     original_store      <- reactiveValues()
@@ -72,13 +69,19 @@ mod_process_server <- function(id, data, config, channels,
     clean_store         <- reactiveValues()
     process_errors      <- reactiveValues()
     result_signatures   <- reactiveValues()
+    result_versions     <- reactiveValues()
+    async_total_checks  <- reactiveValues()
     results_trigger     <- reactiveVal(0L)
     is_batch_processing <- reactiveVal(FALSE)
     batch_summary_state <- reactiveVal(NULL)
 
     get_res  <- function(nm) results_store[[nm]]
+    bump_result_version <- function(nm) {
+      result_versions[[nm]] <- as.integer(result_versions[[nm]] %||% 0L) + 1L
+    }
     set_res  <- function(nm, val) {
       results_store[[nm]] <- val
+      bump_result_version(nm)
       if (!isTRUE(is_batch_processing()))
         results_trigger(isolate(results_trigger()) + 1L)
     }
@@ -94,18 +97,73 @@ mod_process_server <- function(id, data, config, channels,
         results_trigger(isolate(results_trigger()) + 1L)
     }
 
+    current_total_check <- function(nm) {
+      cfg <- channels()[[nm]]
+      d <- data()
+      cached <- async_total_checks[[nm]]
+      if (is.null(cfg) || is.null(d) || is.null(cached)) return(NULL)
+      expected <- pso_cache_key(
+        "async-total-check", current_async_data_signature(d),
+        channel_signature(canonical_process_cfg(cfg)),
+        result_versions[[nm]] %||% 0L
+      )
+      if (identical(cached$signature %||% "", expected)) cached$value else NULL
+    }
+
+    channel_review_messages <- function(nm) {
+      messages <- character(0)
+      check <- current_total_check(nm)
+      if (is.null(check)) {
+        messages <- c(messages, "Total Check unavailable")
+      } else if (!identical(check$status %||% "error", "ok")) {
+        messages <- c(messages, check$summary$message %||% "Total Check requires review")
+      }
+      merge_review <- sum(vapply(get_log(nm), function(item) {
+        identical(item$status %||% "", "needs_review")
+      }, logical(1)))
+      if (merge_review > 0L) {
+        messages <- c(messages, paste(merge_review, "SAP item(s) require review"))
+      }
+      unique(messages)
+    }
+
     valid_nm <- function(nm)
       !is.null(nm) && length(nm) == 1 && !is.na(nm) && nzchar(nm)
 
+    select_modeled_tab <- function() {
+      session$onFlushed(function() {
+        tryCatch(bslib::nav_select("metric_tabs", "modeled", session = session),
+                 error = function(e) NULL)
+      }, once = TRUE)
+    }
+
     metric_label <- function(metric) {
       if (identical(normalize_model_metric(metric), "spend")) "Spend/Cost" else "Activity"
+    }
+
+    for_indices_metric_for_cfg <- function(cfg) {
+      modeled <- normalize_model_metric(
+        cfg$modeled_role %||% cfg$model_metric %||% "activity"
+      )
+      role <- cfg$for_indices_role %||% ""
+      if (is.na(role) || !nzchar(role) ||
+          identical(normalize_model_metric(role), modeled)) {
+        role <- if (identical(modeled, "spend")) "activity" else "spend"
+      }
+      normalize_model_metric(role)
     }
 
     active_model_metric <- reactive({
       nm <- input$channel_select
       cfg <- if (valid_nm(nm)) channels()[[nm]] else NULL
       cfg <- reconcile_channel_metric_keywords(cfg)
-      normalize_model_metric(input$model_metric %||% cfg$model_metric %||% "activity")
+      normalize_model_metric(cfg$modeled_role %||% cfg$model_metric %||% "activity")
+    })
+
+    active_for_indices_metric <- reactive({
+      nm <- input$channel_select
+      cfg <- if (valid_nm(nm)) channels()[[nm]] else NULL
+      for_indices_metric_for_cfg(cfg %||% list())
     })
 
     metric_total_col <- function(metric) {
@@ -116,254 +174,84 @@ mod_process_server <- function(id, data, config, channels,
       if (identical(normalize_model_metric(metric), "spend")) "pct_total_spend" else "pct_total_activity"
     }
 
-    metric_display_columns <- function(df, metric) {
-      metric <- normalize_model_metric(metric)
-      total_name <- if (identical(metric, "spend")) "Total Spend" else "Total Activity"
-      pct_name <- if (identical(metric, "spend")) "Pct Total Spend" else "Pct Total Activity"
-      weeks_name <- if (identical(metric, "spend")) "Weeks With Spend" else "Weeks With Activity"
-      rename_map <- c(
-        total_activity = "Total Activity",
-        pct_total_activity = "Pct Total Activity",
-        total_spend = "Total Spend",
-        pct_total_spend = "Pct Total Spend",
-        max_index = "Max Index",
-        max = "Max",
-        max_no_outlier = "Max No Outlier",
-        num_weeks_activity = "Weeks With Activity",
-        num_weeks_spend = "Weeks With Spend",
-        min_consecutive_weeks = "Max Consecutive Weeks",
-        sd = "SD",
-        min = "Min",
-        quartile_1 = "Q1",
-        median = "Median",
-        quartile_3 = "Q3"
-      )
-      names(df) <- vapply(names(df), function(nm) {
-        if (nm %in% names(rename_map)) rename_map[[nm]] else nm
-      }, character(1))
-      attr(df, "total_col") <- total_name
-      attr(df, "pct_col") <- pct_name
-      attr(df, "weeks_col") <- weeks_name
-      df
-    }
+    metric_display_columns <- sap_metric_display_columns
 
-    collapse_total_check_values <- function(df, group_cols, value_col, out_col,
-                                            tolerance = 0.01) {
-      if (is.null(df) || !nrow(df) || !length(group_cols) ||
-          !value_col %in% names(df)) {
-        return(tibble::tibble())
-      }
-      group_cols <- intersect(group_cols, names(df))
-      if (!length(group_cols)) return(tibble::tibble())
-
-      df %>%
-        dplyr::select(dplyr::all_of(c(group_cols, value_col))) %>%
-        dplyr::rename(.__value = dplyr::all_of(value_col)) %>%
-        dplyr::mutate(.__value = suppressWarnings(as.numeric(.__value))) %>%
-        dplyr::group_by(dplyr::across(dplyr::all_of(group_cols))) %>%
-        dplyr::summarise(
-          .__total = {
-            vals <- .__value[!is.na(.__value) & .__value != 0]
-            if (!length(vals)) {
-              0
-            } else if ((max(vals) - min(vals)) <= tolerance) {
-              vals[1]
-            } else {
-              sum(vals, na.rm = TRUE)
-            }
-          },
-          .groups = "drop"
-        ) %>%
-        dplyr::rename(!!out_col := .__total)
-    }
-
-    build_total_check_splits_from_rae <- function(d, cfg, gcfg, nm, cross_cols,
-                                                  model_metric,
-                                                  scope_min_p, scope_max_p) {
-      empty <- function(reason) {
-        list(data = tibble::tibble(), reason = reason)
-      }
-      if (is.null(d) || is.null(d$all_rags) ||
-          !"Period" %in% names(d$all_rags) ||
-          !"VariableName" %in% names(d$all_rags) ||
-          !"VariableValue" %in% names(d$all_rags)) {
-        return(empty("RAE data is not available or is missing Period, VariableName or VariableValue."))
-      }
-
-      source_data <- as.data.frame(d$all_rags)
-      source_data$Period <- if (inherits(source_data$Period, "Date")) {
-        source_data$Period
-      } else {
-        parse_period_robust(source_data$Period)
-      }
-      source_data <- source_data[!is.na(source_data$Period), , drop = FALSE]
-      if (!nrow(source_data)) return(empty("No parseable RAE periods found."))
-
-      if (!is.na(scope_min_p)) source_data <- source_data[source_data$Period >= scope_min_p, , drop = FALSE]
-      if (!is.na(scope_max_p)) source_data <- source_data[source_data$Period <= scope_max_p, , drop = FALSE]
-      if (!nrow(source_data)) return(empty("No RAE rows in the effective channel/date range."))
-
-      vi <- cfg$varname_include %||% character(0)
-      vi <- vi[!is.na(vi) & nzchar(trimws(as.character(vi)))]
-      if (length(vi) > 0) {
-        vi <- expand_varname_include_with_spend(
-          unique(source_data$VariableName),
-          vi,
-          cfg$spend_keyword %||% NULL
-        )
-        vi <- expand_analytical_keys_to_variable_names(unique(source_data$VariableName), vi)
-        vi <- unique(trimws(as.character(vi)))
-        vi <- vi[!is.na(vi) & nzchar(vi)]
-      }
-      if (length(vi) > 0) {
-        vn <- trimws(as.character(source_data$VariableName))
-        match_mode <- cfg$varname_match_mode %||%
-          if (identical(cfg$source %||% "", "vof")) "exact" else "prefix"
-        keep <- if (identical(match_mode, "exact")) {
-          tolower(vn) %in% tolower(vi)
-        } else {
-          pattern <- paste(
-            paste0("^", stringr::str_replace_all(vi, "([\\W])", "\\\\\\1")),
-            collapse = "|"
-          )
-          grepl(pattern, vn, ignore.case = TRUE, perl = TRUE)
-        }
-        source_data <- source_data[keep %in% TRUE, , drop = FALSE]
-      }
-      if (!nrow(source_data)) return(empty("No RAE rows matched the channel VariableName filter."))
-
-      filter_regex <- function(df, col, pats) {
-        if (!col %in% names(df)) return(df)
-        for (p in pats %||% character(0)) {
-          if (nchar(p %||% "") > 0) {
-            df <- df[!grepl(p, df[[col]], ignore.case = TRUE), , drop = FALSE]
-          }
-        }
-        df
-      }
-
-      source_data <- filter_regex(source_data, "VariableName", cfg$varname_exclude)
-      source_data <- filter_regex(source_data, "Campaign", cfg$campaign_exclude)
-      source_data <- filter_regex(source_data, "Outlet", cfg$outlet_exclude)
-      source_data <- filter_regex(source_data, "Creative", cfg$creative_exclude)
-
-      has_geo_overrides <- length(cfg$segment_overrides %||% list()) > 0 &&
-        any(vapply(cfg$segment_overrides %||% list(), function(o) {
-          length(o$geography_exclude %||% character(0)) > 0
-        }, logical(1)))
-      if (!has_geo_overrides) {
-        source_data <- filter_regex(source_data, "Geography", cfg$geography_exclude)
-      }
-
-      source_data <- tryCatch(
-        filter_to_analytical_varkey_combinations(
-          source_data,
-          cfg,
-          d$schema_metadata %||% NULL
-        ),
-        error = function(e) source_data
-      )
-
-      if (has_geo_overrides) {
-        seg_ovr <- Filter(\(o) isTRUE(o$seg == 1L), cfg$segment_overrides %||% list())
-        geo_exc <- if (length(seg_ovr) > 0) {
-          seg_ovr[[1]]$geography_exclude %||% character(0)
-        } else {
-          cfg$geography_exclude %||% character(0)
-        }
-        source_data <- filter_regex(source_data, "Geography", geo_exc)
-      }
-      if (!nrow(source_data)) {
-        return(empty("No RAE rows remained after geo, exclusion and useful-longitudinal filters."))
-      }
-
-      source_data$VariableValue <- suppressWarnings(as.numeric(as.character(source_data$VariableValue)))
-      source_data$VariableValue[is.na(source_data$VariableValue)] <- 0
-      source_data <- apply_dimension_breaks(
-        source_data,
-        cfg$dimension_breaks %||% list(),
-        channel_name = cfg$channel_name %||% nm
-      )
-      source_data <- apply_dimension_aliases(source_data, cfg$dimension_aliases %||% list())
-
-      split_cols_technical <- unique(c("VariableName", cfg$split_columns %||% character(0)))
-      source_data$SplitName <- build_split_name_from_columns(source_data, split_cols_technical)
-
-      start_d <- tryCatch(as.Date(gcfg$start_report_date), error = \(e) as.Date(NA))
-      update_label <- gcfg$update_label %||% "Focus"
-      period_tag <- rep("focus", nrow(source_data))
-      if (!is.na(start_d)) {
-        period_tag[source_data$Period < start_d] <- "nonfocus"
-      }
-      nf_sfx <- build_split_period_suffix(
-        update_label,
-        focus = FALSE,
-        time_break_label = cfg$time_break_label %||% "",
-        geo_label = cfg$geo_label %||% ""
-      )
-      source_data$VariableSplit <- ifelse(
-        period_tag == "focus",
-        paste0(source_data$SplitName, "_", build_split_period_suffix(
-          update_label,
-          focus = TRUE,
-          geo_label = cfg$geo_label %||% ""
-        )),
-        paste0(source_data$SplitName, "_", nf_sfx)
-      )
-
-      spend_kw <- cfg$spend_keyword %||% "Spend"
-      act_kw <- cfg$activity_keyword %||% "Activity"
-      keep_metric <- if (identical(normalize_model_metric(model_metric), "spend")) {
-        grepl(spend_kw, source_data$VariableSplit, ignore.case = TRUE)
-      } else {
-        grepl(act_kw, source_data$VariableSplit, ignore.case = TRUE) &
-          !grepl(spend_kw, source_data$VariableSplit, ignore.case = TRUE)
-      }
-      source_data <- source_data[keep_metric %in% TRUE, , drop = FALSE]
-      if (!nrow(source_data)) {
-        metric_txt <- metric_label(model_metric)
-        keyword_txt <- if (identical(normalize_model_metric(model_metric), "spend")) spend_kw else act_kw
-        return(empty(paste0("No ", metric_txt, " RAE rows found after applying keyword '", keyword_txt, "'.")))
-      }
-
-      group_cols <- intersect(c(cross_cols, "Period"), names(source_data))
-      if (!"Period" %in% group_cols) group_cols <- c(group_cols, "Period")
-      group_cols <- unique(group_cols)
-      if (!length(group_cols)) return(empty("No common cross-section/date columns available in RAE."))
-
-      agg <- data.table::as.data.table(source_data)[
-        ,
-        .(SplitsTotal = sum(VariableValue, na.rm = TRUE)),
-        by = group_cols
-      ]
-      list(data = as.data.frame(agg), reason = "")
-    }
-
-    output$model_metric_ui <- renderUI({
+    output$role_summary_ui <- renderUI({
       nm <- input$channel_select
       if (!valid_nm(nm)) return(NULL)
       cfg <- channels()[[nm]] %||% list()
-      cfg <- reconcile_channel_metric_keywords(cfg)
-      selected <- normalize_model_metric(input$model_metric %||% cfg$model_metric %||% "activity")
-      div(class = "process-model-metric",
-          tags$span(tags$strong("Model metric", class = "process-control-label")),
-          radioButtons(session$ns("model_metric"), NULL,
-                       choices = c("Activity" = "activity", "Spend/Cost" = "spend"),
-                       selected = selected, inline = TRUE))
+      modeled <- normalize_model_metric(
+        cfg$modeled_role %||% cfg$model_metric %||% "activity"
+      )
+      for_indices_role <- for_indices_metric_for_cfg(cfg)
+      for_indices_found <- (cfg$role_pair_status %||% "Missing") %in%
+        c("Matched", "Partial") &&
+        length(cfg$for_indices_varname_include %||% character(0)) > 0
+      source <- cfg$role_pair_source %||%
+        if (identical(cfg$role_pair_status %||% "", "Matched"))
+          "VOF / ModelDetails" else "Not found"
+      div(
+        class = "process-role-summary",
+        div(class = "process-role-row",
+            tags$span("Modeled", class = "process-role-label"),
+            tags$strong(metric_label(modeled), class = "process-role-value modeled")),
+        div(class = "process-role-row",
+            tags$span("ForIndices", class = "process-role-label"),
+            tags$strong(
+              if (for_indices_found) metric_label(for_indices_role) else "Not found",
+              class = paste("process-role-value",
+                            if (for_indices_found) "for_indices" else "missing"))),
+        div(class = "process-role-source",
+            icon(if (identical(source, "RAE fallback")) "database" else "link"),
+            tags$span(source))
+      )
+    })
+
+    output$process_tabs <- renderUI({
+      nm <- input$channel_select
+      cfg <- if (valid_nm(nm)) channels()[[nm]] %||% list() else list()
+      modeled <- normalize_model_metric(
+        cfg$modeled_role %||% cfg$model_metric %||% "activity"
+      )
+      for_indices <- for_indices_metric_for_cfg(cfg)
+      navset_card_underline(
+        id = session$ns("metric_tabs"),
+        selected = "modeled",
+        header = uiOutput(session$ns("period_filter_ui")),
+        nav_panel(
+          tags$span(metric_label(modeled), HTML("&nbsp;&middot;&nbsp;"), "Modeled"),
+          value = "modeled",
+          uiOutput(session$ns("activity_kpis")),
+          uiOutput(session$ns("threshold_ui")),
+          uiOutput(session$ns("merge_plan_toolbar")),
+          uiOutput(session$ns("config_merge_report")),
+          DTOutput(session$ns("diag_act"))
+        ),
+        nav_panel(
+          tags$span(metric_label(for_indices), HTML("&nbsp;&middot;&nbsp;"), "ForIndices"),
+          value = "for_indices",
+          uiOutput(session$ns("for_indices_status_ui")),
+          DTOutput(session$ns("diag_cost"))
+        ),
+        nav_panel(
+          "Total Check",
+          value = "total_check",
+          uiOutput(session$ns("total_check_summary_ui")),
+          uiOutput(session$ns("total_check_details_ui"))
+        )
+      )
     })
 
     observeEvent(input$channel_select, {
       nm <- input$channel_select
       if (!valid_nm(nm)) return()
-      cfg <- channels()[[nm]] %||% list()
-      cfg <- reconcile_channel_metric_keywords(cfg)
-      updateRadioButtons(session, "model_metric",
-                         selected = normalize_model_metric(cfg$model_metric %||% "activity"))
+      select_modeled_tab()
       tryCatch(DT::dataTableProxy(session$ns("diag_act")) %>% DT::selectRows(NULL),
                error = function(e) NULL)
     }, ignoreInit = TRUE)
 
-    channel_source_data <- function(all_rags, cfg) {
+    channel_source_data <- function(all_rags, cfg, indexed_rags = NULL,
+                                    source_signature = NULL) {
       if (is.null(all_rags) || is.null(cfg) || !"VariableName" %in% names(all_rags))
         return(all_rags)
 
@@ -371,13 +259,23 @@ mod_process_server <- function(id, data, config, channels,
       if (!length(vi))
         return(all_rags)
 
-      vi <- expand_varname_include_with_spend(
-        unique(all_rags$VariableName),
-        vi,
-        cfg$spend_keyword %||% NULL
-      )
+      source_sig <- source_signature %||% data_signature(all_rags)
+      vars_key <- pso_cache_key("process-source-variables", source_sig)
+      available_vars <- pso_cache_get(performance_cache, vars_key)
+      if (is.null(available_vars)) {
+        available_vars <- unique(trimws(as.character(all_rags$VariableName)))
+        pso_cache_set(performance_cache, vars_key, available_vars)
+      }
+
+      if (!length(cfg$modeled_varname_include %||% character(0))) {
+        vi <- expand_varname_include_with_spend(
+          available_vars,
+          vi,
+          cfg$spend_keyword %||% NULL
+        )
+      }
       vi <- expand_analytical_keys_to_variable_names(
-        unique(all_rags$VariableName),
+        available_vars,
         vi
       )
       vi <- unique(trimws(as.character(vi)))
@@ -385,21 +283,23 @@ mod_process_server <- function(id, data, config, channels,
       if (!length(vi))
         return(all_rags)
 
-      vn <- trimws(as.character(all_rags$VariableName))
+      cache_key <- pso_cache_key(
+        "process-channel-source",
+        source_sig,
+        channel_signature(cfg), vi
+      )
+      cached <- pso_cache_get(performance_cache, cache_key)
+      if (!is.null(cached)) return(data.table::copy(cached))
+
       match_mode <- cfg$varname_match_mode %||%
         if (identical(cfg$source %||% "", "vof")) "exact" else "prefix"
-
-      keep <- if (identical(match_mode, "exact")) {
-        tolower(vn) %in% tolower(vi)
-      } else {
-        pattern <- paste(
-          paste0("^", stringr::str_replace_all(vi, "([\\W])", "\\\\\\1")),
-          collapse = "|"
-        )
-        grepl(pattern, vn, ignore.case = TRUE, perl = TRUE)
-      }
-
-      all_rags[keep %in% TRUE, , drop = FALSE]
+      out <- subset_indexed_rae(
+        indexed_rags %||% build_indexed_rae(all_rags),
+        vi,
+        if (identical(match_mode, "exact")) "exact" else "prefix"
+      )
+      pso_cache_set(performance_cache, cache_key, data.table::copy(out))
+      out
     }
 
     empty_spend_diag <- function() {
@@ -432,19 +332,25 @@ mod_process_server <- function(id, data, config, channels,
                             fontWeight = "600")
     }
 
+    # Signatures protect asynchronous results: a worker response is integrated
+    # only while its data, configuration, and result version remain current.
     channel_signature <- function(cfg) {
       if (is.null(cfg)) return("")
       paste(c(
         cfg$model_variable %||% "",
         paste(cfg$varname_include %||% character(0), collapse = "|"),
+        paste(cfg$modeled_varname_include %||% character(0), collapse = "|"),
+        paste(cfg$for_indices_varname_include %||% character(0), collapse = "|"),
+        cfg$modeled_role %||% "",
+        cfg$role_pair_status %||% "",
         cfg$activity_keyword %||% "",
         cfg$spend_keyword %||% "",
         cfg$time_break_label %||% "",
-        cfg$break_missing_part_value %||% "Total",
+        canonical_break_missing_part_value(),
         paste(cfg$split_columns %||% character(0), collapse = "|"),
         paste(vapply(cfg$dimension_breaks %||% list(), function(b)
           paste(b$column %||% "", b$separator %||% "",
-                b$n_parts %||% "", b$missing_part_value %||% "",
+                b$n_parts %||% "", canonical_break_missing_part_value(),
                 paste(b$names %||% character(0), collapse = "~"),
                 sep = ":"), character(1)), collapse = "|"),
         paste(vapply(cfg$saved_merges %||% list(), function(m)
@@ -454,6 +360,503 @@ mod_process_server <- function(id, data, config, channels,
         as.character(cfg$min_period %||% ""),
         as.character(cfg$max_period %||% "")
       ), collapse = "||")
+    }
+
+    current_async_data_signature <- function(d = data()) {
+      pso_cache_key(
+        "async-process-data",
+        d$data_signature %||% data_signature(d$all_rags),
+        data_signature(d$analytical),
+        data_signature(d$dates_df)
+      )
+    }
+
+    canonical_process_cfg <- function(cfg) {
+      if (is.null(cfg)) return(NULL)
+      cfg$model_metric <- normalize_model_metric(
+        cfg$modeled_role %||% cfg$model_metric %||% "activity"
+      )
+      reconcile_channel_metric_keywords(cfg)
+    }
+
+    async_enabled <- isTRUE(ensure_pso_async(here::here()))
+    async_state <- new.env(parent = emptyenv())
+    async_state$active <- FALSE
+    async_state$id <- ""
+    async_state$title <- ""
+    async_state$queue <- character(0)
+    async_state$slots <- vector("list", 2L)
+    async_state$items <- list()
+    async_state$completed <- 0L
+    async_state$processed <- 0L
+    async_state$failed <- 0L
+    async_state$review <- 0L
+    async_state$discarded <- 0L
+    async_state$skipped <- 0L
+    async_state$already_done <- 0L
+    async_state$started <- NULL
+    async_state$warnings <- character(0)
+    async_state$dispatching <- FALSE
+
+    async_items <- function() unname(async_state$items)
+
+    update_async_modal <- function(detail = "") {
+      total <- length(async_state$items)
+      terminal_statuses <- c("Completed", "Review", "Failed", "Discarded", "Skipped")
+      done <- sum(vapply(
+        async_state$items,
+        function(item) (item$status %||% "") %in% terminal_statuses,
+        logical(1)
+      ))
+      async_state$completed <- as.integer(done)
+      progress_detail <- paste0(
+        done, " of ", total, " completed",
+        if (nzchar(detail)) paste0(" | ", detail) else ""
+      )
+      operation_status$update(
+        stage = "Processing channels",
+        progress = if (total) as.numeric(done) / as.numeric(total) else 1,
+        detail = progress_detail,
+        items = async_items(),
+        counts = list(
+          Completed = async_state$processed,
+          Review = async_state$review,
+          Failed = async_state$failed,
+          Discarded = async_state$discarded,
+          Pending = max(0L, total - done - sum(vapply(
+            async_state$slots, function(x) !is.null(x), logical(1)
+          )))
+        )
+      )
+    }
+
+    set_async_item <- function(nm, status, detail = "") {
+      async_state$items[[nm]] <- operation_item(nm, status, detail)
+      invisible(NULL)
+    }
+
+    safe_update_async_modal <- function(detail = "") {
+      tryCatch(update_async_modal(detail), error = function(e) {
+        message("[pso.async] Progress display update failed: ", conditionMessage(e))
+        NULL
+      })
+    }
+
+    record_async_failure <- function(nm, message) {
+      process_errors[[nm]] <- message
+      async_state$failed <- async_state$failed + 1L
+      async_state$warnings <- c(async_state$warnings, paste0(nm, ": ", message))
+      set_async_item(nm, "Failed", message)
+      invisible(NULL)
+    }
+
+    validate_process_inputs <- function(nm, d, gcfg, cfg) {
+      if (is.null(cfg)) return("Channel configuration unavailable")
+      if (is.null(d$all_rags)) return("All RAGs data not uploaded")
+      if (is.null(d$analytical)) return("AnalyticalDataset not uploaded")
+      if (is.null(d$dates_df)) return("Date mapping is unavailable")
+      if (is.null(gcfg$start_report_date) || is.null(gcfg$end_report_date))
+        return("Reporting period not configured")
+      if (is.null(gcfg$cross_cols)) return("Cross-sections not detected")
+      model_var <- cfg$model_variable %||% ""
+      if (!nzchar(model_var)) return("model_variable not configured")
+      if (!model_var %in% names(d$analytical))
+        return(paste0("'", model_var, "' not found in AnalyticalDataset"))
+      NULL
+    }
+
+    # Snapshot only serializable inputs before dispatching work to a worker.
+    prepare_async_payload <- function(nm) {
+      d <- isolate(data())
+      gcfg <- isolate(config())
+      cfg <- isolate(channels()[[nm]])
+      issue <- validate_process_inputs(nm, d, gcfg, cfg)
+      if (!is.null(issue)) return(list(error = issue))
+
+      cfg <- canonical_process_cfg(cfg)
+      prepared_at <- proc.time()
+      rags_nm <- channel_source_data(
+        d$all_rags, cfg, d$all_rags_indexed, d$data_signature
+      )
+      payload <- build_async_channel_payload(
+        channel = nm,
+        cfg = cfg,
+        all_rags = rags_nm,
+        analytical = d$analytical,
+        dates_df = d$dates_df,
+        global_config = gcfg,
+        schema_metadata = d$schema_metadata,
+        operation_id = async_state$id,
+        data_signature_value = current_async_data_signature(d),
+        config_signature_value = channel_signature(cfg),
+        result_version = result_versions[[nm]] %||% 0L
+      )
+      payload$preparation_seconds <- round(
+        (proc.time() - prepared_at)[["elapsed"]], 3
+      )
+      max_bytes <- as.numeric(getOption("pso.mirai.queue_memory_mb", 512)) * 1024^2
+      list(
+        payload = payload,
+        use_sync = is.finite(max_bytes) &&
+          payload$payload_size_estimate_bytes > max_bytes / 2
+      )
+    }
+
+    run_sync_channel_pipeline <- function(nm, d, cfg, gcfg, rags_nm) {
+      cfg <- canonical_process_cfg(cfg)
+      payload <- build_async_channel_payload(
+        channel = nm,
+        cfg = cfg,
+        all_rags = rags_nm,
+        analytical = d$analytical,
+        dates_df = d$dates_df,
+        global_config = gcfg,
+        schema_metadata = d$schema_metadata,
+        operation_id = "synchronous",
+        data_signature_value = current_async_data_signature(d),
+        config_signature_value = channel_signature(cfg),
+        result_version = result_versions[[nm]] %||% 0L
+      )
+      process_channel_pipeline(payload)
+    }
+
+    # Apply worker output on the session process after validating its snapshot.
+    integrate_async_result <- function(job) {
+      integration_started <- proc.time()
+      nm <- job$channel %||% ""
+      if (!isTRUE(async_state$active) ||
+          !identical(job$operation_id %||% "", async_state$id)) return("ignored")
+
+      cfg_now <- isolate(channels()[[nm]])
+      cfg_compare <- canonical_process_cfg(cfg_now)
+      data_now <- isolate(data())
+      stale <- is.null(cfg_now) ||
+        !identical(job$config_signature %||% "", channel_signature(cfg_compare)) ||
+        !identical(job$data_signature %||% "", current_async_data_signature(data_now)) ||
+        !identical(as.integer(job$result_version %||% 0L),
+                   as.integer(result_versions[[nm]] %||% 0L))
+      if (stale) {
+        async_state$discarded <- async_state$discarded + 1L
+        async_state$warnings <- c(
+          async_state$warnings,
+          paste0(nm, ": result discarded because files or configuration changed.")
+        )
+        set_async_item(nm, "Discarded", "Configuration changed; reprocess required")
+        return("discarded")
+      }
+
+      if (!isTRUE(job$ok)) {
+        msg <- job$error %||% "Unknown processing error"
+        process_errors[[nm]] <- msg
+        async_state$failed <- async_state$failed + 1L
+        async_state$warnings <- c(async_state$warnings, paste0(nm, ": ", msg))
+        set_async_item(nm, "Failed", msg)
+        return("failed")
+      }
+
+      clean_store[[nm]] <- job$clean
+      results_store[[nm]] <- job$final
+      bump_result_version(nm)
+      original_store[[nm]] <- job$final
+      merge_log_store[[nm]] <- job$merge_report %||% list()
+      history_store[[nm]] <- list()
+      process_errors[[nm]] <- NULL
+      result_signatures[[nm]] <- channel_signature(cfg_now)
+      async_total_checks[[nm]] <- list(
+        signature = pso_cache_key(
+          "async-total-check", current_async_data_signature(data_now),
+          channel_signature(canonical_process_cfg(cfg_now)), result_versions[[nm]]
+        ),
+        value = job$total_check
+      )
+
+      merge_review <- sum(vapply(job$merge_report %||% list(), function(x) {
+        identical(x$status %||% "", "needs_review")
+      }, logical(1)))
+      total_review <- !identical(job$total_check$status %||% "error", "ok")
+      if (merge_review > 0L || total_review) {
+        async_state$review <- async_state$review + 1L
+        detail <- c(
+          if (merge_review > 0L) paste0(merge_review, " SAP item(s)"),
+          if (total_review) "Total Check requires review"
+        )
+        set_async_item(nm, "Review", paste(detail, collapse = " | "))
+        async_state$warnings <- c(
+          async_state$warnings,
+          paste0(nm, ": ", paste(detail, collapse = " | "), ".")
+        )
+      } else {
+        async_state$processed <- async_state$processed + 1L
+        set_async_item(
+          nm, "Completed",
+          paste0("Processed in ", round(job$execution_seconds %||% 0, 1), "s")
+        )
+      }
+      if (isTRUE(getOption("pso.profile", FALSE))) {
+        queue_seconds <- as.numeric(difftime(
+          job$worker_started_at, job$queued_at, units = "secs"
+        ))
+        transfer_seconds <- as.numeric(difftime(
+          Sys.time(), job$completed_at, units = "secs"
+        ))
+        integration_seconds <- (proc.time() - integration_started)[["elapsed"]]
+        message(sprintf(
+          paste0("[pso.async] %s payload-estimate=%.1fMB prepare=%.3fs queue=%.3fs ",
+                 "execute=%.3fs transfer=%.3fs integrate=%.3fs"),
+          nm, (job$payload_size_estimate_bytes %||% 0) / 1024^2,
+          job$preparation_seconds %||% NA_real_, queue_seconds,
+          job$execution_seconds %||% NA_real_, transfer_seconds,
+          integration_seconds
+        ))
+      }
+      "integrated"
+    }
+
+    finish_async_operation <- function() {
+      if (!isTRUE(async_state$active)) return(invisible(NULL))
+      elapsed <- round(as.numeric(difftime(Sys.time(), async_state$started,
+                                           units = "secs")), 1)
+      batch_summary_state(list(
+        processed = async_state$processed,
+        review = async_state$review,
+        already_done = async_state$already_done,
+        skipped = async_state$skipped + async_state$discarded,
+        failed = async_state$failed,
+        elapsed = elapsed
+      ))
+      parts <- c(
+        if (async_state$processed) paste0(async_state$processed, " processed"),
+        if (async_state$review) paste0(async_state$review, " review"),
+        if (async_state$failed) paste0(async_state$failed, " failed"),
+        if (async_state$discarded) paste0(async_state$discarded, " discarded"),
+        if (async_state$already_done) paste0(async_state$already_done, " already done"),
+        paste0(elapsed, "s")
+      )
+      async_state$active <- FALSE
+      is_batch_processing(FALSE)
+      results_trigger(isolate(results_trigger()) + 1L)
+      operation_status$complete(
+        paste(parts, collapse = " | "),
+        warnings = async_state$warnings,
+        items = async_items(),
+        auto_close_ms = 3000L
+      )
+      invisible(NULL)
+    }
+
+    async_tasks <- if (async_enabled) {
+      lapply(seq_len(2L), function(i) {
+        shiny::ExtendedTask$new(function(payload) {
+          submit_pso_mirai(payload)
+        })
+      })
+    } else list()
+
+    dispatch_async_jobs <- NULL
+    complete_async_slot <- function(slot, job = NULL, task_error = NULL) {
+      slot_job <- async_state$slots[[slot]]
+      if (is.null(slot_job)) return(invisible(NULL))
+      on.exit(later::later(dispatch_async_jobs, delay = 0), add = TRUE)
+      nm <- slot_job$channel
+      if (!is.null(task_error)) {
+        job <- list(
+          ok = FALSE, error = task_error, channel = nm,
+          operation_id = slot_job$operation_id,
+          data_signature = slot_job$data_signature,
+          config_signature = slot_job$config_signature,
+          result_version = slot_job$result_version
+        )
+      }
+      worker_error <- if (!isTRUE(job$ok)) {
+        job$error %||% "Background worker returned no result."
+      } else NULL
+      if (!is.null(worker_error)) {
+        version_before <- result_versions[[nm]] %||% 0L
+        fallback_error <- tryCatch({
+          run_one(nm, do_gc = FALSE)
+          process_errors[[nm]]
+        }, error = function(e) conditionMessage(e))
+        version_after <- result_versions[[nm]] %||% 0L
+        if (is.null(fallback_error) && version_after > version_before) {
+          merge_review <- any(vapply(merge_log_store[[nm]] %||% list(), function(x) {
+            identical(x$status %||% "", "needs_review")
+          }, logical(1)))
+          check <- async_total_checks[[nm]]$value
+          total_review <- !is.null(check) && !identical(check$status %||% "error", "ok")
+          if (merge_review || total_review) {
+            async_state$review <- async_state$review + 1L
+            set_async_item(nm, "Review", "Processed synchronously; review diagnostics")
+          } else {
+            merge_review <- any(vapply(merge_log_store[[nm]] %||% list(), function(x) {
+              identical(x$status %||% "", "needs_review")
+            }, logical(1)))
+            check <- async_total_checks[[nm]]$value
+            total_review <- is.null(check) || !identical(check$status %||% "error", "ok")
+            if (merge_review || total_review) {
+              async_state$review <- async_state$review + 1L
+              set_async_item(nm, "Review", "Processed synchronously; diagnostics require review")
+            } else {
+              async_state$processed <- async_state$processed + 1L
+              set_async_item(nm, "Completed", "Processed with synchronous fallback")
+            }
+          }
+          async_state$warnings <- c(
+            async_state$warnings,
+            paste0(nm, ": background processing failed; synchronous fallback succeeded.")
+          )
+        } else {
+          details <- paste0(
+            "Background: ", worker_error,
+            if (!is.null(fallback_error)) paste0(" | Synchronous fallback: ", fallback_error)
+            else " | Synchronous fallback produced no result."
+          )
+          record_async_failure(nm, details)
+        }
+      } else {
+        integration_error <- tryCatch({
+          integrate_async_result(job)
+          NULL
+        }, error = function(e) conditionMessage(e))
+        if (!is.null(integration_error))
+          record_async_failure(nm, paste0("Could not integrate result: ", integration_error))
+      }
+      async_state$slots[slot] <- list(NULL)
+      async_state$completed <- async_state$completed + 1L
+      safe_update_async_modal(nm)
+      invisible(NULL)
+    }
+
+    if (length(async_tasks)) {
+      for (slot in seq_along(async_tasks)) local({
+        slot_id <- slot
+        observeEvent(async_tasks[[slot_id]]$status(), {
+          status <- async_tasks[[slot_id]]$status()
+          if (identical(status, "success")) {
+            value <- tryCatch(async_tasks[[slot_id]]$result(), error = function(e) e)
+            if (inherits(value, "error")) {
+              complete_async_slot(slot_id, task_error = conditionMessage(value))
+            } else {
+              complete_async_slot(slot_id, job = value)
+            }
+          } else if (identical(status, "error")) {
+            msg <- tryCatch({ async_tasks[[slot_id]]$result(); "Worker failed" },
+                            error = function(e) conditionMessage(e))
+            complete_async_slot(slot_id, task_error = msg)
+          }
+        }, ignoreInit = TRUE)
+      })
+    }
+
+    # Fill free worker slots in queue order; Review is terminal and never
+    # prevents the next channel from being dispatched.
+    dispatch_async_jobs <- function() {
+      if (!isTRUE(async_state$active) || isTRUE(async_state$dispatching))
+        return(invisible(NULL))
+      async_state$dispatching <- TRUE
+      on.exit(async_state$dispatching <- FALSE, add = TRUE)
+      free <- which(vapply(async_state$slots, is.null, logical(1)))
+      for (slot in free) {
+        if (!length(async_state$queue)) break
+        nm <- async_state$queue[[1]]
+        async_state$queue <- async_state$queue[-1]
+        prepared <- tryCatch(prepare_async_payload(nm), error = function(e) list(error = conditionMessage(e)))
+        if (!is.null(prepared$error)) {
+          record_async_failure(nm, prepared$error)
+          async_state$completed <- async_state$completed + 1L
+          next
+        }
+        if (isTRUE(prepared$use_sync)) {
+          set_async_item(nm, "Processing", "Large payload; synchronous fallback")
+          safe_update_async_modal(nm)
+          version_before <- result_versions[[nm]] %||% 0L
+          sync_error <- tryCatch({
+            run_one(nm, do_gc = FALSE)
+            process_errors[[nm]]
+          }, error = function(e) conditionMessage(e))
+          version_after <- result_versions[[nm]] %||% 0L
+          if (is.null(sync_error) && version_after > version_before) {
+            async_state$processed <- async_state$processed + 1L
+            set_async_item(nm, "Completed", "Processed with synchronous fallback")
+          } else {
+            record_async_failure(
+              nm,
+              sync_error %||% "Synchronous fallback ended without producing a result."
+            )
+          }
+          async_state$completed <- async_state$completed + 1L
+          next
+        }
+        payload <- prepared$payload
+        payload$queued_at <- Sys.time()
+        async_state$slots[[slot]] <- list(
+          channel = nm,
+          operation_id = payload$operation_id,
+          data_signature = payload$data_signature,
+          config_signature = payload$config_signature,
+          result_version = payload$result_version
+        )
+        set_async_item(
+          nm, "Processing",
+          paste0("Payload ~", round(payload$payload_size_estimate_bytes / 1024^2, 1), " MB")
+        )
+        safe_update_async_modal(nm)
+        invoke_error <- tryCatch({
+          async_tasks[[slot]]$invoke(payload)
+          NULL
+        }, error = function(e) conditionMessage(e))
+        if (!is.null(invoke_error)) {
+          record_async_failure(nm, invoke_error)
+          async_state$slots[slot] <- list(NULL)
+          async_state$completed <- async_state$completed + 1L
+          safe_update_async_modal(nm)
+        }
+      }
+      busy <- any(vapply(async_state$slots, function(x) !is.null(x), logical(1)))
+      if (!length(async_state$queue) && !busy &&
+          async_state$completed >= length(async_state$items)) {
+        finish_async_operation()
+      } else if (length(async_state$queue) && any(vapply(
+        async_state$slots, is.null, logical(1)
+      ))) {
+        later::later(dispatch_async_jobs, delay = 0)
+      }
+      invisible(NULL)
+    }
+
+    start_async_operation <- function(nms, id, title, already_done = 0L) {
+      # Batch jobs stay sequential until parallel processing is proven safe
+      # across full production datasets. Single-channel work may use mirai.
+      if (!async_enabled || !length(nms) || !identical(id, "process-selected"))
+        return(FALSE)
+      if (isTRUE(async_state$active) || operation_status$is_busy()) {
+        showNotification("Another operation is already running.", type = "warning")
+        return(TRUE)
+      }
+      async_state$active <- TRUE
+      async_state$id <- paste0(id, "-", format(Sys.time(), "%Y%m%d%H%M%OS3"))
+      async_state$title <- title
+      async_state$queue <- unique(nms)
+      async_state$slots <- vector("list", 2L)
+      async_state$items <- setNames(lapply(async_state$queue, operation_item), async_state$queue)
+      async_state$completed <- 0L
+      async_state$processed <- 0L
+      async_state$failed <- 0L
+      async_state$review <- 0L
+      async_state$discarded <- 0L
+      async_state$skipped <- 0L
+      async_state$already_done <- as.integer(already_done)
+      async_state$started <- Sys.time()
+      async_state$warnings <- character(0)
+      is_batch_processing(TRUE)
+      operation_status$start(
+        async_state$id, title,
+        c("Preparing channels", "Processing channels", "Running diagnostics", "Completed"),
+        total_items = length(nms),
+        detail = paste0(length(nms), " channel(s) queued")
+      )
+      update_async_modal("Dispatching workers")
+      dispatch_async_jobs()
+      TRUE
     }
 
     mark_result_current <- function(nm, cfg, saved_merges = NULL) {
@@ -513,8 +916,7 @@ mod_process_server <- function(id, data, config, channels,
         else paste(rest, collapse = "_")
       })
     }
-
-    # â”€â”€ Channel selector â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # Channel selector
     observe({
       updateSelectInput(session, "channel_select", choices = names(channels()))
     })
@@ -541,8 +943,7 @@ mod_process_server <- function(id, data, config, channels,
         tags$span(paste0(" (", idx, " / ", length(nms), ")"),
                   class = "ch-editor-counter"))
     })
-
-    # â”€â”€ Status panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # Status panel
     status_trigger <- reactive({
       results_trigger()
       names(channels())
@@ -560,7 +961,9 @@ mod_process_server <- function(id, data, config, channels,
         failed    <- !is.null(process_errors[[nm]])
         merge_log <- get_log(nm)
         n_merges  <- sum(vapply(merge_log, \(m) isTRUE(m$applied %||% TRUE), logical(1)))
-        n_review  <- sum(vapply(merge_log, \(m) identical(m$status %||% "", "needs_review"), logical(1)))
+        review_messages <- if (processed && !stale && !failed)
+          channel_review_messages(nm) else character(0)
+        needs_review <- length(review_messages) > 0L
         is_sel    <- identical(input$channel_select, nm)
         saved_m   <- channels()[[nm]]$saved_merges %||% list()
         n_saved   <- sum(vapply(saved_m, \(m) isTRUE(m$active), logical(1)))
@@ -568,7 +971,8 @@ mod_process_server <- function(id, data, config, channels,
           class = paste("status-item", if (is_sel) "selected" else ""),
           onclick = paste0("Shiny.setInputValue('", session$ns("ch_click"),
                            "','", nm, "',{priority:'event'});"),
-          if (processed) icon("circle-check", class = "icon-success-sm")
+          if (needs_review) icon("triangle-exclamation", class = "icon-warning-sm")
+          else if (processed) icon("circle-check", class = "icon-success-sm")
           else           icon("circle",        class = "icon-empty-status"),
           tags$span(nm, class = "status-item-name"),
           div(class = "status-badges",
@@ -576,12 +980,13 @@ mod_process_server <- function(id, data, config, channels,
                 tags$span("Failed", class = "badge-error"),
               if (stale)
                 tags$span("Needs reprocess", class = "badge-stale"),
-              if (processed && !stale && !failed)
+              if (processed && !stale && !failed && !needs_review)
                 tags$span("Processed", class = "badge-ready"),
+              if (processed && !stale && !failed && needs_review)
+                tags$span("Review", class = "badge-stale",
+                          title = paste(review_messages, collapse = " | ")),
               if (processed && n_merges > 0)
                 tags$span(paste0(n_merges, "m"), class = "badge-merge-count"),
-              if (processed && n_review > 0)
-                tags$span("Merge review", class = "badge-stale"),
               if (n_saved > 0)
                 tags$span(paste0(n_saved, " saved"), class = "badge-saved",
                           title = paste0(n_saved,
@@ -598,13 +1003,16 @@ mod_process_server <- function(id, data, config, channels,
       tryCatch(DT::dataTableProxy(session$ns("diag_act")) %>% DT::selectRows(NULL),
                error = \(e) NULL)
     }, ignoreInit = TRUE)
-
-    # â”€â”€ run_one â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # run_one
+    # Synchronous channel pipeline retained as the fallback and single-channel
+    # path. It stores clean and merged results separately for export and undo.
     run_one <- function(nm, do_gc = TRUE) {
+      op_single <- identical(operation_status$current_id(), "process-selected")
       d    <- data()
       cfg  <- channels()[[nm]]; req(cfg)
-      ui_metric <- if (identical(isolate(input$channel_select), nm)) isolate(input$model_metric) else NULL
-      cfg$model_metric <- normalize_model_metric(ui_metric %||% cfg$model_metric %||% "activity")
+      cfg$model_metric <- normalize_model_metric(
+        cfg$modeled_role %||% cfg$model_metric %||% "activity"
+      )
       cfg <- reconcile_channel_metric_keywords(cfg)
       gcfg <- config()
 
@@ -641,7 +1049,10 @@ mod_process_server <- function(id, data, config, channels,
 
       res_stored <- NULL; err_stored <- NULL
       t_channel <- proc.time()
-      rags_nm <- channel_source_data(d$all_rags, cfg)
+      operation_status$update("Filtering RAE", 0.16, nm)
+      rags_nm <- channel_source_data(
+        d$all_rags, cfg, d$all_rags_indexed, d$data_signature
+      )
       if (isTRUE(getOption("pso.profile", FALSE))) {
         message("[mod_process] ", nm, ": RAE rows ",
                 format(nrow(d$all_rags), big.mark = ","),
@@ -649,108 +1060,78 @@ mod_process_server <- function(id, data, config, channels,
       }
 
       withProgress(message = paste0("Processing: ", nm), value = 0, {
-        tryCatch({
-          res_stored <- process_channel(
-            all_rags          = rags_nm,
-            analytical        = d$analytical,
-            dates_df          = d$dates_df,
-            cfg               = cfg,
-            cross_cols        = gcfg$cross_cols %||% "Geography",
-            start_report_date = gcfg$start_report_date,
-            end_report_date   = gcfg$end_report_date,
-            update_label      = gcfg$update_label,
-            dimension_breaks  = cfg$dimension_breaks  %||% list(),
-            segment_overrides = cfg$segment_overrides %||% list(),
-            min_period        = cfg$min_period,
-            max_period        = cfg$max_period,
-            schema_metadata   = d$schema_metadata,
-            progress_cb = function(detail, value = NULL) {
-              if (!is.null(value)) setProgress(value, detail = detail)
-              else incProgress(0, detail = detail)
-            }
-          )
-        }, error = function(e) { err_stored <<- conditionMessage(e) })
+        operation_status$update("Building splits", 0.28, nm)
+        job <- run_sync_channel_pipeline(nm, d, cfg, gcfg, rags_nm)
+        err_stored <- if (isTRUE(job$ok)) NULL else job$error
+        clean_result <- job$clean
+        res_stored <- job$final
+        config_merge_report <- job$merge_report %||% list()
+        total_check_now <- job$total_check
       })
 
       if (!is.null(err_stored)) {
         set_error(nm, err_stored)
+        elapsed <- round((proc.time() - t_channel)[["elapsed"]], 3)
         if (isTRUE(getOption("pso.profile", FALSE))) {
-          elapsed <- round((proc.time() - t_channel)[["elapsed"]], 3)
           message("[mod_process] ", nm, " failed in ", elapsed, "s")
         }
         showNotification(paste(nm, "error:", err_stored),
                          type = "error", duration = 12)
+        if (op_single) operation_status$fail(
+          paste0("Processing failed for ", nm), err_stored
+        )
         rm(rags_nm)
         if (isTRUE(do_gc)) gc(verbose = FALSE, full = FALSE)
         return()
       }
 
       if (!is.null(res_stored)) {
-        active_saved <- Filter(\(m) isTRUE(m$active), cfg$saved_merges %||% list())
-        n_applied <- 0L
-        config_merge_report <- list()
-
-        clean_store[[nm]] <- res_stored
-
-        if (length(active_saved) > 0) {
-          withProgress(message = paste0("Applying ", length(active_saved),
-                                        " merge(s) from config..."),
-                       value = 0.5, {
-                          for (m in active_saved) {
-                            res_stored <- tryCatch(
-                              apply_single_merge(res_stored, m, cfg, notify = FALSE),
-                              error = function(e) {
-                                tmp <- res_stored
-                                attr(tmp, "merge_status") <- list(
-                                  applied = FALSE,
-                                  new_name = m$new_name %||% "",
-                                  view = m$view %||% "focus",
-                                  requested = unlist(m$merged %||% character(0)),
-                                  matched = character(0),
-                                  missing = unlist(m$merged %||% character(0)),
-                                  ambiguous = character(0),
-                                  closest_examples = character(0),
-                                  matched_count = 0L,
-                                  requested_count = length(unlist(m$merged %||% character(0)))
-                                )
-                                tmp
-                              })
-                            status <- attr(res_stored, "merge_status") %||% list(
-                              applied = FALSE,
-                              new_name = m$new_name %||% "",
-                              view = m$view %||% "focus",
-                              requested = unlist(m$merged %||% character(0)),
-                              matched = character(0),
-                              missing = unlist(m$merged %||% character(0)),
-                              ambiguous = character(0),
-                              closest_examples = character(0),
-                              matched_count = 0L,
-                              requested_count = length(unlist(m$merged %||% character(0)))
-                            )
-                            status$source <- "config"
-                            status$status <- if (isTRUE(status$applied)) "applied" else "needs_review"
-                            config_merge_report <- c(config_merge_report, list(status))
-                            if (isTRUE(status$applied))
-                              n_applied <- n_applied + 1L
-                          }
-                        })
-        }
+        clean_store[[nm]] <- clean_result
+        operation_status$update("Applying saved SAP", 0.76,
+                                paste0(length(config_merge_report), " saved aggregation(s)"))
+        n_applied <- sum(vapply(config_merge_report, function(x) {
+          isTRUE(x$applied)
+        }, logical(1)))
 
         res_stored$model_metric <- cfg$model_metric
         set_res(nm, res_stored); set_orig(nm, res_stored)
         set_log(nm, config_merge_report); set_hist(nm, list())
         set_error(nm, NULL)
         result_signatures[[nm]] <- channel_signature(cfg)
+        async_total_checks[[nm]] <- list(
+          signature = pso_cache_key(
+            "async-total-check", current_async_data_signature(d),
+            channel_signature(canonical_process_cfg(cfg)),
+            result_versions[[nm]] %||% 0L
+          ),
+          value = total_check_now
+        )
 
         n_review <- length(config_merge_report) - n_applied
+        operation_status$update("Running diagnostics", 0.92, nm)
+        total_check_status <- "Not run"
+        total_check_warning <- character(0)
+        if (op_single) {
+          if (!is.null(total_check_now)) {
+            total_check_status <- switch(
+              total_check_now$status %||% "error",
+              ok = "Reconciled",
+              mismatch = "Review required",
+              "Unable to validate"
+            )
+            if (!identical(total_check_now$status %||% "", "ok")) {
+              total_check_warning <- paste0("Total Check: ", total_check_status, ".")
+            }
+          }
+        }
         msg <- paste0(nm, " processed",
                       if (length(config_merge_report) > 0)
                         paste0("; ", n_applied, "/", length(config_merge_report),
                                " config merge(s) applied",
                                if (n_review > 0) paste0(", ", n_review, " need review") else "")
                       else "")
+        elapsed <- round((proc.time() - t_channel)[["elapsed"]], 3)
         if (isTRUE(getOption("pso.profile", FALSE))) {
-          elapsed <- round((proc.time() - t_channel)[["elapsed"]], 3)
           message("[mod_process] ", nm, " processed in ", elapsed, "s")
         }
         showNotification(msg,
@@ -758,6 +1139,16 @@ mod_process_server <- function(id, data, config, channels,
                          duration = if (n_review > 0) 8 else 4)
         rm(res_stored, rags_nm)
         if (isTRUE(do_gc)) gc(verbose = FALSE, full = FALSE)
+        if (op_single) {
+          operation_status$complete(
+            paste0(nm, " processed in ", elapsed, "s. ", n_applied,
+                   " SAP aggregation(s) applied. Total Check: ", total_check_status, "."),
+            warnings = c(
+              if (n_review > 0) paste0(n_review, " saved SAP aggregation(s) require review."),
+              total_check_warning
+            )
+          )
+        }
       }
     }
 
@@ -778,7 +1169,37 @@ mod_process_server <- function(id, data, config, channels,
     }, ignoreInit = TRUE)
 
     observeEvent(input$btn_one, {
-      nm <- req(input$channel_select); req(valid_nm(nm)); run_one(nm)
+      nm <- req(input$channel_select); req(valid_nm(nm))
+      if (start_async_operation(nm, "process-selected", "Process selected channel")) {
+        select_modeled_tab()
+        return()
+      }
+      if (operation_status$is_busy()) {
+        showNotification("Another operation is already running.", type = "warning")
+        return()
+      }
+      operation_status$start(
+        "process-selected", "Process selected channel",
+        c("Preparing channel", "Filtering RAE", "Building splits",
+          "Applying saved SAP", "Running diagnostics", "Completed"),
+        total_items = 1L, detail = nm
+      )
+      tryCatch(
+        run_one(nm),
+        error = function(e) {
+          if (operation_status$is_busy()) {
+            operation_status$fail(paste0("Processing failed for ", nm), e$message)
+          }
+          stop(e)
+        }
+      )
+      if (operation_status$is_busy()) {
+        operation_status$fail(
+          paste0("Processing could not be completed for ", nm),
+          "Review the required Setup inputs and the channel configuration."
+        )
+      }
+      select_modeled_tab()
     })
 
     output$batch_summary <- renderUI({
@@ -786,7 +1207,10 @@ mod_process_server <- function(id, data, config, channels,
       if (is.null(batch)) return(NULL)
       div(class = "process-batch-summary",
           tags$span(icon("list-check"), class = "process-batch-icon"),
-          tags$span(paste0(batch$processed, " processed"), class = "badge-ready"),
+          if (batch$processed > 0)
+            tags$span(paste0(batch$processed, " processed"), class = "badge-ready"),
+          if ((batch$review %||% 0L) > 0)
+            tags$span(paste0(batch$review, " review"), class = "badge-stale"),
           if (batch$already_done > 0)
             tags$span(paste0(batch$already_done, " already done"), class = "badge-count-neutral"),
           if (batch$skipped > 0)
@@ -808,9 +1232,10 @@ mod_process_server <- function(id, data, config, channels,
                 tags$span(nm, class = "process-error-name"),
                 tags$span(errs[[nm]], class = "process-error-message")))))
     })
-
-    # â”€â”€ Process All â€” optimized â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # Process All uses the sequential pipeline so every channel gets a turn;
+    # one channel error is recorded without aborting the remaining batch.
     observeEvent(input$btn_all, {
+      select_modeled_tab()
       if (isTRUE(is_batch_processing())) {
         showNotification("Processing is already running.", type = "warning"); return()
       }
@@ -845,25 +1270,56 @@ mod_process_server <- function(id, data, config, channels,
                          type = "message", duration = 5); return()
       }
 
+      if (start_async_operation(
+        to_process, "process-all", "Process all channels", already_done
+      )) return()
+
       n_total  <- length(to_process)
-      n_ok     <- 0L; n_skipped <- 0L; n_err <- 0L
-      err_msgs <- character(0); info_msgs <- character(0)
+      n_ok     <- 0L; n_review_channels <- 0L; n_skipped <- 0L; n_err <- 0L
+      err_msgs <- character(0); review_msgs <- character(0)
       t_start  <- proc.time()
+      if (operation_status$is_busy()) {
+        showNotification("Another operation is already running.", type = "warning")
+        return()
+      }
+      op_items <- lapply(to_process, operation_item)
+      operation_status$start(
+        "process-all", "Process all channels",
+        c("Preparing channels", "Filtering RAE", "Building splits",
+          "Applying saved SAP", "Running diagnostics", "Completed"),
+        total_items = n_total,
+        detail = paste0(n_total, " channel(s) queued")
+      )
 
       cross_cols_val <- gcfg$cross_cols %||% "Geography"
       is_batch_processing(TRUE)
       on.exit({
         is_batch_processing(FALSE)
         results_trigger(isolate(results_trigger()) + 1L)
+        if (identical(operation_status$current_id(), "process-all")) {
+          operation_status$fail("Process All stopped before completion.")
+        }
       }, add = TRUE)
 
       withProgress(message = paste0("Processing ", n_total, " channel(s)..."),
                    value = 0, {
                      for (i in seq_along(to_process)) {
                        nm  <- to_process[i]; cfg <- ch[[nm]]
+                       op_items[[i]] <- operation_item(nm, "Processing", paste0(i, " of ", n_total))
+                       operation_status$update(
+                         "Processing channels", (i - 1) / n_total, nm,
+                         op_items,
+                         list(Completed = n_ok - n_review_channels,
+                              Review = n_review_channels,
+                              Failed = n_err, Skipped = n_skipped)
+                       )
                        setProgress((i - 1) / n_total,
                                    message = paste0("(", i, "/", n_total, ")  ", nm))
-                       if (is.null(cfg)) { n_skipped <- n_skipped + 1L; next }
+                       if (is.null(cfg)) {
+                         n_skipped <- n_skipped + 1L
+                         op_items[[i]] <- operation_item(nm, "Skipped", "Channel configuration unavailable")
+                         next
+                       }
 
                        model_var   <- cfg$model_variable %||% ""
                        skip_reason <- if (!nzchar(model_var)) "model_variable not configured"
@@ -875,35 +1331,42 @@ mod_process_server <- function(id, data, config, channels,
                          n_skipped <- n_skipped + 1L
                          err_msgs  <- c(err_msgs, paste0(nm, ": ", skip_reason))
                          process_errors[[nm]] <- skip_reason
+                         op_items[[i]] <- operation_item(nm, "Skipped", skip_reason)
                          next
                        }
 
-                       rags_nm <- channel_source_data(d$all_rags, cfg)
+                       rags_nm <- tryCatch(
+                         channel_source_data(
+                           d$all_rags, cfg, d$all_rags_indexed, d$data_signature
+                         ),
+                         error = function(e) e
+                       )
+                       if (inherits(rags_nm, "error")) {
+                         err_msg <- conditionMessage(rags_nm)
+                         n_err <- n_err + 1L
+                         err_msgs <- c(err_msgs, paste0(nm, ": ", err_msg))
+                         process_errors[[nm]] <- err_msg
+                         op_items[[i]] <- operation_item(nm, "Failed", err_msg)
+                         next
+                       }
                        if (isTRUE(getOption("pso.profile", FALSE))) {
                          message("[mod_process] ", nm, ": RAE rows ",
                                  format(nrow(d$all_rags), big.mark = ","),
                                  " -> ", format(nrow(rags_nm), big.mark = ","))
                        }
 
-                       res_stored <- NULL; err_msg <- NULL
-                       tryCatch({
-                         res_stored <- process_channel(
-                           all_rags          = rags_nm,
-                           analytical        = d$analytical,
-                           dates_df          = d$dates_df,
-                           cfg               = cfg,
-                           cross_cols        = cross_cols_val,
-                           start_report_date = gcfg$start_report_date,
-                           end_report_date   = gcfg$end_report_date,
-                           update_label      = gcfg$update_label,
-                           dimension_breaks  = cfg$dimension_breaks  %||% list(),
-                           segment_overrides = cfg$segment_overrides %||% list(),
-                           min_period        = cfg$min_period,
-                           schema_metadata   = d$schema_metadata,
-                           max_period        = cfg$max_period,
-                           progress_cb       = function(detail, value = NULL) NULL
+                       job <- tryCatch(
+                         run_sync_channel_pipeline(nm, d, cfg, gcfg, rags_nm),
+                         error = function(e) list(
+                           ok = FALSE, error = conditionMessage(e), clean = NULL,
+                           final = NULL, merge_report = list(), total_check = NULL
                          )
-                       }, error = function(e) { err_msg <<- conditionMessage(e) })
+                       )
+                       err_msg <- if (isTRUE(job$ok)) NULL else job$error
+                       clean_result <- job$clean
+                       res_stored <- job$final
+                       config_merge_report <- job$merge_report %||% list()
+                       total_check_now <- job$total_check
 
                        rm(rags_nm)
                        if (i %% 5L == 0L) gc(verbose = FALSE, full = FALSE)
@@ -912,70 +1375,51 @@ mod_process_server <- function(id, data, config, channels,
                          n_err    <- n_err + 1L
                          err_msgs <- c(err_msgs, paste0(nm, ": ", err_msg))
                          process_errors[[nm]] <- err_msg
+                         op_items[[i]] <- operation_item(nm, "Failed", err_msg)
                          next
                        }
 
                        if (!is.null(res_stored)) {
-                         active_saved <- Filter(\(m) isTRUE(m$active), cfg$saved_merges %||% list())
-                         clean_store[[nm]] <- res_stored
-                         n_applied <- 0L
-                         config_merge_report <- list()
-
-                          if (length(active_saved) > 0) {
-                            for (m in active_saved) {
-                              res_stored <- tryCatch(
-                                apply_single_merge(res_stored, m, cfg, notify = FALSE),
-                                error = function(e) {
-                                  tmp <- res_stored
-                                  attr(tmp, "merge_status") <- list(
-                                    applied = FALSE,
-                                    new_name = m$new_name %||% "",
-                                    view = m$view %||% "focus",
-                                    requested = unlist(m$merged %||% character(0)),
-                                    matched = character(0),
-                                    missing = unlist(m$merged %||% character(0)),
-                                    ambiguous = character(0),
-                                    closest_examples = character(0),
-                                    matched_count = 0L,
-                                    requested_count = length(unlist(m$merged %||% character(0)))
-                                  )
-                                  tmp
-                                })
-                              status <- attr(res_stored, "merge_status") %||% list(
-                                applied = FALSE,
-                                new_name = m$new_name %||% "",
-                                view = m$view %||% "focus",
-                                requested = unlist(m$merged %||% character(0)),
-                                matched = character(0),
-                                missing = unlist(m$merged %||% character(0)),
-                                ambiguous = character(0),
-                                closest_examples = character(0),
-                                matched_count = 0L,
-                                requested_count = length(unlist(m$merged %||% character(0)))
-                              )
-                              status$source <- "config"
-                              status$status <- if (isTRUE(status$applied)) "applied" else "needs_review"
-                              config_merge_report <- c(config_merge_report, list(status))
-                              if (isTRUE(status$applied))
-                                n_applied <- n_applied + 1L
-                            }
-                           if (length(config_merge_report) > 0) {
-                             n_review <- length(config_merge_report) - n_applied
-                             info_msgs <- c(info_msgs, paste0(
-                               nm, ": ", n_applied, "/", length(config_merge_report),
-                               " config merge(s)",
-                               if (n_review > 0) paste0(" (", n_review, " review)") else ""
-                             ))
-                           }
-                         }
-
+                         clean_store[[nm]] <- clean_result
                          results_store[[nm]]   <- res_stored
+                         bump_result_version(nm)
                          original_store[[nm]]  <- res_stored
                          merge_log_store[[nm]] <- config_merge_report
                          history_store[[nm]]   <- list()
                          process_errors[[nm]]  <- NULL
-                         result_signatures[[nm]] <- channel_signature(cfg)
+                          result_signatures[[nm]] <- channel_signature(canonical_process_cfg(cfg))
+                          async_total_checks[[nm]] <- list(
+                            signature = pso_cache_key(
+                              "async-total-check", current_async_data_signature(d),
+                              channel_signature(canonical_process_cfg(cfg)),
+                              result_versions[[nm]] %||% 0L
+                           ),
+                           value = total_check_now
+                         )
                          n_ok <- n_ok + 1L; rm(res_stored)
+                         n_review_item <- sum(vapply(config_merge_report, function(x) {
+                           identical(x$status %||% "", "needs_review")
+                         }, logical(1)))
+                         total_review <- is.null(total_check_now) ||
+                           !identical(total_check_now$status %||% "error", "ok")
+                         needs_review <- n_review_item > 0L || total_review
+                         if (needs_review) {
+                           n_review_channels <- n_review_channels + 1L
+                           reasons <- c(
+                             if (total_review) paste0(
+                               "Total Check: ",
+                               total_check_now$summary$message %||% "review required"
+                             ),
+                             if (n_review_item > 0L)
+                               paste(n_review_item, "SAP item(s) require review")
+                           )
+                           review_msgs <- c(review_msgs, paste0(nm, ": ", paste(reasons, collapse = "; ")))
+                         }
+                         op_items[[i]] <- operation_item(
+                           nm,
+                           if (needs_review) "Review" else "Completed",
+                           if (needs_review) paste(reasons, collapse = "; ") else "Processed"
+                         )
                        }
                      }
 
@@ -984,47 +1428,66 @@ mod_process_server <- function(id, data, config, channels,
                    })
 
       elapsed  <- round((proc.time() - t_start)[["elapsed"]], 1)
-      batch_summary_state(list(processed = n_ok, already_done = already_done,
+      processed_clean <- n_ok - n_review_channels
+      batch_summary_state(list(processed = processed_clean,
+                               review = n_review_channels,
+                               already_done = already_done,
                                skipped = n_skipped, failed = n_err,
                                elapsed = elapsed))
-      all_msgs <- c(err_msgs, info_msgs)
       parts    <- c(
-        if (n_ok         > 0) paste0(n_ok,         " processed"),
+        if (processed_clean > 0) paste0(processed_clean, " processed"),
+        if (n_review_channels > 0) paste0(n_review_channels, " review"),
         if (already_done > 0) paste0(already_done, " already done"),
         if (n_skipped    > 0) paste0(n_skipped,    " skipped"),
         if (n_err        > 0) paste0(n_err,        " failed"),
         paste0(elapsed, "s"))
 
-      showNotification(
-        tagList(
-          tags$strong(paste(parts, collapse = " \u2014 ")),
-          if (length(all_msgs) > 0) tagList(
-            tags$br(),
-            tags$div(class = if (n_err > 0) "notify-detail-error" else "notify-detail-warn",
-                     tagList(lapply(all_msgs, tags$div))))),
-        type     = if (n_err > 0) "error" else if (n_skipped > 0) "warning" else "message",
-        duration = if (length(all_msgs) > 0) 15 else 5)
+      operation_status$complete(
+        paste(parts, collapse = " | "),
+        warnings = c(err_msgs, review_msgs),
+        items = op_items,
+        auto_close_ms = 3000L
+      )
     })
 
     observeEvent(input$btn_failed, {
+      select_modeled_tab()
       errs <- reactiveValuesToList(process_errors)
       failed <- names(errs)[!vapply(errs, is.null, logical(1))]
       failed <- failed[failed %in% names(channels())]
       if (!length(failed)) {
         showNotification("No failed channels to reprocess.", type = "message"); return()
       }
+      if (start_async_operation(
+        failed, "reprocess-failed", "Reprocess failed channels"
+      )) return()
       if (isTRUE(is_batch_processing())) {
         showNotification("Processing is already running.", type = "warning"); return()
       }
+      if (operation_status$is_busy()) {
+        showNotification("Another operation is already running.", type = "warning"); return()
+      }
+      op_items <- lapply(failed, operation_item)
+      operation_status$start(
+        "reprocess-failed", "Reprocess failed channels",
+        c("Preparing channels", "Processing channels", "Running diagnostics", "Completed"),
+        length(failed), paste0(length(failed), " channel(s) queued")
+      )
       is_batch_processing(TRUE)
       on.exit({
         is_batch_processing(FALSE)
         results_trigger(isolate(results_trigger()) + 1L)
+        if (identical(operation_status$current_id(), "reprocess-failed")) {
+          operation_status$fail("Reprocessing stopped before completion.")
+        }
       }, add = TRUE)
-      n_ok <- 0L; n_err <- 0L; t_start <- proc.time()
+      n_ok <- 0L; n_review <- 0L; n_err <- 0L; t_start <- proc.time()
       withProgress(message = paste0("Reprocessing ", length(failed), " failed channel(s)..."),
                    value = 0, {
                      for (i in seq_along(failed)) {
+                       op_items[[i]] <- operation_item(failed[[i]], "Processing")
+                       operation_status$update("Processing channels", (i - 1) / length(failed),
+                                               failed[[i]], op_items)
                        setProgress((i - 1) / length(failed),
                                    message = paste0("(", i, "/", length(failed), ") ", failed[[i]]))
                        before_err <- process_errors[[failed[[i]]]]
@@ -1032,46 +1495,99 @@ mod_process_server <- function(id, data, config, channels,
                        after_err <- process_errors[[failed[[i]]]]
                        if (is.null(after_err)) n_ok <- n_ok + 1L
                        else if (!identical(before_err, after_err) || !is.null(after_err)) n_err <- n_err + 1L
+                       review_reasons <- if (is.null(after_err))
+                         channel_review_messages(failed[[i]]) else character(0)
+                       needs_review <- length(review_reasons) > 0L
+                       if (needs_review) n_review <- n_review + 1L
+                       op_items[[i]] <- operation_item(
+                         failed[[i]], if (!is.null(after_err)) "Failed" else if (needs_review) "Review" else "Completed",
+                         after_err %||% (if (needs_review)
+                           paste(review_reasons, collapse = "; ") else "Processed")
+                       )
                      }
                    })
       gc(verbose = FALSE, full = TRUE)
       elapsed <- round((proc.time() - t_start)[["elapsed"]], 1)
-      batch_summary_state(list(processed = n_ok, already_done = 0L,
+      batch_summary_state(list(processed = n_ok - n_review, review = n_review, already_done = 0L,
                                skipped = 0L, failed = n_err, elapsed = elapsed))
+      operation_status$complete(
+        paste0(n_ok - n_review, " processed | ", n_review, " review | ", n_err, " failed | ", elapsed, "s"),
+        warnings = c(
+          if (n_err > 0L) paste0(n_err, " channel(s) still failed."),
+          if (n_review > 0L) paste0(n_review, " channel(s) require review.")
+        ),
+        items = op_items, auto_close_ms = 3000L
+      )
     })
 
     observeEvent(input$btn_changed, {
+      select_modeled_tab()
       changed <- stale_names()
       changed <- changed[changed %in% names(channels())]
       if (!length(changed)) {
         showNotification("No changed channels to reprocess.", type = "message"); return()
       }
+      if (start_async_operation(
+        changed, "reprocess-changed", "Reprocess changed channels"
+      )) return()
       if (isTRUE(is_batch_processing())) {
         showNotification("Processing is already running.", type = "warning"); return()
       }
+      if (operation_status$is_busy()) {
+        showNotification("Another operation is already running.", type = "warning"); return()
+      }
+      op_items <- lapply(changed, operation_item)
+      operation_status$start(
+        "reprocess-changed", "Reprocess changed channels",
+        c("Preparing channels", "Processing channels", "Running diagnostics", "Completed"),
+        length(changed), paste0(length(changed), " channel(s) queued")
+      )
       is_batch_processing(TRUE)
       on.exit({
         is_batch_processing(FALSE)
         results_trigger(isolate(results_trigger()) + 1L)
+        if (identical(operation_status$current_id(), "reprocess-changed")) {
+          operation_status$fail("Reprocessing stopped before completion.")
+        }
       }, add = TRUE)
-      n_ok <- 0L; n_err <- 0L; t_start <- proc.time()
+      n_ok <- 0L; n_review <- 0L; n_err <- 0L; t_start <- proc.time()
       withProgress(message = paste0("Reprocessing ", length(changed), " changed channel(s)..."),
                    value = 0, {
                      for (i in seq_along(changed)) {
+                       op_items[[i]] <- operation_item(changed[[i]], "Processing")
+                       operation_status$update("Processing channels", (i - 1) / length(changed),
+                                               changed[[i]], op_items)
                        setProgress((i - 1) / length(changed),
                                    message = paste0("(", i, "/", length(changed), ") ", changed[[i]]))
                        run_one(changed[[i]], do_gc = FALSE)
                        if (changed[[i]] %in% stale_names()) n_err <- n_err + 1L
                        else n_ok <- n_ok + 1L
+                       err_now <- process_errors[[changed[[i]]]]
+                       review_reasons <- if (is.null(err_now))
+                         channel_review_messages(changed[[i]]) else character(0)
+                       needs_review <- length(review_reasons) > 0L
+                       if (needs_review) n_review <- n_review + 1L
+                       op_items[[i]] <- operation_item(
+                         changed[[i]], if (!is.null(err_now)) "Failed" else if (needs_review) "Review" else "Completed",
+                         err_now %||% (if (needs_review)
+                           paste(review_reasons, collapse = "; ") else "Processed")
+                       )
                      }
                    })
       gc(verbose = FALSE, full = TRUE)
       elapsed <- round((proc.time() - t_start)[["elapsed"]], 1)
-      batch_summary_state(list(processed = n_ok, already_done = 0L,
+      batch_summary_state(list(processed = n_ok - n_review, review = n_review, already_done = 0L,
                                skipped = 0L, failed = n_err, elapsed = elapsed))
+      operation_status$complete(
+        paste0(n_ok - n_review, " processed | ", n_review, " review | ", n_err, " failed | ", elapsed, "s"),
+        warnings = c(
+          if (n_err > 0L) paste0(n_err, " channel(s) failed."),
+          if (n_review > 0L) paste0(n_review, " channel(s) require review.")
+        ),
+        items = op_items, auto_close_ms = 3000L
+      )
     })
-
-    # â”€â”€ Period filter UI â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # Period filter UI
     output$period_filter_ui <- renderUI({
       nm  <- input$channel_select; if (!valid_nm(nm)) return(NULL)
       res <- results_store[[nm]]
@@ -1094,8 +1610,8 @@ mod_process_server <- function(id, data, config, channels,
               tags$span(paste0("Focus: ", n_focus), class = "badge-focus"),
               tags$span(paste0("Non-Focus: ", n_nf), class = "badge-nonfocus")))
     })
-
-    # â”€â”€ current_act_data â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # current_act_data
+    # Rebuild display data from processed modeled splits and manifest roles.
     build_current_act_data <- function(filter_val = "focus") {
       nm  <- req(input$channel_select)
       res <- req(results_store[[nm]])
@@ -1158,10 +1674,11 @@ mod_process_server <- function(id, data, config, channels,
         mutate(across(where(is.numeric), \(x) round(x, 4)))
     }
 
-    current_act_data <- reactive({
-      results_trigger()
-      build_current_act_data(input$period_filter %||% "focus")
-    }) %>% bindCache(input$channel_select, input$period_filter, results_trigger())
+    selected_result_version <- reactive({
+      nm <- input$channel_select %||% ""
+      if (!nzchar(nm)) return(0L)
+      as.integer(result_versions[[nm]] %||% 0L)
+    })
 
     build_current_spend_from_rag <- function(res, cfg, filter_val = "focus") {
       if (is.null(res) || is.null(res$rag)) return(empty_spend_diag())
@@ -1225,8 +1742,9 @@ mod_process_server <- function(id, data, config, channels,
       }
       out
     }
-
-    # â”€â”€ current_spend_data â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # current_spend_data
+    # Build the secondary spend view from RAE only when no processed spend
+    # result is available for the channel.
     build_current_spend_from_rae <- function(nm, cfg, filter_val = "focus") {
       d <- tryCatch(data(), error = \(e) NULL)
       if (is.null(d) || is.null(d$all_rags) ||
@@ -1422,54 +1940,73 @@ mod_process_server <- function(id, data, config, channels,
       if (!nrow(out)) build_current_spend_from_rae(nm, cfg, filter_val) else out
     }
 
-    current_spend_data <- reactive({
-      results_trigger()
-      build_current_spend_data(input$period_filter %||% "focus")
-    }) %>% bindCache(input$channel_select, input$period_filter, results_trigger())
+    filter_data_for_role <- function(df, res, role, metric, period_scope) {
+      if (is.null(df) || !nrow(df) || !"VariableSplit" %in% names(df))
+        return(df %||% tibble::tibble())
+      manifest <- res$split_manifest %||% tibble::tibble()
+      required <- c("Role", "VariableSplit", "PeriodScope")
+      if (!nrow(manifest) || !all(required %in% names(manifest))) return(df)
+      role_rows <- manifest %>%
+        dplyr::filter(
+          .data$Role == role,
+          .data$PeriodScope == period_scope
+        )
+      if ("MetricRole" %in% names(role_rows)) {
+        role_rows <- role_rows %>%
+          dplyr::filter(
+            !nzchar(.data$MetricRole) |
+              .data$MetricRole == normalize_model_metric(metric)
+          )
+      }
+      split_names <- unique(role_rows$VariableSplit)
+      split_names <- split_names[!is.na(split_names) & nzchar(split_names)]
+      if (!length(split_names)) return(df[0, , drop = FALSE])
+      df[df$VariableSplit %in% split_names, , drop = FALSE]
+    }
+
+    build_role_data <- function(role = c("modeled", "for_indices"),
+                                metric, filter_val = "focus") {
+      role <- match.arg(role)
+      nm <- req(input$channel_select)
+      res <- req(results_store[[nm]])
+      raw <- if (identical(normalize_model_metric(metric), "spend")) {
+        build_current_spend_data(filter_val)
+      } else {
+        build_current_act_data(filter_val)
+      }
+      filter_data_for_role(raw, res, role, metric, filter_val)
+    }
 
     current_model_data <- reactive({
       metric <- active_model_metric()
-      if (identical(metric, "spend")) current_spend_data() else current_act_data()
-    }) %>% bindCache(input$channel_select, input$model_metric, input$period_filter, results_trigger())
+      build_role_data("modeled", metric, input$period_filter %||% "focus")
+    }) %>% bindCache(input$channel_select, input$period_filter,
+                     selected_result_version(), cache = performance_cache)
+
+    current_for_indices_data <- reactive({
+      metric <- active_for_indices_metric()
+      build_role_data("for_indices", metric, input$period_filter %||% "focus")
+    }) %>% bindCache(input$channel_select, input$period_filter,
+                     selected_result_version(), cache = performance_cache)
 
     period_metric_counts <- reactive({
       nm <- input$channel_select
       if (!valid_nm(nm) || is.null(results_store[[nm]]))
         return(list(focus = 0L, nonfocus = 0L))
       metric <- active_model_metric()
-      res <- results_store[[nm]]
-      diag <- if (identical(metric, "spend")) res$cost_diagnoses else res$act_diagnoses
-      total_col <- metric_total_col(metric)
-      quick_count <- function(period) {
-        if (is.null(diag) || !nrow(diag) ||
-            !"VariableSplit" %in% names(diag) ||
-            !total_col %in% names(diag) ||
-            !"period" %in% names(diag)) {
-          return(NA_integer_)
-        }
-        d <- diag
-        d <- d[d$period == period, , drop = FALSE]
-        d <- d[!is.na(d[[total_col]]) & d[[total_col]] > 0, , drop = FALSE]
-        length(unique(d$VariableSplit))
-      }
       count_for <- function(period) {
-        if (identical(metric, "spend")) {
-          return(tryCatch(nrow(build_current_spend_data(period)),
-                          error = function(e) 0L))
-        }
-        fast_n <- quick_count(period)
-        if (!is.na(fast_n)) return(fast_n)
-        tryCatch({
-          nrow(build_current_act_data(period))
-        }, error = function(e) 0L)
+        tryCatch(
+          nrow(build_role_data("modeled", metric, period)),
+          error = function(e) 0L
+        )
       }
       list(
         focus = count_for("focus"),
         nonfocus = count_for("nonfocus")
       )
-    }) %>% bindCache(input$channel_select, input$model_metric, results_trigger())
-
-    # â”€â”€ Activity KPIs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    }) %>% bindCache(input$channel_select, selected_result_version(),
+                     cache = performance_cache)
+    # Activity KPIs
     output$activity_kpis <- renderUI({
       nm <- input$channel_select
       if (!valid_nm(nm) || is.null(results_store[[nm]])) return(NULL)
@@ -1508,8 +2045,7 @@ mod_process_server <- function(id, data, config, channels,
                     tags$strong(k$value, class = "kpi-value"),
                     tags$small(k$label,  class = "kpi-label")))))
     })
-
-    # â”€â”€ Threshold UI â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # Threshold UI
     output$threshold_ui <- renderUI({
       nm <- input$channel_select
       if (!valid_nm(nm) || is.null(results_store[[nm]])) return(NULL)
@@ -1526,143 +2062,79 @@ mod_process_server <- function(id, data, config, channels,
                     icon("circle-info", class = "icon-xs"),
                     " Splits below threshold are shown in red. Default is 1%."))
     })
-
-    # â”€â”€ Merge plan toolbar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     output$merge_plan_toolbar <- renderUI({
       nm <- input$channel_select
       if (!valid_nm(nm) || is.null(results_store[[nm]])) return(NULL)
       div(class = "process-merge-actions",
           downloadButton(session$ns("dl_merge_plan"),
-                         label = tagList(icon("download"), " Download Merge Plan"),
+                         label = tagList(icon("download"), " Download SAP"),
                          class = "btn-outline-secondary btn-sm"),
-          div(class = "position-relative",
-              tags$label(
-                class = "btn-upload-plan",
-                icon("upload"), " Apply Merge Plan",
-                tags$input(type = "file", accept = ".csv,.tsv,.txt", class = "d-none",
-                           onchange = paste0(
-                             "if(!this.files||!this.files.length)return;",
-                             "var input=this;",
-                             "var r=new FileReader();",
-                             "r.onload=function(e){Shiny.setInputValue('",
-                             session$ns("merge_plan_content"), "',",
-                             "e.target.result,{priority:'event'});input.value='';};",
-                             "r.onerror=function(){input.value='';};",
-                             "r.readAsText(this.files[0]);")))),
+          div(class = "sap-file-input",
+              fileInput(session$ns("merge_plan_file"), NULL,
+                        accept = c(".xlsx", ".csv", ".tsv", ".txt"),
+                        buttonLabel = "Apply SAP",
+                        placeholder = "", width = NULL)),
           tags$span(class = "hint-text",
                     icon("circle-info", class = "icon-xs"),
-                    " Write the same ", tags$strong("MergeName"),
-                    " on splits to merge, then upload."))
+                    " Assign the same ", tags$strong("MergeName"),
+                    " to the splits you want to aggregate."))
     })
 
     output$dl_merge_plan <- downloadHandler(
       filename = function() {
         nm <- input$channel_select %||% "channel"
-        paste0("merge_plan_", nm, "_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
+        paste0("splits_aggregation_plan_", nm, "_",
+               format(Sys.time(), "%Y%m%d_%H%M%S"), ".xlsx")
       },
       content = function(file) {
+        nm <- isolate(input$channel_select)
         df <- tryCatch(isolate(current_model_data()), error = function(e) NULL)
-        if (is.null(df) || nrow(df) == 0) {
-          write.csv(data.frame(VariableSplit = character(), Split = character(),
-                               MergeName    = character()),
-                    file, row.names = FALSE); return()
+        res <- if (valid_nm(nm)) isolate(results_store[[nm]]) else NULL
+        cfg <- if (valid_nm(nm)) isolate(channels()[[nm]]) else list()
+        df_out <- build_splits_aggregation_plan(
+          df = df,
+          res = res %||% list(),
+          cfg = cfg %||% list(),
+          period_scope = isolate(input$period_filter %||% "focus"),
+          metric = isolate(active_model_metric())
+        )
+        threshold <- isolate(input$threshold_pct %||% 1)
+        wb <- openxlsx::createWorkbook()
+        openxlsx::addWorksheet(wb, "SAP")
+        openxlsx::writeData(wb, "SAP", df_out, keepNA = FALSE,
+                            headerStyle = openxlsx::createStyle(
+                              fgFill = "#EAF3FC", textDecoration = "bold",
+                              fontColour = "#29435F", border = "bottom",
+                              borderColour = "#9DB9D5"
+                            ))
+        openxlsx::freezePane(wb, "SAP", firstRow = TRUE)
+        openxlsx::addFilter(wb, "SAP", rows = 1, cols = seq_len(ncol(df_out)))
+        openxlsx::setColWidths(wb, "SAP", cols = seq_len(ncol(df_out)), widths = "auto")
+        pct_col <- grep("^Pct Total (Activity|Spend)$", names(df_out))
+        if (length(pct_col) && nrow(df_out)) {
+          red_style <- openxlsx::createStyle(
+            fontColour = "#C62828", fgFill = "#FDECEC", textDecoration = "bold"
+          )
+          openxlsx::conditionalFormatting(
+            wb, "SAP", cols = pct_col[[1]], rows = 2:(nrow(df_out) + 1L),
+            rule = paste0(openxlsx::int2col(pct_col[[1]]), "2<", threshold),
+            style = red_style,
+            type = "expression"
+          )
         }
-        stat_cols <- setdiff(names(df), "VariableSplit")
-        df_out <- df %>%
-          mutate(Split = strip_common_prefix(VariableSplit), MergeName = NA_character_) %>%
-          select(VariableSplit, Split, MergeName, all_of(stat_cols))
-        df_out <- metric_display_columns(df_out, active_model_metric())
-        write.csv(df_out, file, row.names = FALSE, na = "")
+        openxlsx::saveWorkbook(wb, file, overwrite = TRUE)
       }
     )
-
-    # â”€â”€ Plan merge â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    clean_merge_plan_names <- function(x) {
-      x <- trimws(as.character(x))
-      x <- sub("^\ufeff", "", x)
-      x <- sub("^<U\\+FEFF>", "", x)
-      x <- sub("^ÃƒÂ¯\\.\\.", "", x)
-      x
-    }
-
-    read_merge_plan_content <- function(content) {
-      read_attempt <- function(kind) {
-        con <- textConnection(content)
-        on.exit(close(con), add = TRUE)
-        switch(
-          kind,
-          tab = read.delim(con, stringsAsFactors = FALSE,
-                           na.strings = c("", "NA"), check.names = FALSE),
-          semi = read.csv2(con, stringsAsFactors = FALSE,
-                           na.strings = c("", "NA"), check.names = FALSE),
-          csv = read.csv(con, stringsAsFactors = FALSE,
-                         na.strings = c("", "NA"), check.names = FALSE)
-        )
-      }
-
-      first_line <- strsplit(content %||% "", "\r?\n")[[1]][1] %||% ""
-      preferred <- c(
-        if (grepl("\t", first_line, fixed = TRUE)) "tab",
-        if (grepl(",", first_line, fixed = TRUE)) "csv",
-        if (grepl(";", first_line, fixed = TRUE)) "semi",
-        "csv", "tab", "semi"
-      )
-
-      fallback <- NULL
-      for (kind in unique(preferred)) {
-        plan <- tryCatch(read_attempt(kind), error = function(e) NULL)
-        if (is.null(plan)) next
-        names(plan) <- clean_merge_plan_names(names(plan))
-        fallback <- fallback %||% plan
-        has_required <- all(c("VariableSplit", "MergeName") %in% names(plan))
-        has_display_lookup <- all(c("Split", "MergeName") %in% names(plan))
-        if (has_required || has_display_lookup) return(plan)
-      }
-      fallback
-    }
-
-    hydrate_plan_variable_split <- function(plan) {
-      if (is.null(plan) || !"Split" %in% names(plan)) return(plan)
-
-      df <- tryCatch(isolate(current_model_data()), error = function(e) NULL)
-      if (is.null(df) || !nrow(df) || !"VariableSplit" %in% names(df)) return(plan)
-
-      lookup <- df %>%
-        mutate(Split = strip_common_prefix(VariableSplit)) %>%
-        select(Split, VariableSplit) %>%
-        distinct(Split, .keep_all = TRUE)
-      if (!nrow(lookup)) return(plan)
-
-      plan$.row_id <- seq_len(nrow(plan))
-      plan <- plan %>%
-        left_join(lookup, by = "Split", suffix = c("", ".matched")) %>%
-        arrange(.row_id)
-
-      if (!"VariableSplit" %in% names(plan)) {
-        plan$VariableSplit <- plan$VariableSplit.matched
-      } else if ("VariableSplit.matched" %in% names(plan)) {
-        missing_split <- is.na(plan$VariableSplit) |
-          !nzchar(trimws(as.character(plan$VariableSplit)))
-        plan$VariableSplit[missing_split] <- plan$VariableSplit.matched[missing_split]
-      }
-
-      plan$.row_id <- NULL
-      if ("VariableSplit.matched" %in% names(plan)) plan$VariableSplit.matched <- NULL
-      plan
-    }
-
-    observeEvent(input$merge_plan_content, {
-      req(input$merge_plan_content)
+    # Validate SAP rows against the current result, then apply and persist only
+    # the requested merge names through the existing merge contract.
+    apply_splits_aggregation_plan <- function(plan) {
       nm <- req(input$channel_select); req(valid_nm(nm))
-      plan <- tryCatch({
-        read_merge_plan_content(input$merge_plan_content)
-      }, error = \(e) {
-        showNotification(paste("Error reading file:", conditionMessage(e)),
-                         type = "error", duration = 8); NULL
-      })
       if (is.null(plan)) return()
-      names(plan) <- clean_merge_plan_names(names(plan))
-      plan <- hydrate_plan_variable_split(plan)
+      names(plan) <- clean_sap_column_names(names(plan))
+      plan <- hydrate_sap_variable_split(
+        plan,
+        tryCatch(isolate(current_model_data()), error = function(e) NULL)
+      )
       names(plan) <- sub("^\ufeff", "", names(plan))
       names(plan) <- sub("^<U\\+FEFF>", "", names(plan))
       names(plan) <- sub("^Ã¯\\.\\.", "", names(plan))
@@ -1683,6 +2155,25 @@ mod_process_server <- function(id, data, config, channels,
                             nzchar(plan$VariableSplit), ]
       if (nrow(plan_active) == 0) return()
 
+      current_splits <- tryCatch(
+        unique(as.character(isolate(current_model_data())$VariableSplit)),
+        error = function(e) character(0)
+      )
+      current_splits <- current_splits[!is.na(current_splits) & nzchar(current_splits)]
+      missing_splits <- setdiff(unique(plan_active$VariableSplit), current_splits)
+      if (length(missing_splits)) {
+        showNotification(
+          paste0(
+            "SAP contains ", length(missing_splits),
+            " VariableSplit value(s) that are not available in the current view. ",
+            "Download a current SAP before applying aggregations."
+          ),
+          type = "error",
+          duration = 10
+        )
+        return()
+      }
+
       res         <- results_store[[nm]]; req(res)
       cfg         <- channels()[[nm]]
       view_filter <- input$period_filter %||% "focus"
@@ -1690,7 +2181,7 @@ mod_process_server <- function(id, data, config, channels,
       set_hist(nm, c(get_hist(nm), list(results_store[[nm]])))
       new_log <- list(); new_saved <- list(); n_skipped <- 0L
 
-      withProgress(message = "Applying merge plan...", value = 0, {
+      withProgress(message = "Applying Splits Aggregation Plan...", value = 0, {
         for (i in seq_along(groups)) {
           grp        <- groups[[i]]; merge_name <- names(groups)[i]
           incProgress(1 / length(groups))
@@ -1761,11 +2252,44 @@ mod_process_server <- function(id, data, config, channels,
       }
       n_ok <- length(new_log)
       showNotification(
-        paste0(n_ok, " group(s) merged",
+        paste0(n_ok, " aggregation group(s) applied",
                if (n_skipped > 0) paste0(" (", n_skipped, " skipped)") else "",
                if (!is.null(update_merges) && n_ok > 0) " â€” saved to config." else "."),
         type = if (n_ok > 0) "message" else "warning")
+    }
+
+    observeEvent(input$merge_plan_content, {
+      req(input$merge_plan_content)
+      plan <- tryCatch(
+        read_sap_plan_content(input$merge_plan_content),
+        error = function(e) {
+          showNotification(paste("Error reading file:", conditionMessage(e)),
+                           type = "error", duration = 8)
+          NULL
+        }
+      )
+      apply_splits_aggregation_plan(plan)
     })
+
+    observeEvent(input$merge_plan_file, {
+      upload <- req(input$merge_plan_file)
+      ext <- tolower(tools::file_ext(upload$name[[1]]))
+      plan <- tryCatch({
+        if (identical(ext, "xlsx")) {
+          as.data.frame(readxl::read_excel(upload$datapath[[1]]),
+                        check.names = FALSE, stringsAsFactors = FALSE)
+        } else {
+          content <- paste(readLines(upload$datapath[[1]], warn = FALSE,
+                                     encoding = "UTF-8"), collapse = "\n")
+          read_sap_plan_content(content)
+        }
+      }, error = function(e) {
+        showNotification(paste("Error reading SAP:", conditionMessage(e)),
+                         type = "error", duration = 8)
+        NULL
+      })
+      apply_splits_aggregation_plan(plan)
+    }, ignoreInit = TRUE)
 
     output$config_merge_report <- renderUI({
       nm <- input$channel_select
@@ -1813,8 +2337,7 @@ mod_process_server <- function(id, data, config, channels,
                  "All saved config merges matched generated splits.")
       )
     })
-
-    # â”€â”€ Undo â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # Undo
     observeEvent(input$btn_undo, {
       nm <- req(input$channel_select); req(valid_nm(nm))
       hist <- get_hist(nm)
@@ -1834,8 +2357,7 @@ mod_process_server <- function(id, data, config, channels,
       }
       showNotification("Last merge undone \u2014 removed from config.", type = "message")
     })
-
-    # â”€â”€ Reset merges â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # Reset merges
     observeEvent(input$btn_reset_merges, {
       nm <- req(input$channel_select); req(valid_nm(nm))
       showModal(modalDialog(
@@ -1862,8 +2384,7 @@ mod_process_server <- function(id, data, config, channels,
       showNotification(paste("All merges reset for", nm, "\u2014 config cleared."),
                        type = "message")
     }, ignoreInit = TRUE)
-
-    # â”€â”€ Merge history card â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # Merge history card
     output$merge_history_card <- renderUI({
       nm   <- input$channel_select; if (!valid_nm(nm)) return(NULL)
       log  <- get_log(nm); hist <- get_hist(nm)
@@ -1911,8 +2432,7 @@ mod_process_server <- function(id, data, config, channels,
         )
       )
     })
-
-    # â”€â”€ Activity table â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # Activity table
     output$diag_act <- DT::renderDT({
       nm  <- req(input$channel_select); req(results_store[[nm]])
       metric <- active_model_metric()
@@ -1977,27 +2497,70 @@ mod_process_server <- function(id, data, config, channels,
                     color = styleInterval(threshold, c("#dc3545", "#333")))
     }, server = TRUE)
 
-    # â”€â”€ Spend table â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    output$for_indices_status_ui <- renderUI({
+      nm <- input$channel_select
+      if (!valid_nm(nm)) return(NULL)
+      cfg <- channels()[[nm]] %||% list()
+      status <- cfg$role_pair_status %||% "Missing"
+      source <- cfg$role_pair_source %||% "Not found"
+      coverage <- suppressWarnings(as.numeric(cfg$role_pair_coverage %||% NA_real_))
+      missing_sources <- cfg$role_pair_missing_sources %||% character(0)
+      if (identical(status, "Matched")) {
+        return(div(
+          class = "process-for_indices-status is-ready",
+          icon("link"),
+          tags$span(paste0("ForIndices connected from ", source, "."))
+        ))
+      }
+      if (identical(status, "Partial")) {
+        coverage_text <- if (is.finite(coverage))
+          paste0(round(coverage * 100), "% source coverage. ") else ""
+        missing_text <- if (length(missing_sources))
+          paste0("Missing: ", paste(utils::head(missing_sources, 3), collapse = ", "),
+                 if (length(missing_sources) > 3) "…" else "") else ""
+        return(div(
+          class = "process-for_indices-status is-warning",
+          icon("triangle-exclamation"),
+          tags$span(paste0(coverage_text, missing_text))
+        ))
+      }
+      div(
+        class = "process-for_indices-status is-missing",
+        icon("circle-info"),
+        tags$span(cfg$role_pair_reason %||%
+                    "No compatible ForIndices variable was found in VOF/Details or RAE.")
+      )
+    })
+    # ForIndices table
     output$diag_cost <- DT::renderDT({
       nm <- input$channel_select
       if (!valid_nm(nm))
-        return(info_table("Select a channel to review spend.", "info"))
+        return(info_table("Select a channel to review ForIndices.", "info"))
       if (is.null(results_store[[nm]]))
-        return(info_table("Process this channel first to review spend.", "info"))
+        return(info_table("Process this channel first to review ForIndices.", "info"))
 
-      cfg <- channels()[[nm]]
-      cost_df <- tryCatch(current_spend_data(), error = \(e) empty_spend_diag())
-      if (is.null(cost_df) || nrow(cost_df) == 0) {
-        msg <- paste0("No spend data available. Check keyword: '",
-                      cfg$spend_keyword %||% "Spend", "'.")
-        return(info_table(msg, "warning"))
+      cfg <- channels()[[nm]] %||% list()
+      metric <- active_for_indices_metric()
+      for_indices_df <- tryCatch(
+        current_for_indices_data(),
+        error = function(e) tibble::tibble()
+      )
+      if (is.null(for_indices_df) || nrow(for_indices_df) == 0) {
+        status <- cfg$role_pair_status %||% "Missing"
+        msg <- if (identical(status, "Missing")) {
+          "No compatible ForIndices variable was found in VOF/Details or RAE."
+        } else {
+          paste0("No ", metric_label(metric),
+                 " ForIndices rows remain after the channel filters.")
+        }
+        return(info_table(msg, if (identical(status, "Missing")) "info" else "warning"))
       }
-      df_display <- cost_df %>%
+      df_display <- for_indices_df %>%
         mutate(Split = strip_common_prefix(VariableSplit)) %>%
         select(Split, everything(), -VariableSplit)
-      df_display <- metric_display_columns(df_display, "spend")
-      spend_col_display <- attr(df_display, "total_col") %||% "total_spend"
-      pct_col_display <- attr(df_display, "pct_col") %||% "pct_total_spend"
+      df_display <- metric_display_columns(df_display, metric)
+      total_col_display <- attr(df_display, "total_col") %||% metric_total_col(metric)
+      pct_col_display <- attr(df_display, "pct_col") %||% metric_pct_col(metric)
       num_fmt <- intersect(c("sd", "min", "quartile_1", "median",
                              "quartile_3", "max_no_outlier", "max",
                              "SD", "Min", "Q1", "Median", "Q3",
@@ -2010,10 +2573,10 @@ mod_process_server <- function(id, data, config, channels,
         1
       }
       col_defs <- list(list(className = "dt-left", targets = 0))
-      spend_target <- which(names(df_display) == spend_col_display) - 1
-      if (length(spend_target) == 1 && !is.na(spend_target)) {
+      total_target <- which(names(df_display) == total_col_display) - 1
+      if (length(total_target) == 1 && !is.na(total_target)) {
         col_defs <- c(col_defs, list(
-          list(targets = spend_target,
+          list(targets = total_target,
                render = JS("function(d,t){if(t!=='display')return d;",
                            "var n=parseFloat(d);",
                            "if(n>=1e9)return(n/1e9).toFixed(1)+'B';",
@@ -2044,273 +2607,224 @@ mod_process_server <- function(id, data, config, channels,
       }
       dt
     }, server = TRUE)
-
-    # â”€â”€ Total Check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    total_check_data <- reactive({
-      results_trigger()
-      nm  <- req(input$channel_select)
-      res <- req(results_store[[nm]])
-      list(nm = nm, res = res, d = isolate(data()),
-           cfg = isolate(channels()[[nm]]), gcfg = isolate(config()),
-           model_metric = active_model_metric())
-    }) %>% bindCache(input$channel_select, input$model_metric, results_trigger())
-
-    output$diag_check <- DT::renderDT({
-      tc   <- total_check_data()
-      nm   <- tc$nm; res <- tc$res; d <- tc$d; cfg <- tc$cfg; gcfg <- tc$gcfg
-      model_metric <- normalize_model_metric(tc$model_metric %||% cfg$model_metric %||% "activity")
-      req(d$analytical)
-
-      cross_cols    <- res$cross_cols %||% gcfg$cross_cols %||% "Geography"
-      full_cross_id <- c(cross_cols, "Period")
-      geo_col       <- cross_cols[1]
-      model_var     <- cfg$model_variable %||% ""
-      valid_vars    <- intersect(c(model_var), names(d$analytical))
-
-      if (!length(valid_vars) || !nzchar(model_var)) {
-        avail_num <- names(d$analytical)[sapply(d$analytical, is.numeric)]
-        return(datatable(
-          data.frame(
-            Problem = paste0("model_variable '", model_var, "' not found."),
-            Hint    = paste0("Available: ", paste(head(avail_num, 5), collapse = ", "),
-                             if (length(avail_num) > 5)
-                               paste0(" ... (", length(avail_num) - 5, " more)") else "")),
-          options = list(initComplete = dt_blue_callback, dom = "t"), rownames = FALSE) %>%
-            formatStyle("Problem", color = "#721c24",
-                        fontWeight = "600", backgroundColor = "#f8d7da"))
-      }
-
-      analytical_df <- as.data.frame(d$analytical)
-      analytical_df$Period <- if (inherits(analytical_df$Period, "Date")) {
-        analytical_df$Period
-      } else {
-        parse_period_robust(analytical_df$Period)
-      }
-      analytical_df <- analytical_df[!is.na(analytical_df$Period), , drop = FALSE]
-      if (!nrow(analytical_df)) {
-        return(datatable(
-          data.frame(Message = "Cannot perform Total Check: Analytical has no parseable Period values."),
-          options = list(initComplete = dt_blue_callback, dom = "t"), rownames = FALSE) %>%
-            formatStyle("Message", color = "#856404", backgroundColor = "#fff3cd"))
-      }
-      an_periods <- sort(unique(analytical_df$Period))
-      an_min_p   <- min(an_periods); an_max_p <- max(an_periods)
-      date_spine <- if (!is.null(d$dates_df) && "Period" %in% names(d$dates_df)) {
-        p <- d$dates_df$Period
-        p <- if (inherits(p, "Date")) p else parse_period_robust(p)
-        p[!is.na(p)]
-      } else {
-        as.Date(character(0))
-      }
-      end_report_date <- tryCatch(as.Date(gcfg$end_report_date), error = \(e) as.Date(NA))
-
-      scope_min_p <- tryCatch({
-        candidates <- c(an_min_p)
-        if (!is.null(cfg$min_period) && !is.na(as.Date(cfg$min_period)))
-          candidates <- c(candidates, as.Date(cfg$min_period))
-        if (length(date_spine)) candidates <- c(candidates, min(date_spine))
-        max(candidates, na.rm = TRUE)
-      }, error = function(e) an_min_p)
-      scope_max_p <- tryCatch({
-        candidates <- c(an_max_p)
-        if (!is.null(cfg$max_period) && !is.na(as.Date(cfg$max_period)))
-          candidates <- c(candidates, as.Date(cfg$max_period))
-        if (length(date_spine)) candidates <- c(candidates, max(date_spine))
-        if (!is.na(end_report_date)) candidates <- c(candidates, end_report_date)
-        min(candidates, na.rm = TRUE)
-      }, error = function(e) an_max_p)
-      if (is.na(scope_min_p) || is.na(scope_max_p) || scope_min_p > scope_max_p) {
-        scope_min_p <- an_min_p; scope_max_p <- an_max_p
-      }
-
-      splits_result <- build_total_check_splits_from_rae(
-        d = d,
-        cfg = cfg,
-        gcfg = gcfg,
-        nm = nm,
-        cross_cols = cross_cols,
-        model_metric = model_metric,
-        scope_min_p = scope_min_p,
-        scope_max_p = scope_max_p
+    # Cache reconciliation by source data, channel configuration, and result
+    # version. The detailed table contains only keys that need review.
+    total_check_signature <- reactive({
+      nm <- req(input$channel_select)
+      d <- req(data())
+      cfg <- req(channels()[[nm]])
+      pso_cache_key(
+        "canonical-total-check",
+        nm,
+        data_signature(d$analytical),
+        data_signature(d$all_rags),
+        digest::digest(cfg, algo = "xxhash64")
       )
-      splits_side <- splits_result$data
-      if (is.null(splits_side) || !nrow(splits_side)) {
-        return(datatable(
-          data.frame(
-            Message = "Cannot perform Total Check: SplitTotal has no RAE rows after channel filters.",
-            Hint = splits_result$reason %||% "Review channel filters, date range, useful longitudinal filters and metric keyword."
-          ),
-          options = list(initComplete = dt_blue_callback, dom = "t"), rownames = FALSE) %>%
-            formatStyle("Message", color = "#856404",
-                        fontWeight = "600", backgroundColor = "#fff3cd"))
-      }
-
-      an_periods_scoped <- an_periods[an_periods >= scope_min_p & an_periods <= scope_max_p]
-      if (length(an_periods_scoped) == 0) {
-        return(datatable(
-          data.frame(Message = paste0("No analytical periods in scope (",
-                                      format(scope_min_p), " \u2192 ",
-                                      format(scope_max_p), ").")),
-          options = list(initComplete = dt_blue_callback, dom = "t"), rownames = FALSE) %>%
-            formatStyle("Message", color = "#856404", backgroundColor = "#fff3cd"))
-      }
-
-      split_periods <- sort(unique(splits_side$Period))
-      period_map <- tibble(
-        an_period  = an_periods_scoped,
-        rag_period = split_periods[vapply(
-          an_periods_scoped,
-          function(p) which.min(abs(as.numeric(split_periods) - as.numeric(p))),
-          integer(1))])
-      max_offset_days <- max(
-        abs(as.numeric(period_map$an_period) - as.numeric(period_map$rag_period)),
-        na.rm = TRUE)
-
-      model_at_an_full <- build_model_total(
-        analytical_df, full_cross_id, c(model_var), character(0)) %>%
-        filter(Period >= scope_min_p & Period <= scope_max_p)
-
-      normalize_geo <- function(x)
-        trimws(gsub("\\s+", " ", tolower(gsub("[,.]", " ", as.character(x)))))
-
-      rag_geos <- if (geo_col %in% names(splits_side)) unique(splits_side[[geo_col]]) else character(0)
-      an_geos  <- if (geo_col %in% names(model_at_an_full))
-        unique(model_at_an_full[[geo_col]]) else character(0)
-
-      geo_map <- if (length(an_geos) > 0 && length(rag_geos) > 0) {
-        tibble(an_geo = an_geos, norm = normalize_geo(an_geos)) %>%
-          left_join(tibble(rag_geo = rag_geos, norm = normalize_geo(rag_geos)), by = "norm") %>%
-          mutate(rag_geo = if_else(is.na(rag_geo), an_geo, rag_geo)) %>%
-          select(an_geo, rag_geo)
-      } else {
-        tibble(an_geo = character(0), rag_geo = character(0))
-      }
-
-      model_remapped <- if (geo_col %in% names(model_at_an_full) && nrow(geo_map) > 0) {
-        model_at_an_full %>%
-          rename(an_geo = !!sym(geo_col)) %>%
-          left_join(geo_map, by = "an_geo") %>%
-          mutate(!!geo_col := if_else(!is.na(rag_geo), rag_geo, an_geo)) %>%
-          select(-an_geo, -rag_geo)
-      } else {
-        model_at_an_full
-      }
-
-      tc_cross_id   <- full_cross_id
-      tc_cross_cols <- cross_cols
-      model_at_an   <- model_remapped
-
-      seg_overrides     <- cfg$segment_overrides %||% list()
-      apply_geo_filters <- function(df, col) {
-        if (!col %in% names(df)) return(df)
-        for (p in cfg$geography_exclude %||% character(0))
-          if (nchar(p %||% "") > 0)
-            df <- df[!grepl(p, df[[col]], ignore.case = TRUE), ]
-        if (length(seg_overrides) > 0 && "Period" %in% names(df)) {
-          for (so in seg_overrides) {
-            geo_exc <- so$geography_exclude %||% character(0)
-            if (!length(geo_exc)) next
-            for (p in geo_exc)
-              if (nchar(p %||% "") > 0)
-                df <- df[!(rep(TRUE, nrow(df)) &
-                             grepl(p, df[[col]], ignore.case = TRUE)), ]
-          }
-        }
-        df
-      }
-
-      model_at_an  <- apply_geo_filters(model_at_an,  geo_col)
-
-      model_side <- model_at_an %>%
-        rename(an_period = Period) %>%
-        left_join(period_map, by = "an_period", relationship = "many-to-one") %>%
-        mutate(Period = if_else(!is.na(rag_period), rag_period, an_period)) %>%
-        select(any_of(c(tc_cross_cols, "Period", "ModelTotal"))) %>%
-        filter(ModelTotal > 0)
-
-      # Use only join columns available in both sides
-      tc_cross_id_join <- intersect(tc_cross_id,
-                                    intersect(names(model_side), names(splits_side)))
-
-      if (!length(tc_cross_id_join)) {
-        return(datatable(
-          data.frame(Message = "Cannot perform Total Check: no common join columns."),
-          options = list(initComplete = dt_blue_callback, dom = "t"),
-          rownames = FALSE))
-      }
-
-      model_side <- model_side %>%
-        collapse_total_check_values(tc_cross_id_join, "ModelTotal", "ModelTotal") %>%
-        filter(ModelTotal > 0)
-
-      check_df <- model_side %>%
-        left_join(splits_side, by = tc_cross_id_join) %>%
-        mutate(SplitsTotal = replace_na(SplitsTotal, 0),
-               Diff   = ModelTotal - SplitsTotal,
-               Status = if_else(abs(Diff) < 0.01, "OK", "Mismatch")) %>%
-        filter(ModelTotal > 0) %>%
-        mutate(across(where(is.numeric), \(x) round(x, 4))) %>%
-        arrange(across(any_of(c(tc_cross_cols, "Period"))))
-
-      n_total    <- nrow(check_df)
-      n_mismatch <- sum(check_df$Status == "Mismatch", na.rm = TRUE)
-      cs_label   <- paste(tc_cross_cols, collapse = " \u00d7 ")
-
-      scope_note <- if (scope_min_p != an_min_p || scope_max_p != an_max_p)
-        htmltools::tags$div(
-          style = paste0("background:#f0fdf4; color:#166634;",
-                         "padding:4px 10px; border-radius:4px;",
-                         "font-size:11.5px; margin-bottom:4px; display:inline-block;"),
-          paste0(" \u2139 Scoped: ", format(scope_min_p), " \u2192 ", format(scope_max_p)))
-      else NULL
-
-      offset_note <- if (max_offset_days > 0)
-        htmltools::tags$div(
-          style = paste0("background:#d1ecf1; color:#0c5460;",
-                         "padding:4px 10px; border-radius:4px;",
-                         "font-size:11.5px; margin-bottom:4px; display:inline-block;"),
-          paste0(" \u2139 Date offset (", max_offset_days, " day(s)) \u2014 auto-aligned."))
-      else NULL
-
-      check_df <- check_df %>% filter(Status == "Mismatch")
-
-      if (nrow(check_df) == 0) {
-        return(datatable(
-          data.frame(Message = paste0(" \u2713 All ", format(n_total, big.mark = ","),
-                                      " rows match \u2014 no mismatches found.")),
-          caption = if (!is.null(scope_note) || !is.null(offset_note))
-            htmltools::tags$caption(
-              style = "caption-side:top; text-align:left; padding:4px 0;",
-              scope_note, offset_note) else NULL,
-          options = list(initComplete = dt_blue_callback, dom = "t"), rownames = FALSE) %>%
-            formatStyle("Message", color = "#155724",
-                        fontWeight = "600", backgroundColor = "#d4edda"))
-      }
-
-      check_df %>%
-        datatable(
-          caption = htmltools::tags$caption(
-            style = "caption-side:top; text-align:left; padding:4px 0;",
-            scope_note, offset_note,
-            htmltools::tags$div(
-              style = "font-size:12px; color:#721c24; padding:2px 0;",
-              htmltools::tags$span(style = "color:#e74c3c;", " \u2718 "),
-              paste0(n_mismatch, " mismatch", if (n_mismatch != 1) "es" else "",
-                     " out of ", format(n_total, big.mark = ","), " rows",
-                     " \u2014 level: ", cs_label, " \u00d7 Period"))),
-          extensions = "Buttons",
-          options    = list(
-            scrollX = TRUE, pageLength = 25,
-            initComplete = dt_blue_callback, dom = "Bfrtip",
-            autoWidth = FALSE, buttons = make_export_buttons("total_check", nm)),
-          rownames = FALSE) %>%
-        formatStyle("Status", backgroundColor = "#f8d7da")
     })
 
-    # â”€â”€ Return â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    total_check_data <- reactive({
+      selected_result_version()
+      nm <- req(input$channel_select)
+      res <- req(results_store[[nm]])
+      d <- req(data())
+      cfg <- req(channels()[[nm]])
+      async_check <- async_total_checks[[nm]]
+      expected_async_signature <- pso_cache_key(
+        "async-total-check", current_async_data_signature(d),
+        channel_signature(canonical_process_cfg(cfg)),
+        result_versions[[nm]] %||% 0L
+      )
+      if (!is.null(async_check) &&
+          identical(async_check$signature %||% "", expected_async_signature) &&
+          !is.null(async_check$value)) {
+        return(async_check$value)
+      }
+      cross_cols <- res$cross_cols %||% config()$cross_cols %||% "Geography"
+      build_canonical_total_check(
+        analytical = d$analytical,
+        all_rags = d$all_rags,
+        result = res,
+        cfg = cfg,
+        cross_cols = cross_cols,
+        schema_metadata = d$schema_metadata %||% NULL,
+        tolerance = 0.01
+      )
+    }) %>% bindCache(
+      total_check_signature(),
+      selected_result_version(),
+      cache = performance_cache
+    )
+
+    output$total_check_summary_ui <- renderUI({
+      check <- total_check_data()
+      summary <- check$summary %||% list()
+      status <- check$status %||% "error"
+      status_label <- switch(
+        status,
+        ok = "Reconciled",
+        mismatch = "Review required",
+        "Unable to validate"
+      )
+      status_icon <- switch(
+        status,
+        ok = icon("circle-check"),
+        mismatch = icon("triangle-exclamation"),
+        icon("circle-xmark")
+      )
+      range_label <- if (!is.null(summary$min_period) &&
+                         !is.na(summary$min_period) &&
+                         !is.na(summary$max_period)) {
+        paste(format(summary$min_period), "→", format(summary$max_period))
+      } else {
+        "Not available"
+      }
+      filters <- check$applied_filters %||% character(0)
+      warnings <- check$warnings %||% character(0)
+      filter_text <- if (length(filters)) paste(filters, collapse = " | ") else "No additional filters"
+
+      div(
+        class = paste("total-check-summary", paste0("is-", status)),
+        div(
+          class = "total-check-summary-header",
+          div(
+            class = "total-check-summary-title",
+            status_icon,
+            tags$span(status_label)
+          ),
+          tags$span(summary$message %||% "", class = "total-check-summary-message")
+        ),
+        div(
+          class = "total-check-summary-grid",
+          div(class = "total-check-summary-item",
+              tags$span("Analytical variable", class = "total-check-label"),
+              tags$strong(summary$model_variable %||% "")),
+          div(class = "total-check-summary-item",
+              tags$span("Modeled metric", class = "total-check-label"),
+              tags$strong(metric_label(summary$modeled_metric %||% "activity"))),
+          div(class = "total-check-summary-item",
+              tags$span("Effective range", class = "total-check-label"),
+              tags$strong(range_label)),
+          div(class = "total-check-summary-item",
+              tags$span("Comparison level", class = "total-check-label"),
+              tags$strong(summary$comparison_level %||% "Not available")),
+          div(class = "total-check-summary-item",
+              tags$span("Keys checked", class = "total-check-label"),
+              tags$strong(format(summary$keys %||% 0L, big.mark = ","))),
+          div(class = "total-check-summary-item",
+              tags$span("Mismatches", class = "total-check-label"),
+              tags$strong(format(summary$mismatches %||% 0L, big.mark = ",")))
+        ),
+        div(
+          class = "total-check-filter-line",
+          icon("filter"),
+          tags$span(filter_text)
+        ),
+        if (length(warnings)) {
+          div(
+            class = "total-check-warning-list",
+            lapply(warnings, function(message) div(icon("triangle-exclamation"), message))
+          )
+        }
+      )
+    })
+
+    output$total_check_details_ui <- renderUI({
+      check <- total_check_data()
+      stage_counts <- check$stage_counts %||% data.frame()
+      status <- check$status %||% "error"
+      detail <- check$detail %||% data.frame()
+      mismatch_count <- if (nrow(detail) && "Status" %in% names(detail)) {
+        sum(detail$Status != "OK", na.rm = TRUE)
+      } else {
+        0L
+      }
+      tags$details(
+        class = "total-check-details",
+        open = if (!identical(status, "ok")) TRUE else NULL,
+        tags$summary(
+          icon("table-list"),
+          paste0(
+            if (identical(status, "ok")) "Show mismatches" else "Review mismatches",
+            " (", format(mismatch_count, big.mark = ","), ")"
+          )
+        ),
+        if (nrow(stage_counts)) {
+          div(
+            class = "total-check-stage-strip",
+            lapply(seq_len(nrow(stage_counts)), function(i) {
+              div(
+                class = "total-check-stage",
+                tags$span(stage_counts$Stage[[i]]),
+                tags$strong(format(stage_counts$Rows[[i]], big.mark = ","))
+              )
+            })
+          )
+        },
+        DTOutput(session$ns("diag_check"))
+      )
+    })
+
+    output$diag_check <- DT::renderDT({
+      check <- total_check_data()
+      detail <- check$detail %||% tibble::tibble()
+      if (nrow(detail) && "Status" %in% names(detail)) {
+        detail <- detail %>% dplyr::filter(.data$Status != "OK")
+      }
+      if (!nrow(detail)) {
+        message <- if (identical(check$status %||% "", "ok")) {
+          "All checked keys reconcile. No mismatches to display."
+        } else {
+          check$summary$message %||% "No mismatch detail is available."
+        }
+        return(
+          datatable(
+            data.frame(Message = message),
+            options = list(initComplete = dt_blue_callback, dom = "t"),
+            rownames = FALSE
+          )
+        )
+      }
+
+      display <- detail %>%
+        dplyr::mutate(
+          dplyr::across(
+            dplyr::any_of(c(
+              "ModelTotal", "RAEEffectiveTotal", "SplitTotal",
+              "ModelVsRAEDiff", "RAEVsSplitDiff", "ModelVsSplitDiff"
+            )),
+            function(x) round(x, 4)
+          )
+        )
+      datatable(
+        display,
+        extensions = "Buttons",
+        options = list(
+          scrollX = TRUE,
+          pageLength = 25,
+          initComplete = dt_blue_callback,
+          dom = "Bfrtip",
+          autoWidth = FALSE,
+          buttons = make_export_buttons("total_check", input$channel_select)
+        ),
+        rownames = FALSE
+      ) %>%
+        formatStyle(
+          "Status",
+          backgroundColor = styleEqual(
+            c("OK", "Source/Filter mismatch", "Processing mismatch", "Missing key"),
+            c("#eaf7ef", "#fff4d6", "#fdecec", "#f3e8ff")
+          ),
+          color = styleEqual(
+            c("OK", "Source/Filter mismatch", "Processing mismatch", "Missing key"),
+            c("#176b3a", "#7a5200", "#9f1d1d", "#6b21a8")
+          ),
+          fontWeight = "600"
+        )
+    }, server = TRUE)
     list(
       results       = reactive(reactiveValuesToList(results_store)),
       clean_results = reactive(reactiveValuesToList(clean_store)),
+      result_versions = reactive(reactiveValuesToList(result_versions)),
       qa_status = reactive({
         ch_names <- names(channels())
         res <- reactiveValuesToList(results_store)

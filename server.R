@@ -1,18 +1,24 @@
-# ═══════════════════════════════════════════════════════════════════════
+# ---
 # server.R
-# ═══════════════════════════════════════════════════════════════════════
+# ---
 
 server <- function(input, output, session) {
-  
-  # ── 1. Setup ──────────────────────────────────────────────────────────
-  setup_module <- mod_setup_server("setup")
-  
-  # ── 2. Channels ───────────────────────────────────────────────────────
+  performance_cache <- new_performance_cache()
+  operation_status <- new_operation_status(session)
+  # Setup is the owner of uploaded source data and global configuration.
+  setup_module <- mod_setup_server(
+    "setup",
+    performance_cache = performance_cache,
+    operation_status = operation_status
+  )
+  # Channels edits per-channel rules and writes them back to shared state.
   channels_module <- mod_channels_server(
     "channels",
     data        = setup_module$data,
     media_index = setup_module$media_index,
-    config      = setup_module$config
+    config      = setup_module$config,
+    update_sap  = setup_module$update_sap,
+    performance_cache = performance_cache
   )
 
   splits_metadata_pending <- reactiveVal(NULL)
@@ -70,7 +76,9 @@ server <- function(input, output, session) {
             badge(preview$merges, "merges"),
             badge(preview$updated, "will overwrite"),
             badge(preview$imported + preview$rebuilt, "new/imported"),
-            badge(preview$skipped, "skipped")
+            badge(preview$skipped, "skipped"),
+            if ((preview$inactive %||% 0L) > 0L)
+              badge(preview$inactive, "inactive in ModelDetails")
           ),
           if (length(mismatch)) {
             div(
@@ -127,15 +135,16 @@ server <- function(input, output, session) {
                        type = "error", duration = 8)
     })
   }, ignoreInit = TRUE)
-  
-  # ── 3. Process ────────────────────────────────────────────────────────
+  # Process consumes setup data and channel rules, then exposes results.
   process_module <- mod_process_server(
     "process",
     data          = setup_module$data,
     config        = setup_module$config,
     channels      = channels_module$channels,
     update_merges = channels_module$update_merges,
-    config_import_event = channels_module$config_import_event
+    config_import_event = channels_module$config_import_event,
+    performance_cache = performance_cache,
+    operation_status = operation_status
   )
 
   observe({
@@ -150,8 +159,7 @@ server <- function(input, output, session) {
       splits_metadata_status("current")
     }
   })
-  
-  # ── 4. Export ─────────────────────────────────────────────────────────
+  # Export reads processed results and builds the downloadable package.
   mod_export_server(
     "export",
     results       = process_module$results,
@@ -159,18 +167,20 @@ server <- function(input, output, session) {
     data          = setup_module$data,
     config        = setup_module$config,
     channels      = channels_module$channels,
-    process_qa    = process_module$qa_status
+    process_qa    = process_module$qa_status,
+    result_versions = process_module$result_versions,
+    performance_cache = performance_cache,
+    operation_status = operation_status
   )
-
-  # ── App ready notification ────────────────────────────────────────────
+ # --- App ready notification ---
   session$onFlushed(function() {
     showNotification(
       tagList(icon("circle-check"), " App ready"),
       type = "message", duration = 2)
   }, once = TRUE)
-  
-  # ── Cleanup on session end ────────────────────────────────────────────
+ # --- Cleanup on session end ---
   session$onSessionEnded(function() {
+    pso_cache_reset(performance_cache)
     gc(verbose = FALSE, full = TRUE)
   })
 }

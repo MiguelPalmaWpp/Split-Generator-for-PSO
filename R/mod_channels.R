@@ -1,7 +1,10 @@
 
-# ═══════════════════════════════════════════════════════════════════════
+# -----------------------------------------------------------------------
 # R/mod_channels.R
-# ═══════════════════════════════════════════════════════════════════════
+# Channels owns per-channel configuration and editing. It keeps the Media
+# Index as the source of generated channels and builds previews and audits
+# from the same effective filters used by downstream processing.
+# -----------------------------------------------------------------------
 
 mod_channels_ui <- function(id) {
   ns <- NS(id)
@@ -48,9 +51,14 @@ mod_channels_ui <- function(id) {
   )
 }
 
-# ── Server ──────────────────────────────────────────────────────────────────
-mod_channels_server <- function(id, data, media_index, config = reactive(list())) {
+# -----------------------------------------------------------------------
+# Server: channel state, audit, editing, previews, and metadata import.
+# -----------------------------------------------------------------------
+mod_channels_server <- function(id, data, media_index, config = reactive(list()),
+                                update_sap = reactive(list()),
+                                performance_cache = NULL) {
   moduleServer(id, function(input, output, session) {
+    performance_cache <- ensure_performance_cache(performance_cache)
     
     ns <- session$ns
     
@@ -68,14 +76,11 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
     config_import_event <- reactiveVal(NULL)
     config_import_event_id <- reactiveVal(0L)
     copy_config_source <- reactiveVal(NULL)
-    editor_heavy_ready <- reactiveVal(TRUE)
     preview_row_limit <- 1000L
     default_break_separator <- " - "
     split_preview_cache <- reactiveValues(key = NULL, ui = NULL)
     break_preview_cache <- reactiveValues(key = NULL, data = NULL)
     alias_preview_cache <- reactiveValues(key = NULL, data = NULL)
-    channel_audit_cache <- reactiveValues(key = NULL, value = NULL)
-    channel_source_cache <- reactiveValues(keys = character(0), values = list())
     channel_card_cache <- reactiveValues(keys = character(0), values = list())
     channel_roi_cache <- reactiveValues(keys = character(0), values = list())
     manager_row_cache <- reactiveValues(keys = character(0), values = list())
@@ -84,16 +89,12 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
     manager_cache_version <- reactiveVal(0L)
     manager_modal_open <- reactiveVal(FALSE)
     break_n_parts_cache <- reactiveVal(2L)
+    break_edit_state <- reactiveVal(NULL)
+    alias_edit_state <- reactiveVal(NULL)
     manager_render_limit <- 100L
 
     profile_step <- function(label, expr) {
-      if (isTRUE(getOption("pso.profile", FALSE))) {
-        elapsed <- system.time(out <- force(expr))
-        message(sprintf("[pso.profile] channels.%s: %.3fs", label, elapsed[["elapsed"]]))
-        out
-      } else {
-        force(expr)
-      }
+      pso_profile(paste0("channels.", label), expr)
     }
 
     cache_get <- function(cache, key) {
@@ -122,12 +123,10 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
       invisible(value)
     }
 
+    # Preview caches are cleared by dependency: source changes invalidate all
+    # derived previews, while a rename or break can invalidate only its view.
     clear_preview_caches <- function(source = TRUE, split = TRUE, brk = TRUE,
                                      audit = TRUE, cards = FALSE) {
-      if (isTRUE(source)) {
-        channel_source_cache$keys <- character(0)
-        channel_source_cache$values <- list()
-      }
       if (isTRUE(split)) {
         split_preview_cache$key <- NULL
         split_preview_cache$ui <- NULL
@@ -137,10 +136,6 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
         break_preview_cache$data <- NULL
         alias_preview_cache$key <- NULL
         alias_preview_cache$data <- NULL
-      }
-      if (isTRUE(audit)) {
-        channel_audit_cache$key <- NULL
-        channel_audit_cache$value <- NULL
       }
       if (isTRUE(cards)) {
         channel_card_cache$keys <- character(0)
@@ -214,7 +209,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
           separator = brk$separator %||% default_break_separator,
           n_parts = n_parts,
           names = part_names,
-          missing_part_value = brk$missing_part_value %||% "Total"
+          missing_part_value = canonical_break_missing_part_value()
         )
       })
     }
@@ -275,6 +270,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
     channel_source_signature <- function(cfg) {
       paste(
         paste(cfg$varname_include %||% character(0), collapse = "|"),
+        paste(cfg$analytical_varkeys %||% character(0), collapse = "|"),
         cfg$varname_match_mode %||% "",
         cfg$activity_keyword %||% "",
         cfg$spend_keyword %||% "",
@@ -386,42 +382,35 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
       )
     }
 
-    filter_by_channel_varnames <- function(df, cfg) {
+    # Apply the configured channel scope before generating UI previews. Keep
+    # this aligned with processing filters to avoid audit-preview drift.
+    filter_channel_source <- function(df, indexed_df, cfg, include_spend = FALSE) {
       vi <- cfg$varname_include[nzchar(cfg$varname_include %||% "")]
       if (!length(vi) || !"VariableName" %in% names(df)) return(df)
+      available <- if (inherits(indexed_df, "pso_rae_index") &&
+                       !is.null(indexed_df$variables)) {
+        indexed_df$variables$VariableName
+      } else {
+        unique(trimws(as.character(df$VariableName)))
+      }
+      if (isTRUE(include_spend)) {
+        vi <- expand_varname_include_with_spend(
+          available,
+          vi,
+          cfg$spend_keyword %||% NULL
+        )
+      }
       vi <- expand_analytical_keys_to_variable_names(
-        unique(trimws(as.character(df$VariableName))),
+        available,
         vi
       )
-
       match_mode <- cfg$varname_match_mode %||%
         if (identical(cfg$source %||% "", "vof")) "exact" else "prefix"
-      vn_vec <- as.character(df$VariableName)
-      if (identical(match_mode, "exact")) {
-        keep <- tolower(trimws(vn_vec)) %in% tolower(trimws(vi))
-      } else {
-        keep <- Reduce("|", lapply(vi, function(p)
-          grepl(paste0("^", stringr::str_replace_all(p, "([\\W])", "\\\\\\1")),
-                vn_vec, ignore.case = TRUE, perl = TRUE)))
-      }
-      df[keep, , drop = FALSE]
-    }
-
-    filter_by_channel_varnames_for_audit <- function(df, cfg) {
-      vi <- cfg$varname_include[nzchar(cfg$varname_include %||% "")]
-      if (!length(vi) || !"VariableName" %in% names(df)) return(df)
-      vi <- expand_varname_include_with_spend(
-        unique(trimws(as.character(df$VariableName))),
+      subset_indexed_rae(
+        indexed_df %||% build_indexed_rae(df),
         vi,
-        cfg$spend_keyword %||% NULL
+        if (identical(match_mode, "exact")) "exact" else "prefix"
       )
-      vi <- expand_analytical_keys_to_variable_names(
-        unique(trimws(as.character(df$VariableName))),
-        vi
-      )
-      cfg2 <- cfg
-      cfg2$varname_include <- vi
-      filter_by_channel_varnames(df, cfg2)
     }
 
     selected_channel_source <- function(nm = rv$selected, cfg = NULL, include_spend = FALSE) {
@@ -441,22 +430,25 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
       }
 
       bounds <- preview_date_bounds(cfg)
-      cache_key <- paste(
+      cache_key <- pso_cache_key(
+        "channels-source",
         nm %||% "",
         isTRUE(include_spend),
         if (!is.null(cfg)) channel_source_signature(cfg) else "no-cfg",
         bounds$key,
-        nrow(md),
-        paste(names(md), collapse = "|"),
-        sep = "::"
+        tryCatch(data()$data_signature, error = function(e) data_signature(md))
       )
-      cached <- cache_get(channel_source_cache, cache_key)
+      cached <- pso_cache_get(performance_cache, cache_key)
       if (!is.null(cached)) return(cached)
 
       out <- profile_step("selected_channel_source", {
         scoped <- if (!is.null(cfg)) {
-          if (isTRUE(include_spend)) filter_by_channel_varnames_for_audit(md, cfg)
-          else filter_by_channel_varnames(md, cfg)
+          filter_channel_source(
+            md,
+            tryCatch(data()$all_rags_indexed, error = function(e) NULL),
+            cfg,
+            include_spend = include_spend
+          )
         } else {
           md
         }
@@ -476,7 +468,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
           key = cache_key
         )
       })
-      cache_set(channel_source_cache, cache_key, out, max_items = 10L)
+      pso_cache_set(performance_cache, cache_key, out)
       out
     }
     
@@ -532,22 +524,23 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
       list(rows = rows, count = length(rows))
     }
 
+    # Build the compact audit model from file matches, effective filters,
+    # metric roles, ROI, TimeBreak, GeoLabel, and saved SAP state.
     selected_channel_audit <- function(nm, cfg) {
       d <- data()
       md <- d$all_rags
       an <- d$analytical
       source <- selected_channel_source(nm, cfg, include_spend = TRUE)
-      cache_key <- paste(
+      cache_key <- pso_cache_key(
+        "channels-audit",
         nm %||% "",
         channel_config_signature(cfg),
         source$key,
         if (!is.null(an)) paste(names(an), collapse = "|") else "",
-        sep = "::"
+        rois_signature()
       )
-      if (identical(channel_audit_cache$key, cache_key) &&
-          !is.null(channel_audit_cache$value)) {
-        return(channel_audit_cache$value)
-      }
+      cached_audit <- pso_cache_get(performance_cache, cache_key)
+      if (!is.null(cached_audit)) return(cached_audit)
 
       notes <- character(0)
       warnings <- character(0)
@@ -557,6 +550,23 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
       date_mode <- "unavailable"
       date_message <- ""
       date_rows <- 0L
+
+      if (identical(cfg$source %||% "", "vof") &&
+          (cfg$vof_rows_discarded %||% 0L) > 0L) {
+        notes <- c(notes, paste0(
+          "Excluded ", cfg$vof_rows_discarded,
+          " VOF row(s) because ModelDetails marks them as not modelled (NONE)."
+        ))
+      }
+      legacy_tbr <- trimws(as.character(cfg$legacy_time_break_label %||% ""))
+      canonical_tbr <- trimws(as.character(cfg$time_break_label %||% ""))
+      if (identical(cfg$source %||% "", "vof") &&
+          nzchar(legacy_tbr) && !identical(tolower(legacy_tbr), tolower(canonical_tbr))) {
+        notes <- c(notes, paste0(
+          "Legacy TimeBreak label corrected from ", legacy_tbr,
+          " to ", if (nzchar(canonical_tbr)) canonical_tbr else "None", "."
+        ))
+      }
 
       if (is.null(md)) {
         blockers <- c(blockers, "RAE Datafile is not loaded.")
@@ -581,16 +591,33 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
           spend_rows <- sum(grepl(spend_kw, vn, ignore.case = TRUE), na.rm = TRUE)
         }
 
-        if (activity_rows == 0L) {
-          blockers <- c(blockers, "No Activity rows match this channel and date range.")
+        role_vars <- resolve_role_rae_variables(unique(vn), cfg)
+        modeled_rows <- sum(tolower(vn) %in% tolower(role_vars$modeled), na.rm = TRUE)
+        for_indices_rows <- sum(tolower(vn) %in% tolower(role_vars$for_indices), na.rm = TRUE)
+        if (modeled_rows == 0L) {
+          blockers <- c(blockers, "No RAE rows match the modeled variable for this channel and date range.")
         }
-        if (activity_rows > 0L && spend_rows == 0L) {
-          warnings <- c(warnings, paste0("No Cost/Spend rows found with keyword '", spend_kw, "'."))
+        if ((cfg$role_pair_status %||% "") %in% c("Matched", "Partial") &&
+            modeled_rows > 0L && for_indices_rows == 0L) {
+          warnings <- c(warnings, "ForIndices is connected but has no RAE rows in the effective scope.")
+        }
+        if (identical(cfg$role_pair_status %||% "", "Partial")) {
+          warnings <- c(warnings, "ForIndices has partial RAE coverage; some modeled source variables have no compatible counterpart.")
+        }
+        if (identical(cfg$role_pair_status %||% "", "Ambiguous")) {
+          warnings <- c(warnings, "ForIndices has multiple candidates and will not be inferred automatically.")
         }
 
         if (identical(tolower(spend_kw), "spend")) {
+          indexed_rae <- d$all_rags_indexed
+          available_variable_names <- if (inherits(indexed_rae, "pso_rae_index") &&
+                                          !is.null(indexed_rae$variables)) {
+            indexed_rae$variables$VariableName
+          } else {
+            unique(trimws(as.character(md$VariableName)))
+          }
           vi_expanded_cost <- expand_varname_include_with_spend(
-            unique(trimws(as.character(md$VariableName))),
+            available_variable_names,
             cfg$varname_include %||% character(0),
             "Cost"
           )
@@ -611,7 +638,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
 
       roi_val <- effective_roi_cached(nm, cfg)
       if (is.na(roi_val)) {
-        warnings <- c(warnings, "ROI is missing. Processing can continue, but seed_for_indices.csv will not include ROI values.")
+        warnings <- c(warnings, "ROI is not loaded. Processing can continue; Seed For Indices.csv will be exported without ROI values.")
       }
 
       gcfg <- tryCatch(config(), error = \(e) list())
@@ -620,8 +647,16 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
       }
 
       n_merges <- sum(vapply(cfg$saved_merges %||% list(), \(m) isTRUE(m$active), logical(1)))
+      n_stale_merges <- sum(vapply(cfg$saved_merges %||% list(), \(m)
+        isTRUE(m$stale), logical(1)))
       if (n_merges > 0) {
         notes <- c(notes, paste0(n_merges, " saved merge(s) will be applied during Process."))
+      }
+      if (n_stale_merges > 0) {
+        warnings <- c(warnings, paste0(
+          n_stale_merges,
+          " stale merge reference(s) are held for review and will not be applied."
+        ))
       }
 
       roi_missing <- is.na(roi_val)
@@ -631,8 +666,8 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
         blockers[[1]]
       } else if (length(warnings)) {
         warn <- warnings[[1]]
-        if (grepl("^ROI is missing", warn)) {
-          "ROI is missing for this channel."
+        if (grepl("^ROI is (missing|not loaded)", warn)) {
+          "ROI data is not loaded for this channel."
         } else if (grepl("^No Cost/Spend rows", warn)) {
           "Spend/Cost rows were not found with the current keyword."
         } else if (grepl("Cost for this family", warn)) {
@@ -665,8 +700,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
         blockers = unique(blockers),
         notes = unique(notes)
       )
-      channel_audit_cache$key <- cache_key
-      channel_audit_cache$value <- out
+      pso_cache_set(performance_cache, cache_key, out)
       out
     }
 
@@ -712,7 +746,8 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
         status_items <- "Channel is ready: data, model variable, date range and ROI checks passed."
       }
       messages_notes <- setdiff(audit$notes, status_items)
-        tagList(
+        div(class = "channel-audit-enterprise",
+          tagList(
         div(class = "channel-audit-summary channel-audit-metrics",
             audit_pill("Status", audit$status, status_tone),
             audit_pill("Source", source_text, if (isTRUE(cfg$config_imported)) "info" else "neutral"),
@@ -735,18 +770,13 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
                             else paste("Why this status"))),
             tags$ul(class = "channel-audit-status-list",
                     lapply(status_items, \(msg) tags$li(msg)))),
-        if (isTRUE(audit$roi_missing))
-          div(class = "channel-audit-roi-critical",
-              icon("triangle-exclamation"),
-              div(tags$strong("ROIs by Channel missing"),
-                  tags$span("seed_for_indices.csv will export without ROI values until the ROI file is loaded in Setup."))),
         if (length(audit$blockers) || length(audit$warnings) ||
             length(messages_notes) || nzchar(geo_label_raw))
           div(class = "channel-audit-messages",
               tagList(lapply(audit$blockers, \(msg)
                 div(class = "channel-audit-message audit-msg-error",
                     icon("circle-xmark"), tags$span(msg)))),
-              tagList(lapply(audit$warnings[!grepl("^ROI is missing", audit$warnings)], \(msg)
+              tagList(lapply(audit$warnings[!grepl("^ROI is (missing|not loaded)", audit$warnings)], \(msg)
                 div(class = "channel-audit-message audit-msg-warn",
                     icon("triangle-exclamation"), tags$span(msg)))),
               tagList(lapply(messages_notes, \(msg)
@@ -756,7 +786,8 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
                 div(class = "channel-audit-message audit-msg-info",
                     icon("circle-info"),
                     tags$span("GeoLabel is applied because this same time partition exists with multiple geography rules.")))
-      )
+          )
+        )
     }
 
     normalize_model_var <- function(x) {
@@ -889,11 +920,74 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
         stringr::regex(paste0("\\s*", act_kw, "s?\\s*$"), ignore_case = TRUE)))
       if (nzchar(broad_vn) && broad_vn != base_vn) c(base_vn, broad_vn) else base_vn
     }
+
+    channel_name_key <- function(x) {
+      tolower(stringr::str_squish(trimws(as.character(x %||% ""))))
+    }
+
+    raw_vof_channel_names <- function() {
+      vof_d <- tryCatch(data()$vof_data, error = \(e) NULL)
+      if (is.null(vof_d) || !"MainModelVariableName" %in% names(vof_d)) {
+        return(character(0))
+      }
+      vals <- unique(trimws(as.character(vof_d$MainModelVariableName)))
+      vals[!is.na(vals) & nzchar(vals)]
+    }
+
+    inactive_vof_channel_names <- function(candidates = raw_vof_channel_names()) {
+      candidates <- unique(as.character(candidates %||% character(0)))
+      if (!length(candidates)) return(character(0))
+      raw_keys <- channel_name_key(raw_vof_channel_names())
+      available_keys <- channel_name_key(names(rv$available_channels))
+      candidate_keys <- channel_name_key(candidates)
+      candidates[candidate_keys %in% raw_keys & !candidate_keys %in% available_keys]
+    }
+
+    # Reconcile generated channels with the latest index while preserving
+    # valid manual channels and removing generated channels rejected by Details.
+    sync_channels_to_media_index <- function(mi, notify = FALSE) {
+      if (is.null(mi) || is.null(mi$channels)) return(character(0))
+      inherited <- tryCatch(update_sap(), error = function(e) list())
+      if (identical(tryCatch(data()$app_mode, error = function(e) "build"), "update") &&
+          length(inherited)) {
+        for (channel in intersect(names(inherited), names(mi$channels))) {
+          mi$channels[[channel]]$saved_merges <- inherited[[channel]]
+        }
+      }
+      rv$available_channels <- mi$channels
+      raw_vof_keys <- channel_name_key(raw_vof_channel_names())
+      stale_existing <- names(rv$channels)[vapply(names(rv$channels), function(nm) {
+        cfg <- rv$channels[[nm]]
+        is_vof_channel <- identical(cfg$source %||% "", "vof") ||
+          channel_name_key(nm) %in% raw_vof_keys
+        is_vof_channel && !nm %in% names(mi$channels)
+      }, logical(1))]
+      if (length(stale_existing)) {
+        for (nm in stale_existing) {
+          rv$channels[[nm]] <- NULL
+          dirty_channels[[nm]] <- NULL
+        }
+        if (!is.null(rv$selected) && rv$selected %in% stale_existing)
+          rv$selected <- if (length(rv$channels)) names(rv$channels)[1] else NULL
+        if (isTRUE(notify)) {
+          showNotification(
+            paste0(length(stale_existing),
+                   " stale VOF channel(s) removed from the refreshed Media Index."),
+            type = "message", duration = 6
+          )
+        }
+      }
+      stale_existing
+    }
     
     observeEvent(media_index(), {
       mi <- media_index()
       req(!is.null(mi), length(mi$channels) > 0)
-      rv$available_channels <- mi$channels
+      stale_existing <- sync_channels_to_media_index(mi, notify = TRUE)
+      if (length(stale_existing)) {
+        clear_manager_channel_cache()
+        clear_preview_caches(cards = TRUE)
+      }
       for (nm in names(mi$channels)) {
         if (nm %in% names(rv$channels)) {
           new_cfg <- mi$channels[[nm]]
@@ -908,8 +1002,10 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
           rv$channels[[nm]]$min_period        <- new_cfg$min_period
           rv$channels[[nm]]$max_period        <- new_cfg$max_period
           rv$channels[[nm]]$time_break_label  <- new_cfg$time_break_label %||% ""
-          if (!isTRUE(rv$channels[[nm]]$config_imported) ||
-              !nzchar(rv$channels[[nm]]$geo_label %||% "")) {
+          if (nzchar(rv$channels[[nm]]$time_break_label %||% "")) {
+            rv$channels[[nm]]$geo_label <- ""
+          } else if (!isTRUE(rv$channels[[nm]]$config_imported) ||
+                     !nzchar(rv$channels[[nm]]$geo_label %||% "")) {
             rv$channels[[nm]]$geo_label <- new_cfg$geo_label %||% ""
           }
           rv$channels[[nm]]$vof_geo_group <- new_cfg$vof_geo_group %||% ""
@@ -921,6 +1017,33 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
       clear_preview_caches(cards = TRUE)
       clear_manager_channel_cache()
     }, ignoreNULL = TRUE)
+
+    observeEvent(update_sap(), {
+      if (!identical(tryCatch(data()$app_mode, error = function(e) "build"), "update")) {
+        for (channel in names(rv$channels)) {
+          saved <- rv$channels[[channel]]$saved_merges %||% list()
+          rv$channels[[channel]]$saved_merges <- Filter(
+            function(merge) !isTRUE(merge$inherited_from_model_update), saved
+          )
+        }
+        for (channel in names(rv$available_channels)) {
+          saved <- rv$available_channels[[channel]]$saved_merges %||% list()
+          rv$available_channels[[channel]]$saved_merges <- Filter(
+            function(merge) !isTRUE(merge$inherited_from_model_update), saved
+          )
+        }
+        return()
+      }
+      mi <- tryCatch(media_index(), error = function(e) NULL)
+      if (is.null(mi)) return()
+      sync_channels_to_media_index(mi, notify = FALSE)
+      inherited <- update_sap() %||% list()
+      for (channel in intersect(names(inherited), names(rv$channels))) {
+        rv$channels[[channel]]$saved_merges <- inherited[[channel]]
+      }
+      clear_preview_caches(cards = TRUE)
+      clear_manager_channel_cache()
+    }, ignoreInit = TRUE)
     
     observeEvent(input$btn_prev_ch, {
       nms <- names(rv$channels); if (!length(nms)) return()
@@ -934,7 +1057,8 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
     })
     
     observeEvent(rv$selected, {
-      editor_heavy_ready(TRUE)
+      break_edit_state(NULL)
+      alias_edit_state(NULL)
       clear_preview_caches(source = FALSE, split = TRUE, brk = TRUE, audit = FALSE)
       if (!is.null(rv$selected) && rv$selected %in% names(rv$channels)) {
         breaks_enabled(
@@ -955,8 +1079,6 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
     observeEvent(rois_signature(), {
       clear_roi_cache()
       clear_channel_card_cache()
-      channel_audit_cache$key <- NULL
-      channel_audit_cache$value <- NULL
     }, ignoreInit = TRUE)
     
     observeEvent(input$btn_enable_breaks, { breaks_enabled(TRUE) })
@@ -1198,12 +1320,6 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
                    icon("circle-info", class = "icon-preview-empty"),
                    tags$p("Select a channel to load audit.",
                           class = "preview-empty-msg")))
-      if (!isTRUE(editor_heavy_ready()))
-        return(div(class = "preview-empty",
-                   icon("circle-info", class = "icon-preview-empty"),
-                   tags$p("Loading channel audit...",
-                          class = "preview-empty-msg")))
-
       cfg <- rv$channels[[rv$selected]]
       audit <- selected_channel_audit(rv$selected, cfg)
       long_info <- summarize_useful_longitudinals(cfg)
@@ -1248,6 +1364,28 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
                             paste0(audit$date_mode, " | ",
                                    fmt_audit_count(audit$date_rows), " row(s)")),
                 mk_info_row("Connection status", cfg$connection_status %||% "Not audited"),
+                if (nzchar(cfg$model_details_type %||% ""))
+                  mk_info_row("ModelDetails type", cfg$model_details_type),
+                mk_info_row("Modeled variable", cfg$modeled_variable %||% cfg$model_variable %||% "—"),
+                mk_info_row("Modeled status", cfg$modeled_type %||% cfg$model_details_type %||% "—"),
+                mk_info_row("Modeled role",
+                            if (identical(normalize_model_metric(cfg$modeled_role %||% cfg$model_metric %||% "activity"), "spend"))
+                              "Spend/Cost" else "Activity"),
+                mk_info_row("ForIndices",
+                            if (nzchar(cfg$for_indices_variable %||% ""))
+                              cfg$for_indices_variable
+                            else if (length(cfg$for_indices_varname_include %||% character(0)))
+                              paste(cfg$for_indices_varname_include, collapse = ", ")
+                            else "Not found"),
+                if (nzchar(cfg$for_indices_type %||% ""))
+                  mk_info_row("ForIndices status", cfg$for_indices_type),
+                mk_info_row("Role connection", cfg$role_pair_status %||% "Missing"),
+                mk_info_row("Role source", cfg$role_pair_source %||% "Not found"),
+                if (is.finite(suppressWarnings(as.numeric(cfg$role_pair_coverage %||% NA_real_))))
+                  mk_info_row("Role coverage",
+                              paste0(round(as.numeric(cfg$role_pair_coverage) * 100), "%")),
+                if (nzchar(cfg$role_pair_reason %||% ""))
+                  mk_info_row("Role evidence", cfg$role_pair_reason),
                 mk_info_row("Analytical mapping",
                             if (length(cfg$matched_analytical_cols %||% character(0)))
                               paste(cfg$matched_analytical_cols, collapse = ", ") else "\u2014"),
@@ -1303,6 +1441,10 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
                 if (!is.na(roi_val))
                   mk_info_row("ROI", format(round(roi_val, 2), big.mark = ",")),
                 mk_info_row("Breaks", audit$n_breaks),
+                if ((cfg$time_break_partition_count %||% 0L) > 0L)
+                  mk_info_row("Active time partitions",
+                              paste0(cfg$time_break_partition_count, " active time partition",
+                                     if ((cfg$time_break_partition_count %||% 0L) != 1L) "s" else "")),
                 mk_info_row("Useful longitudinal filters",
                             if (nzchar(cfg$useful_longitudinal_filters_text %||% "")) {
                               tagList(
@@ -1482,11 +1624,6 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
     }, ignoreInit = TRUE)
     
     output$split_preview <- renderUI({
-      if (!isTRUE(editor_heavy_ready()))
-        return(div(class = "preview-empty",
-                   icon("circle-info", class = "icon-preview-empty"),
-                   tags$p("Loading split preview...",
-                          class = "preview-empty-msg")))
       splits <- input$splits_selected %||% c("VariableName")
       if (!length(splits))
         return(div(class = "preview-empty", icon("eye-slash", class = "icon-preview-empty"),
@@ -1517,20 +1654,25 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
         return(split_preview_cache$ui)
       }
       
-      preview_result <- profile_step("split_preview", {
-        preview_md <- date_filter$data
-        limited <- nrow(preview_md) > preview_row_limit
-        preview_md <- limit_preview_rows(preview_md)
-        if (!is.null(cfg_p) && length(cfg_p$dimension_breaks %||% list()) > 0) {
-          preview_md <- tryCatch(apply_dimension_breaks(preview_md, cfg_p$dimension_breaks),
-                                 error = \(e) preview_md)
-        }
-        if (!is.null(cfg_p) && length(cfg_p$dimension_aliases %||% list()) > 0) {
-          preview_md <- tryCatch(apply_dimension_aliases(preview_md, cfg_p$dimension_aliases),
-                                 error = \(e) preview_md)
-        }
-        list(data = preview_md, is_limited = limited)
-      })
+      preview_data_key <- pso_cache_key("channels-split-preview", cache_key)
+      preview_result <- pso_cache_get(performance_cache, preview_data_key)
+      if (is.null(preview_result)) {
+        preview_result <- profile_step("split_preview", {
+          preview_md <- date_filter$data
+          limited <- nrow(preview_md) > preview_row_limit
+          preview_md <- limit_preview_rows(preview_md)
+          if (!is.null(cfg_p) && length(cfg_p$dimension_breaks %||% list()) > 0) {
+            preview_md <- tryCatch(apply_dimension_breaks(preview_md, cfg_p$dimension_breaks),
+                                   error = \(e) preview_md)
+          }
+          if (!is.null(cfg_p) && length(cfg_p$dimension_aliases %||% list()) > 0) {
+            preview_md <- tryCatch(apply_dimension_aliases(preview_md, cfg_p$dimension_aliases),
+                                   error = \(e) preview_md)
+          }
+          list(data = preview_md, is_limited = limited)
+        })
+        pso_cache_set(performance_cache, preview_data_key, preview_result)
+      }
       md <- preview_result$data
       is_limited <- preview_result$is_limited
       
@@ -1594,6 +1736,62 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
       ui
     })
     
+    # The modal edits an existing break in place or adds a new one; its saved
+    # names are the dimensions consumed by processing and SAP.
+    show_break_modal <- function(edit_index = NULL) {
+      req(rv$selected, rv$selected %in% names(rv$channels))
+      nm <- rv$selected
+      cfg <- rv$channels[[nm]]
+      md <- main_data()
+      if (is.null(md)) {
+        showNotification("Upload RAE Datafile first.", type = "warning")
+        return(invisible(NULL))
+      }
+
+      breaks <- cfg$dimension_breaks %||% list()
+      is_edit <- !is.null(edit_index) && edit_index >= 1L && edit_index <= length(breaks)
+      current <- if (is_edit) breaks[[edit_index]] else NULL
+      already_broken <- vapply(breaks, \(b) b$column %||% "", character(1))
+      if (is_edit) already_broken <- already_broken[-edit_index]
+      available <- setdiff(c("Campaign", "Outlet", "Creative"), already_broken)
+      if (is_edit && nzchar(current$column %||% "") &&
+          !current$column %in% available) {
+        available <- c(current$column, available)
+      }
+      if (!length(available)) {
+        showNotification("All dimensions already have a break.", type = "warning")
+        return(invisible(NULL))
+      }
+
+      if (is_edit) {
+        break_edit_state(list(channel = nm, index = as.integer(edit_index)))
+        break_n_parts_cache(as.integer(current$n_parts %||% length(current$names %||% character(0))))
+      } else {
+        break_edit_state(NULL)
+        break_n_parts_cache(2L)
+      }
+      title <- if (is_edit) "Edit Dimension Break" else "Configure Dimension Break"
+      action <- if (is_edit) "Save Changes" else "Add Break"
+      showModal(modalDialog(
+        title = tagList(icon(if (is_edit) "pen" else "scissors"), paste0(" ", title)),
+        div(class = "break-info-box", icon("circle-info", class = "icon-blue-sm"),
+            " This break will be applied to both activity and spend columns automatically."),
+        selectInput(ns("break_col"), "Column to break", choices = available,
+                    selected = current$column %||% available[[1]]),
+        textInput(ns("break_sep"), "Separator",
+                  value = current$separator %||% default_break_separator),
+        uiOutput(ns("break_preview_ui")), uiOutput(ns("break_names_ui")),
+        footer = tagList(actionButton(ns("btn_confirm_break"),
+                                      tagList(icon("check"), paste0(" ", action)),
+                                      class = "btn-primary") %>%
+                         tagAppendAttributes(
+                           onclick = "this.disabled=true; this.classList.add('disabled');"
+                         ),
+                         modalButton("Cancel")),
+        easyClose = FALSE, size = "m"))
+      invisible(NULL)
+    }
+
     output$breaks_list <- renderUI({
       req(rv$selected)
       if (!rv$selected %in% names(rv$channels)) return(NULL)
@@ -1609,8 +1807,13 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
                 tags$strong(brk$column),
                 tags$span(paste0(" by \"", brk$separator, "\" \u2192 "), class = "text-muted"),
                 tags$span(paste(brk$names, collapse = " | "), class = "text-blue fw-semibold")),
-            actionButton(ns(paste0("remove_break_", i)), icon("xmark"),
-                         class = "btn btn-link p-0 btn-break-remove"))
+            div(class = "break-item-actions",
+                actionButton(ns(paste0("edit_break_", i)), icon("pen"),
+                             title = "Edit break", `aria-label` = "Edit break",
+                             class = "btn btn-link p-0 btn-break-edit"),
+                actionButton(ns(paste0("remove_break_", i)), icon("xmark"),
+                             title = "Remove break", `aria-label` = "Remove break",
+                             class = "btn btn-link p-0 btn-break-remove")))
       }))
     })
     
@@ -1621,7 +1824,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
       if (!is.null(session$userData$remove_break_obs))
         lapply(session$userData$remove_break_obs,
                \(o) tryCatch(o$destroy(), error = \(e) NULL))
-      session$userData$remove_break_obs <- lapply(seq_along(breaks), function(i) {
+      remove_obs <- lapply(seq_along(breaks), function(i) {
         local({
           local_i <- i; local_nm <- rv$selected
           observeEvent(input[[paste0("remove_break_", local_i)]], {
@@ -1632,6 +1835,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
               rv$channels[[local_nm]]$split_columns    <- setdiff(
                 rv$channels[[local_nm]]$split_columns %||% character(0), brk$names)
               if (!length(rv$channels[[local_nm]]$dimension_breaks)) breaks_enabled(FALSE)
+              dirty_channels[[local_nm]] <- TRUE
               clear_preview_caches(source = FALSE, split = TRUE, brk = TRUE,
                                    audit = TRUE, cards = TRUE)
               showNotification(paste0("Break on '", brk$column, "' removed."),
@@ -1640,7 +1844,65 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
           }, ignoreInit = TRUE)
         })
       })
+      edit_obs <- lapply(seq_along(breaks), function(i) {
+        local({
+          local_i <- i; local_nm <- rv$selected
+          observeEvent(input[[paste0("edit_break_", local_i)]], {
+            if (identical(rv$selected, local_nm) &&
+                local_i <= length(rv$channels[[local_nm]]$dimension_breaks %||% list())) {
+              show_break_modal(local_i)
+            }
+          }, ignoreInit = TRUE)
+        })
+      })
+      session$userData$remove_break_obs <- c(remove_obs, edit_obs)
     })
+
+    # Aliases change a split dimension label while preserving its values.
+    show_alias_modal <- function(edit_index = NULL) {
+      req(rv$selected, rv$selected %in% names(rv$channels))
+      nm <- rv$selected
+      cfg <- rv$channels[[nm]]
+      aliases <- cfg$dimension_aliases %||% list()
+      is_edit <- !is.null(edit_index) && edit_index >= 1L && edit_index <= length(aliases)
+      current <- if (is_edit) aliases[[edit_index]] else NULL
+      cross_cols <- get_cross_cols()
+      choices <- effective_split_choices(cfg$dimension_breaks %||% list(), cross_cols, list())
+      other_aliases <- if (is_edit) aliases[-edit_index] else aliases
+      used_sources <- vapply(other_aliases, \(a) a$source %||% "", character(1))
+      choices <- setdiff(choices, used_sources)
+      if (is_edit && nzchar(current$source %||% "") &&
+          !current$source %in% choices) {
+        choices <- c(current$source, choices)
+      }
+      if (!length(choices)) {
+        showNotification("No dimensions available to rename.", type = "warning")
+        return(invisible(NULL))
+      }
+
+      if (is_edit) {
+        alias_edit_state(list(channel = nm, index = as.integer(edit_index)))
+      } else {
+        alias_edit_state(NULL)
+      }
+      title <- if (is_edit) "Edit Dimension Rename" else "Configure Dimension Rename"
+      action <- if (is_edit) "Save Changes" else "Add Rename"
+      showModal(modalDialog(
+        title = tagList(icon(if (is_edit) "pen" else "tag"), paste0(" ", title)),
+        div(class = "break-info-box", icon("circle-info", class = "icon-blue-sm"),
+            " This creates an alias for the selected dimension. Values are not changed."),
+        selectInput(ns("alias_source"), "Dimension to rename", choices = choices,
+                    selected = current$source %||% choices[[1]]),
+        textInput(ns("alias_name"), "New dimension name",
+                  value = current$alias %||% ""),
+        uiOutput(ns("alias_preview_ui")),
+        footer = tagList(actionButton(ns("btn_confirm_alias"),
+                                      tagList(icon("check"), paste0(" ", action)),
+                                      class = "btn-primary"),
+                         modalButton("Cancel")),
+        easyClose = FALSE, size = "m"))
+      invisible(NULL)
+    }
 
     output$aliases_list <- renderUI({
       req(rv$selected)
@@ -1657,8 +1919,13 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
                 tags$strong(als$source %||% ""),
                 tags$span(" renamed as ", class = "text-muted"),
                 tags$span(als$alias %||% "", class = "text-blue fw-semibold")),
-            actionButton(ns(paste0("remove_alias_", i)), icon("xmark"),
-                         class = "btn btn-link p-0 btn-break-remove"))
+            div(class = "break-item-actions",
+                actionButton(ns(paste0("edit_alias_", i)), icon("pen"),
+                             title = "Edit rename", `aria-label` = "Edit rename",
+                             class = "btn btn-link p-0 btn-break-edit"),
+                actionButton(ns(paste0("remove_alias_", i)), icon("xmark"),
+                             title = "Remove rename", `aria-label` = "Remove rename",
+                             class = "btn btn-link p-0 btn-break-remove")))
       }))
     })
 
@@ -1669,7 +1936,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
       if (!is.null(session$userData$remove_alias_obs))
         lapply(session$userData$remove_alias_obs,
                \(o) tryCatch(o$destroy(), error = \(e) NULL))
-      session$userData$remove_alias_obs <- lapply(seq_along(aliases), function(i) {
+      remove_obs <- lapply(seq_along(aliases), function(i) {
         local({
           local_i <- i; local_nm <- rv$selected
           observeEvent(input[[paste0("remove_alias_", local_i)]], {
@@ -1690,32 +1957,22 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
           }, ignoreInit = TRUE)
         })
       })
+      edit_obs <- lapply(seq_along(aliases), function(i) {
+        local({
+          local_i <- i; local_nm <- rv$selected
+          observeEvent(input[[paste0("edit_alias_", local_i)]], {
+            if (identical(rv$selected, local_nm) &&
+                local_i <= length(rv$channels[[local_nm]]$dimension_aliases %||% list())) {
+              show_alias_modal(local_i)
+            }
+          }, ignoreInit = TRUE)
+        })
+      })
+      session$userData$remove_alias_obs <- c(remove_obs, edit_obs)
     })
 
     observeEvent(input$btn_add_alias, {
-      req(rv$selected, rv$selected %in% names(rv$channels))
-      cfg <- rv$channels[[rv$selected]]
-      cross_cols <- get_cross_cols()
-      choices <- effective_split_choices(cfg$dimension_breaks %||% list(), cross_cols, list())
-      aliases <- cfg$dimension_aliases %||% list()
-      used_sources <- vapply(aliases, \(a) a$source %||% "", character(1))
-      choices <- setdiff(choices, used_sources)
-      if (!length(choices)) {
-        showNotification("No dimensions available to rename.", type = "warning")
-        return()
-      }
-      showModal(modalDialog(
-        title = tagList(icon("tag"), " Configure Dimension Rename"),
-        div(class = "break-info-box", icon("circle-info", class = "icon-blue-sm"),
-            " This creates an alias for the selected dimension. Values are not changed."),
-        selectInput(ns("alias_source"), "Dimension to rename", choices = choices),
-        textInput(ns("alias_name"), "New dimension name", value = ""),
-        uiOutput(ns("alias_preview_ui")),
-        footer = tagList(actionButton(ns("btn_confirm_alias"),
-                                      tagList(icon("check"), " Add Rename"),
-                                      class = "btn-primary"),
-                         modalButton("Cancel")),
-        easyClose = FALSE, size = "m"))
+      show_alias_modal()
     })
 
     alias_preview_values <- reactive({
@@ -1866,8 +2123,15 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
         return()
       }
       existing <- cfg$dimension_aliases %||% list()
-      existing_sources <- vapply(existing, \(a) a$source %||% "", character(1))
-      existing_aliases <- vapply(existing, \(a) a$alias %||% "", character(1))
+      edit <- alias_edit_state()
+      edit_index <- if (!is.null(edit) && identical(edit$channel, nm)) {
+        as.integer(edit$index %||% NA_integer_)
+      } else NA_integer_
+      is_edit <- !is.na(edit_index) && edit_index >= 1L && edit_index <= length(existing)
+      current <- if (is_edit) existing[[edit_index]] else NULL
+      comparison_aliases <- if (is_edit) existing[-edit_index] else existing
+      existing_sources <- vapply(comparison_aliases, \(a) a$source %||% "", character(1))
+      existing_aliases <- vapply(comparison_aliases, \(a) a$alias %||% "", character(1))
       if (source %in% existing_sources) {
         showNotification("This dimension already has a rename.", type = "warning")
         return()
@@ -1884,13 +2148,26 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
         return()
       }
       splits <- cfg$split_columns %||% character(0)
+      if (is_edit) {
+        splits[splits == (current$alias %||% "")] <- current$source %||% ""
+      }
       splits[splits == source] <- alias
       rv$channels[[nm]]$split_columns <- unique(splits[nzchar(splits)])
-      rv$channels[[nm]]$dimension_aliases <- c(existing, list(list(source = source, alias = alias)))
+      updated_alias <- list(source = source, alias = alias)
+      if (is_edit) {
+        existing[[edit_index]] <- updated_alias
+      } else {
+        existing <- c(existing, list(updated_alias))
+      }
+      rv$channels[[nm]]$dimension_aliases <- existing
       dirty_channels[[nm]] <- TRUE
+      alias_edit_state(NULL)
       removeModal()
       clear_preview_caches(source = FALSE, split = TRUE, brk = TRUE, audit = TRUE, cards = TRUE)
-      showNotification(paste0("Rename added: ", source, " -> ", alias), type = "message")
+      showNotification(
+        paste0("Rename ", if (is_edit) "updated" else "added", ": ", source, " -> ", alias),
+        type = "message"
+      )
     })
     
     auto_n_parts <- reactive({
@@ -1920,33 +2197,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
     })
     
     observeEvent(input$btn_add_break, {
-      req(rv$selected, rv$selected %in% names(rv$channels))
-      md <- main_data()
-      if (is.null(md)) {
-        showNotification("Upload RAE Datafile first.", type = "warning"); return()
-      }
-      already_broken <- sapply(rv$channels[[rv$selected]]$dimension_breaks %||% list(),
-                               \(b) b$column)
-      available <- setdiff(c("Campaign", "Outlet", "Creative"), already_broken)
-      if (!length(available)) {
-        showNotification("All dimensions already have a break.", type = "warning"); return()
-      }
-      break_n_parts_cache(2L)
-      showModal(modalDialog(
-        title = tagList(icon("scissors"), " Configure Dimension Break"),
-        div(class = "break-info-box", icon("circle-info", class = "icon-blue-sm"),
-            " This break will be applied to both activity and spend columns automatically."),
-        selectInput(ns("break_col"), "Column to break", choices = available),
-        textInput(ns("break_sep"), "Separator", value = default_break_separator),
-        uiOutput(ns("break_preview_ui")), uiOutput(ns("break_names_ui")),
-        footer = tagList(actionButton(ns("btn_confirm_break"),
-                                      tagList(icon("check"), " Add Break"),
-                                      class = "btn-primary") %>%
-                         tagAppendAttributes(
-                           onclick = "this.disabled=true; this.classList.add('disabled');"
-                         ),
-                         modalButton("Cancel")),
-        easyClose = FALSE, size = "m"))
+      show_break_modal()
     })
 
     break_preview_unique_values <- reactive({
@@ -2072,26 +2323,26 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
             p[j]
           }
           value <- clean_split_part(value)
-          if (is.na(value)) "Total" else value
+          if (is.na(value)) "Unknown" else value
         }, character(1))
         values <- values[nzchar(values)]
-        if (length(values)) paste(values, collapse = "_") else "Total"
+        if (length(values)) paste(values, collapse = "_") else "Unknown"
       }, character(1)), 3)
       rows <- lapply(seq_along(vals), function(i) {
         p <- parts[[i]]
-        original <- if (is.na(vals[i])) "Total" else vals[i]
+        original <- if (is.na(vals[i])) "Unknown" else vals[i]
         cells <- c(list(tags$td(original, class = "break-preview-td-orig")),
                    lapply(seq_len(n), function(j) {
                      if (length(p) < j)
-                       tags$td("Total", class = "break-preview-td-warn",
+                       tags$td("Unknown", class = "break-preview-td-warn",
                                style = "color:#adb5bd; font-style:italic;")
                      else if (j == n) {
                        value <- clean_split_part(paste(p[j:length(p)], collapse = sep))
-                       tags$td(if (is.na(value)) "Total" else value,
+                      tags$td(if (is.na(value)) "Unknown" else value,
                                class = "break-preview-td")
                      } else {
                        value <- clean_split_part(p[j])
-                       tags$td(if (is.na(value)) "Total" else value,
+                      tags$td(if (is.na(value)) "Unknown" else value,
                                class = "break-preview-td")
                      }
                    }))
@@ -2119,7 +2370,7 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
             tags$span(class = "break-preview-chip",
                       paste0("Single-part ", format(sum(part_counts <= 1), big.mark = ","))),
             tags$span(class = "break-preview-chip break-preview-chip-warn",
-                      paste0("Total-filled ", format(missing_parts_n, big.mark = ",")))),
+                      paste0("Unknown-filled ", format(missing_parts_n, big.mark = ",")))),
         div(class = "break-preview-dist", dist_text),
         if (nzchar(preview_data$filter_message %||% ""))
           div(class = "break-preview-note",
@@ -2150,20 +2401,29 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
               tagList(lapply(split_examples, function(ex)
                 tags$code(class = "break-preview-final-code", ex))),
               tags$p(class = "break-preview-final-hint",
-                     "VariableName is preserved internally for Process; missing parts are filled with Total.")),
+                     "VariableName is preserved internally for Process; missing parts are filled with Unknown.")),
         if (missing_parts_n > 0)
           div(class = "small text-muted mt-1", icon("circle-info", class = "icon-xs"),
-              paste0(" ", missing_parts_n, " missing part(s) will be filled with Total.")))
+              paste0(" ", missing_parts_n, " missing part(s) will be filled with Unknown.")))
     })
     
     output$break_names_ui <- renderUI({
       col <- input$break_col %||% "Campaign"; n <- auto_n_parts()
+      edit <- break_edit_state()
+      current <- NULL
+      if (!is.null(edit) && identical(edit$channel, rv$selected) &&
+          edit$index >= 1L &&
+          edit$index <= length(rv$channels[[rv$selected]]$dimension_breaks %||% list())) {
+        current <- rv$channels[[rv$selected]]$dimension_breaks[[edit$index]]
+      }
+      current_names <- as.character(current$names %||% character(0))
       tagList(tags$strong("Name each part:", class = "break-names-label"),
               lapply(seq_len(n), function(i) {
                 div(class = "break-part-row",
                     tags$span(paste0("Part ", i, ":"), class = "break-part-label"),
                     textInput(ns(paste0("break_part_", i)), NULL,
-                              value = paste0(col, "_", LETTERS[i]),
+                              value = if (i <= length(current_names)) current_names[[i]]
+                              else paste0(col, "_", LETTERS[i]),
                               width = "100%") %>%
                       tagAppendAttributes(style = "margin-bottom:0;"))
               }))
@@ -2197,18 +2457,78 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
       }
       nm       <- rv$selected
       existing <- rv$channels[[nm]]$dimension_breaks %||% list()
+      edit <- break_edit_state()
+      edit_index <- if (!is.null(edit) && identical(edit$channel, nm)) {
+        as.integer(edit$index %||% NA_integer_)
+      } else NA_integer_
+      is_edit <- !is.na(edit_index) && edit_index >= 1L && edit_index <= length(existing)
+      current <- if (is_edit) existing[[edit_index]] else NULL
+      other_breaks <- if (is_edit) existing[-edit_index] else existing
+      other_names <- unique(unlist(lapply(other_breaks, \(b) b$names %||% character(0))))
+      alias_names <- vapply(rv$channels[[nm]]$dimension_aliases %||% list(),
+                            \(a) a$alias %||% "", character(1))
+      name_conflicts <- intersect(part_names, c(other_names, alias_names))
+      if (length(name_conflicts)) {
+        enable_confirm_break()
+        showNotification(paste0("Names conflict with another break or rename: ",
+                                paste(name_conflicts, collapse = ", ")), type = "warning")
+        return()
+      }
+
+      updated_break <- list(
+        column = col,
+        separator = sep,
+        n_parts = n,
+        names = part_names,
+        missing_part_value = canonical_break_missing_part_value()
+      )
+      if (is_edit) {
+        old_names <- as.character(current$names %||% character(0))
+        mapped_n <- min(length(old_names), length(part_names))
+        name_map <- if (mapped_n) stats::setNames(part_names[seq_len(mapped_n)],
+                                                  old_names[seq_len(mapped_n)])
+        else character(0)
+        removed_names <- if (length(old_names) > mapped_n) old_names[-seq_len(mapped_n)]
+        else character(0)
+
+        splits <- rv$channels[[nm]]$split_columns %||% character(0)
+        if (length(name_map)) {
+          for (old_name in names(name_map)) splits[splits == old_name] <- name_map[[old_name]]
+        }
+        splits <- setdiff(splits, removed_names)
+
+        aliases <- rv$channels[[nm]]$dimension_aliases %||% list()
+        if (length(aliases)) {
+          keep_alias <- !vapply(aliases, \(a) (a$source %||% "") %in% removed_names, logical(1))
+          removed_alias_names <- vapply(aliases[!keep_alias], \(a) a$alias %||% "", character(1))
+          aliases <- aliases[keep_alias]
+          aliases <- lapply(aliases, function(a) {
+            source <- a$source %||% ""
+            if (source %in% names(name_map)) a$source <- unname(name_map[[source]])
+            a
+          })
+          splits <- setdiff(splits, removed_alias_names)
+          rv$channels[[nm]]$dimension_aliases <- aliases
+          if (!length(aliases)) aliases_enabled(FALSE)
+        }
+        rv$channels[[nm]]$split_columns <- unique(splits[nzchar(splits)])
+        existing[[edit_index]] <- updated_break
+      } else {
+        existing <- c(existing, list(updated_break))
+      }
       removeModal()
       clear_preview_caches(source = FALSE, split = TRUE, brk = TRUE, audit = TRUE, cards = TRUE)
-      rv$channels[[nm]]$dimension_breaks <- c(existing, list(list(
-        column = col, separator = sep, n_parts = n, names = part_names)))
+      rv$channels[[nm]]$dimension_breaks <- existing
       dirty_channels[[nm]] <- TRUE
-      showNotification(paste0("Break added: ", col, " \u2192 ",
-                              paste(part_names, collapse = " | ")), type = "message")
+      break_edit_state(NULL)
+      showNotification(paste0("Break ", if (is_edit) "updated" else "added", ": ",
+                              col, " \u2192 ", paste(part_names, collapse = " | ")),
+                       type = "message")
     })
     
-    # ═══════════════════════════════════════════════════════════════════
-    # IMPORT / MANAGE CHANNELS MODAL
-    # ═══════════════════════════════════════════════════════════════════
+    # -------------------------------------------------------------------
+    # Channel manager: select indexed variables or permitted manual MFFs.
+    # -------------------------------------------------------------------
     observeEvent(input$btn_manage_channels, {
       manager_modal_open(TRUE)
       showModal(modalDialog(
@@ -2285,6 +2605,10 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
       out <- profile_step("manager_channel_vars", {
         candidates <- unique(c(names(rv$channels), names(rv$available_channels)))
         candidates <- candidates[nzchar(candidates)]
+        # A VOF channel rejected by ModelDetails cannot return through the
+        # manual-channel fallback.
+        inactive <- inactive_vof_channel_names(candidates)
+        if (length(inactive)) candidates <- setdiff(candidates, inactive)
         if (!length(model_vars)) {
           sort(candidates)
         } else {
@@ -2457,6 +2781,14 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
         req(nzchar(input$ch_mgr_add %||% ""))
         v <- input$ch_mgr_add
         if (v %in% names(rv$channels)) return()
+        if (length(inactive_vof_channel_names(v))) {
+          showNotification(
+            paste0("Channel not added: ModelDetails marks '", v,
+                   "' as not modelled (NONE)."),
+            type = "warning", duration = 7
+          )
+          return()
+        }
         if (v %in% names(rv$available_channels)) {
           rv$channels[[v]] <- rv$available_channels[[v]]
         } else {
@@ -2514,188 +2846,9 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
       })
     }, ignoreInit = TRUE)
     
-    # ═══════════════════════════════════════════════════════════════════
-    # SAVE / LOAD CONFIG
-    # ═══════════════════════════════════════════════════════════════════
-    clean_config_col_names <- function(x) {
-      x <- trimws(as.character(x))
-      x <- sub("^\ufeff", "", x)
-      x <- sub("^<U\\+FEFF>", "", x)
-      x <- sub("^Ã¯\\.\\.", "", x)
-      x
-    }
-
-    normalize_channel_config_df <- function(df) {
-      if (is.null(df)) return(df)
-      df <- as.data.frame(df, stringsAsFactors = FALSE, check.names = FALSE)
-      names(df) <- clean_config_col_names(names(df))
-      char_cols <- names(df)[vapply(df, is.character, logical(1))]
-      for (col in char_cols) {
-        df[[col]][is.na(df[[col]])] <- ""
-        df[[col]] <- trimws(df[[col]])
-      }
-      df
-    }
-
-    read_channel_config_content <- function(config_text) {
-      read_attempt <- function(kind) {
-        con <- textConnection(config_text)
-        on.exit(close(con), add = TRUE)
-        switch(
-          kind,
-          tab = read.delim(con, stringsAsFactors = FALSE,
-                           check.names = FALSE, na.strings = c("", "NA")),
-          semi = read.csv2(con, stringsAsFactors = FALSE,
-                           check.names = FALSE, na.strings = c("", "NA")),
-          csv = read.csv(con, stringsAsFactors = FALSE,
-                         check.names = FALSE, na.strings = c("", "NA"))
-        )
-      }
-
-      first_line <- strsplit(config_text %||% "", "\r?\n")[[1]][1] %||% ""
-      preferred <- c(
-        if (grepl("\t", first_line, fixed = TRUE)) "tab",
-        if (grepl(",", first_line, fixed = TRUE)) "csv",
-        if (grepl(";", first_line, fixed = TRUE)) "semi",
-        "csv", "tab", "semi"
-      )
-
-      fallback <- NULL
-      for (kind in unique(preferred)) {
-        df <- tryCatch(read_attempt(kind), error = function(e) NULL)
-        if (is.null(df)) next
-        df <- normalize_channel_config_df(df)
-        fallback <- fallback %||% df
-        if (all(c("Channel", "Type") %in% names(df))) return(df)
-      }
-      fallback
-    }
-
-    read_channel_config_file <- function(path) {
-      if (is.null(path) || !file.exists(path))
-        stop("Splits Metadata file was not uploaded correctly.")
-      df <- tryCatch(
-        data.table::fread(
-          file = path,
-          sep = "auto",
-          data.table = FALSE,
-          check.names = FALSE,
-          na.strings = "NA",
-          fill = TRUE,
-          quote = "\"",
-          encoding = "UTF-8"
-        ),
-        error = function(e) NULL
-      )
-      if (is.null(df) || !all(c("Channel", "Type") %in% clean_config_col_names(names(df)))) {
-        txt <- paste(readLines(path, warn = FALSE, encoding = "UTF-8"), collapse = "\n")
-        df <- read_channel_config_content(txt)
-      } else {
-        df <- normalize_channel_config_df(df)
-      }
-      if (is.null(df) || !nrow(df))
-        stop("Splits Metadata file is empty or could not be parsed.")
-      df
-    }
-
-    config_df_from_pending <- function(parsed_config) {
-      if (is.data.frame(parsed_config)) return(parsed_config)
-      parsed_config$df %||% NULL
-    }
-
-    parse_merge_splits_config <- function(merged_raw) {
-      merged_raw <- trimws(as.character(merged_raw %||% ""))
-      if (!nzchar(merged_raw)) return(character(0))
-
-      if (grepl("\\s\\|\\|\\|\\s", merged_raw, perl = TRUE)) {
-        parts <- strsplit(merged_raw, "\\s\\|\\|\\|\\s", perl = TRUE)[[1]]
-        return(Filter(nzchar, trimws(parts)))
-      }
-
-      tokens <- trimws(strsplit(merged_raw, "\\|", fixed = FALSE)[[1]])
-      tokens <- tokens[nzchar(tokens)]
-      if (!length(tokens)) return(character(0))
-
-      time_break_token <- function(x) {
-        grepl("^[[:alpha:]]+TimeBreak$", x, ignore.case = TRUE)
-      }
-      geo_label_token <- function(x) {
-        grepl("^GeoLabel\\d+$", x, ignore.case = TRUE)
-      }
-
-      out <- character(0)
-      for (tok in tokens) {
-        if ((time_break_token(tok) || geo_label_token(tok)) && length(out) > 0) {
-          out[length(out)] <- paste0(out[length(out)], "|", tok)
-        } else {
-          out <- c(out, tok)
-        }
-      }
-      out
-    }
-
-    parse_config_varnames <- function(raw) {
-      raw <- trimws(as.character(raw %||% ""))
-      if (is.na(raw) || !nzchar(raw)) return(character(0))
-      sep <- if (grepl("\\s\\|\\|\\|\\s", raw, perl = TRUE)) "\\s\\|\\|\\|\\s" else "\\|"
-      parts <- trimws(strsplit(raw, sep, perl = TRUE)[[1]])
-      unique(parts[nzchar(parts)])
-    }
-
-        apply_config_keywords <- function(cfg, row) {
-      if ("ActivityKeyword" %in% names(row)) {
-        act_kw <- trimws(as.character(row$ActivityKeyword[[1]] %||% ""))
-        if (!is.na(act_kw) && nzchar(act_kw)) cfg$activity_keyword <- act_kw
-      }
-      if ("SpendKeyword" %in% names(row)) {
-        spend_kw <- trimws(as.character(row$SpendKeyword[[1]] %||% ""))
-        if (!is.na(spend_kw) && nzchar(spend_kw)) cfg$spend_keyword <- spend_kw
-      }
-      if ("ModelMetric" %in% names(row)) {
-        mm <- trimws(as.character(row$ModelMetric[[1]] %||% ""))
-        if (!is.na(mm) && nzchar(mm)) cfg$model_metric <- normalize_model_metric(mm)
-      } else if (is.null(cfg$model_metric)) {
-        cfg$model_metric <- "activity"
-      }
-      if ("VarNameInclude" %in% names(row)) {
-        vi <- parse_config_varnames(row$VarNameInclude[[1]] %||% "")
-        if (length(vi)) cfg$varname_include <- vi
-      }
-      if ("TimeBreakLabel" %in% names(row)) {
-        tbr <- trimws(as.character(row$TimeBreakLabel[[1]] %||% ""))
-        cfg$time_break_label <- if (!is.na(tbr)) tbr else ""
-      }
-      if ("GeoLabel" %in% names(row)) {
-        gl <- normalize_geo_label(row$GeoLabel[[1]] %||% "")
-        cfg$geo_label <- gl
-      }
-      if ("BreakMissingPartValue" %in% names(row)) {
-        missing_value <- trimws(as.character(row$BreakMissingPartValue[[1]] %||% ""))
-        if (!is.na(missing_value) && nzchar(missing_value))
-          cfg$break_missing_part_value <- missing_value
-      }
-      if ("BreakDefaultSeparator" %in% names(row)) {
-        default_sep <- as.character(row$BreakDefaultSeparator[[1]] %||% "")
-        if (!is.na(default_sep) && nzchar(default_sep))
-          cfg$break_default_separator <- default_sep
-      }
-      cfg
-    }
-
-    infer_time_break_from_config_merges <- function(nm, merge_rows) {
-      if (!nrow(merge_rows)) return("")
-      rows <- merge_rows[trimws(merge_rows$Channel) == trimws(nm), , drop = FALSE]
-      if (!nrow(rows)) return("")
-      txt <- paste(c(rows$Name %||% "", rows$Splits %||% "", rows$BreakInfo %||% ""),
-                   collapse = " ")
-      matches <- gregexpr("\\|[[:alpha:]]+TimeBreak", txt, ignore.case = TRUE, perl = TRUE)[[1]]
-      if (identical(matches[1], -1L)) return("")
-      vals <- regmatches(txt, list(matches))[[1]]
-      vals <- unique(sub("^\\|", "", vals))
-      vals <- vals[nzchar(vals)]
-      if (length(vals) == 1L) vals[[1]] else ""
-    }
-    
+    # -------------------------------------------------------------------
+    # Splits Metadata import and reconciliation.
+    # -------------------------------------------------------------------
     apply_config_import <- function(parsed_config) {
       req(parsed_config)
       profile_step("config_import_apply", {
@@ -2706,6 +2859,12 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
           showNotification("Splits Metadata file missing Channel or Type columns.",
                            type = "error"); return()
         }
+
+        # Reconcile against the current index before restoring imported rows,
+        # so stale files cannot reintroduce inactive generated channels.
+        current_mi <- tryCatch(media_index(), error = function(e) NULL)
+        if (!is.null(current_mi) && length(current_mi$channels %||% list()))
+          sync_channels_to_media_index(current_mi, notify = TRUE)
         
         config_rows <- df[trimws(df$Type) == "Config", , drop = FALSE]
         merge_rows  <- df[trimws(df$Type) == "Merge",  , drop = FALSE]
@@ -2715,6 +2874,9 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
         is_new_format  <- all(c("Name", "Splits") %in% names(df))
         has_date_cols  <- all(c("MinPeriod", "MaxPeriod") %in% names(df))
         n_restored <- n_imported <- n_built <- n_breaks <- n_merges <- n_skipped <- 0L
+        n_stale <- 0L
+        stale_merge_refs <- list()
+        n_inactive <- 0L
         an         <- data()$analytical
         affected_channels <- character(0)
         update_label_mismatch <- character(0)
@@ -2801,7 +2963,10 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
           spend_kw <- detect_spend_keyword(data()$all_rags, varname_include)
           actual_mv <- if (!is.null(an)) {
             an_num <- names(an)[sapply(an, is.numeric)]
-            if (nm %in% an_num) nm
+            saved_mv <- if ("ModelVariable" %in% names(row))
+              trimws(as.character(row$ModelVariable[[1]] %||% "")) else ""
+            if (nzchar(saved_mv) && saved_mv %in% an_num) saved_mv
+            else if (nm %in% an_num) nm
             else {
               cand <- paste0(nm, "_Total_Total_Total")
               if (cand %in% an_num) cand
@@ -2827,17 +2992,18 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
           reconcile_channel_metric_keywords(cfg)
         }
 
-        infer_merge_view <- function(merge_name, merged_raw) {
-          txt <- paste(c(merge_name, merged_raw), collapse = " ")
-          has_nonfocus <- grepl("_Before\\s+", txt, ignore.case = TRUE) ||
-            grepl("\\|[[:alpha:]]+TimeBreak", txt, ignore.case = TRUE)
-          if (has_nonfocus) "nonfocus" else "focus"
-        }
-        
         for (i in seq_len(nrow(config_rows))) {
           nm     <- config_rows$Channel[i]
           if (!nzchar(trimws(nm %||% ""))) {
             n_skipped <- n_skipped + 1L
+            next
+          }
+          if (length(inactive_vof_channel_names(nm))) {
+            if (nm %in% names(rv$channels)) {
+              rv$channels[[nm]] <- NULL
+              dirty_channels[[nm]] <- NULL
+            }
+            n_inactive <- n_inactive + 1L
             next
           }
           splits <- Filter(nzchar, trimws(strsplit(config_rows$SplitOrder[i], "\\|")[[1]]))
@@ -2853,10 +3019,14 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
             rv$channels[[nm]] <- build_channel_from_config_row(nm, i, splits)
             dirty_channels[[nm]] <- FALSE; n_built <- n_built + 1L
           }
-          if (!nzchar(rv$channels[[nm]]$time_break_label %||% "")) {
+          if (!identical(rv$channels[[nm]]$source %||% "", "vof") &&
+              !nzchar(rv$channels[[nm]]$time_break_label %||% "")) {
             inferred_tbr <- infer_time_break_from_config_merges(nm, merge_rows)
             if (nzchar(inferred_tbr))
               rv$channels[[nm]]$time_break_label <- inferred_tbr
+          }
+          if (nzchar(rv$channels[[nm]]$time_break_label %||% "")) {
+            rv$channels[[nm]]$geo_label <- ""
           }
           affected_channels <- c(affected_channels, nm)
         }
@@ -2899,10 +3069,21 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
               n_skipped <- n_skipped + 1L
               next
             }
-            cfg_missing_part <- rv$channels[[nm]]$break_missing_part_value %||% "Total"
+            break_missing_raw <- if ("BreakMissingPartValue" %in% names(break_rows)) {
+              trimws(as.character(break_rows$BreakMissingPartValue[i] %||% ""))
+            } else {
+              ""
+            }
+            if (is.na(break_missing_raw) ||
+                !identical(tolower(break_missing_raw), "unknown")) {
+              rv$channels[[nm]]$legacy_break_missing_part_migrated <- TRUE
+            }
+            rv$channels[[nm]]$break_missing_part_value <-
+              canonical_break_missing_part_value()
             rv$channels[[nm]]$dimension_breaks <- c(existing, list(list(
               column = col, separator = sep, n_parts = n_parts,
-              names = part_names, missing_part_value = cfg_missing_part)))
+              names = part_names,
+              missing_part_value = canonical_break_missing_part_value())))
             n_breaks <- n_breaks + 1L
           }
         }
@@ -2979,6 +3160,16 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
             max_id   <- if (length(existing))
               max(vapply(existing, \(m) m$id %||% 0L, integer(1))) else 0L
             cfg_ch   <- rv$channels[[nm]]
+            stale_labels <- stale_time_break_merge(cfg_ch, merge_name, merged_raw)
+            is_stale <- length(stale_labels) > 0L
+            if (is_stale) {
+              n_stale <- n_stale + 1L
+              stale_merge_refs[[length(stale_merge_refs) + 1L]] <- list(
+                channel = nm,
+                merge_name = merge_name,
+                labels = stale_labels
+              )
+            }
             act_kw   <- cfg_ch$activity_keyword %||% "Impressions"
             spend_kw <- cfg_ch$spend_keyword    %||% "Spend"
             merge_metric <- normalize_model_metric(
@@ -2994,8 +3185,10 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
               id = max_id + 1L, new_name = merge_name, merged = as.list(merged),
               view = merge_view, spend_merged = list(), new_spend_name = new_spend,
               metric = merge_metric,
-              active = TRUE, saved_at = format(Sys.time(), "%Y-%m-%d %H:%M"))))
-            n_merges <- n_merges + 1L
+              active = !is_stale, stale = is_stale,
+              stale_labels = stale_labels,
+              saved_at = format(Sys.time(), "%Y-%m-%d %H:%M"))))
+            if (!is_stale) n_merges <- n_merges + 1L
           }
         }
         
@@ -3011,6 +3204,8 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
           if (n_breaks   > 0) paste0(n_breaks,   " break(s) loaded"),
           if (n_renames  > 0) paste0(n_renames,  " rename(s) loaded"),
           if (n_merges   > 0) paste0(n_merges,   " merge(s) loaded"),
+          if (n_stale    > 0) paste0(n_stale,    " stale merge reference(s) held for review"),
+          if (n_inactive > 0) paste0(n_inactive, " inactive VOF channel(s) ignored"),
           if (n_skipped  > 0) paste0(n_skipped,  " skipped"))
         showNotification(paste(parts, collapse = " \u2014 "),
                          type = "message", duration = 5)
@@ -3063,16 +3258,21 @@ mod_channels_server <- function(id, data, media_index, config = reactive(list())
         }
       ch_names <- config_rows$Channel
       ch_names <- ch_names[!is.na(ch_names) & nzchar(trimws(ch_names))]
+      inactive_names <- inactive_vof_channel_names(ch_names)
       list(
         updated  = sum(ch_names %in% names(rv$channels)),
         imported = sum(!ch_names %in% names(rv$channels) &
                          ch_names %in% names(rv$available_channels)),
         rebuilt  = sum(!ch_names %in% names(rv$channels) &
-                         !ch_names %in% names(rv$available_channels)),
+                         !ch_names %in% names(rv$available_channels) &
+                         !ch_names %in% inactive_names),
         breaks   = nrow(break_rows),
         renames  = nrow(rename_rows),
         merges   = nrow(merge_rows),
-        skipped  = sum(is.na(config_rows$Channel) | !nzchar(trimws(config_rows$Channel %||% ""))),
+        skipped  = sum(is.na(config_rows$Channel) |
+                         !nzchar(trimws(config_rows$Channel %||% ""))) +
+          length(inactive_names),
+        inactive = length(inactive_names),
         total    = length(ch_names),
         update_label_mismatch = update_label_mismatch
       )

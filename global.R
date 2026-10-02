@@ -49,6 +49,14 @@ source_files(c(
   "R/utils/async_processing.R"
 ))
 source_files(c(
+  "R/controllers/export_split_helpers.R",
+  "R/controllers/export_rae_metrics.R",
+  "R/controllers/export_split_payload.R",
+  "R/controllers/export_review.R",
+  "R/controllers/export_seed.R",
+  "R/controllers/export_scwa.R"
+))
+source_files(c(
   "R/mod_setup.R",
   "R/mod_channels.R",
   "R/mod_process.R",

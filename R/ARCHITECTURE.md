@@ -14,12 +14,19 @@ plain R services.
    `total_check.R`, `splits_metadata.R`, `sap.R`, `export_analytical.R`,
    `export_side_mapping.R`, `export_split_composition.R`, and
    `export_reconciliation.R`, and `export_file_dimensions.R`).
-4. Shiny modules in `R/mod_*.R`.
-5. Worker initialization and app-wide presentation constants.
+4. Shiny controller registration functions in `R/controllers/`.
+5. Shiny modules in `R/mod_*.R`.
+6. Worker initialization and app-wide presentation constants.
 
 Source order is explicit so adding a file does not silently change startup
 behavior. Worker bootstrap separately loads the processing utilities, list
 contracts, and services needed by its pure pipeline.
+
+Controller registrations receive a named session context whose `scope` is the
+owning module's environment. They run in that scope so reactive stores,
+observers, output IDs, and registration order remain unchanged. Controllers
+may use Shiny; pure services must not depend on a session. The `mod_*.R`
+files remain the public module entry points and own their returned reactives.
 
 ## Data Contracts
 
@@ -74,3 +81,5 @@ component/final export totals now live in a pure reconciliation service;
 `mod_export` continues to prepare and cache the channel payload.
 Export file dimension estimates are calculated by a pure service from the
 prepared snapshot; the module retains only the snapshot inputs and presentation.
+Export's split helpers, effective RAE metrics, payload construction, review
+outputs, Seed For Indices, and SCWA UI are registered from focused controllers.

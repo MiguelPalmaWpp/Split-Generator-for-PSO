@@ -7,11 +7,16 @@ source("R/services/export_reconciliation.R")
 source("R/services/export_file_dimensions.R")
 
 export_module_source <- readLines("R/mod_export.R", warn = FALSE)
+export_payload_source <- readLines("R/controllers/export_split_payload.R", warn = FALSE)
 stopifnot(
-  sum(grepl("build_file_dims <- function", export_module_source, fixed = TRUE)) == 1L,
-  sum(grepl("build_export_file_dimensions(", export_module_source, fixed = TRUE)) == 1L,
+  sum(grepl("build_file_dims <- function", export_payload_source, fixed = TRUE)) == 1L,
+  sum(grepl("build_export_file_dimensions(", export_payload_source, fixed = TRUE)) == 1L,
+  sum(grepl("register_export_split_payload(controller_context)",
+            export_module_source, fixed = TRUE)) == 1L,
   !any(grepl("build_file_dims_legacy", export_module_source, fixed = TRUE)),
   any(grepl('"R/services/export_file_dimensions.R"',
+            readLines("global.R", warn = FALSE), fixed = TRUE)),
+  any(grepl('"R/controllers/export_split_payload.R"',
             readLines("global.R", warn = FALSE), fixed = TRUE))
 )
 

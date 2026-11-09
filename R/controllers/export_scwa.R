@@ -1,6 +1,9 @@
+# Register Split Composition Workaround review and session-owned SCWA flags.
+# The pure service supplies lineage; user selections only annotate its output.
 register_export_scwa <- function(ctx) {
   stopifnot(is.list(ctx), is.environment(ctx$scope))
   evalq({
+    # Resolve labels and ROI keys before asking the service for merge lineage.
     build_split_composition <- function(snapshot) {
       if (is.null(snapshot) || is.null(snapshot$export_data)) return(NULL)
       channels_snapshot <- snapshot$channels %||% list()

@@ -1,3 +1,5 @@
+# Verify Analytical Extended includes base splits and final SAP aggregates once.
+# Intermediate aggregates should not leak into the exported columns.
 library(dplyr)
 library(stringr)
 
@@ -24,6 +26,8 @@ results <- list(Social = list(rag = tibble::tibble(
   Period = as.Date(c("2026-01-05", "2026-01-12")),
   Merge_AB = c(5, 9),
   Split_C = c(10, 14),
+  Paired_Merge_AB = c(50, 90),
+  Paired_Split_C = c(100, 140),
   Intermediate_AB = c(4, 8)
 )))
 export_data <- list(Social = list(
@@ -32,10 +36,19 @@ export_data <- list(Social = list(
     Period = as.Date(c("2026-01-05", "2026-01-12")),
     Split_A = c(2, 3),
     Split_B = c(3, 6),
-    Split_C = c(10, 14)
+    Split_C = c(10, 14),
+    Paired_A = c(20, 30),
+    Paired_B = c(30, 60),
+    Paired_C = c(100, 140)
   )),
   pre_act = tibble::tibble(VariableSplit = c("Split_A", "Split_B", "Split_C")),
-  final = tibble::tibble(VariableSplit = c("Merge_AB", "Split_C"))
+  final = tibble::tibble(VariableSplit = c("Merge_AB", "Split_C")),
+  pre_for_indices = tibble::tibble(
+    VariableSplit = c("Paired_A", "Paired_B", "Paired_C")
+  ),
+  final_for_indices = tibble::tibble(
+    VariableSplit = c("Paired_Merge_AB", "Paired_Split_C")
+  )
 ))
 
 out <- build_analytical_extended_data(
@@ -43,10 +56,17 @@ out <- build_analytical_extended_data(
   export_data = export_data
 )
 stopifnot(
-  all(c("Model_Total", "Split_A", "Split_B", "Split_C", "Merge_AB") %in% names(out)),
+  all(c(
+    "Model_Total", "Split_A", "Split_B", "Split_C", "Merge_AB",
+    "Paired_A", "Paired_B", "Paired_C", "Paired_Merge_AB", "Paired_Split_C"
+  ) %in% names(out)),
   !"Intermediate_AB" %in% names(out),
   identical(out$Merge_AB, c(5, 9)),
   identical(out$Split_A, c(2, 3)),
+  identical(out$Paired_A, c(20, 30)),
+  identical(out$Paired_B, c(30, 60)),
+  identical(out$Paired_Merge_AB, c(50, 90)),
+  identical(out$Paired_Split_C, c(100, 140)),
   nrow(out) == 2L
 )
 

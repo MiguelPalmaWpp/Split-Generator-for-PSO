@@ -1,4 +1,6 @@
 # Pure helpers for building and reading Splits Aggregation Plans.
+# VariableSplit is the stable import key; dimension columns describe current
+# granularity but never select the rows to aggregate.
 
 sap_metric_display_columns <- function(df, metric) {
   metric <- normalize_model_metric(metric)
@@ -31,6 +33,7 @@ sap_metric_display_columns <- function(df, metric) {
   df
 }
 
+# Preserve effective Split Order while excluding the technical VariableName.
 sap_granularity_columns <- function(cfg, manifest) {
   configured <- unique(setdiff(
     as.character(cfg$split_columns %||% character(0)),
@@ -39,6 +42,8 @@ sap_granularity_columns <- function(cfg, manifest) {
   intersect(configured[nzchar(configured)], names(manifest))
 }
 
+# Combine current modeled statistics with manifest-derived dimension values;
+# an existing aggregate can therefore be used in a later SAP.
 build_splits_aggregation_plan <- function(df, res, cfg, period_scope, metric) {
   manifest <- res$split_manifest %||% tibble::tibble()
   granularity_cols <- sap_granularity_columns(cfg, manifest)
@@ -99,6 +104,7 @@ clean_sap_column_names <- function(x) {
   sub("^ÃƒÂ¯\\.\\.", "", x)
 }
 
+# Accept supported SAP and legacy merge-plan file encodings/column names.
 read_sap_plan_content <- function(content) {
   read_attempt <- function(kind) {
     con <- textConnection(content)
@@ -133,6 +139,7 @@ read_sap_plan_content <- function(content) {
   fallback
 }
 
+# Resolve legacy Split references to current VariableSplit names before apply.
 hydrate_sap_variable_split <- function(plan, current_data) {
   if (is.null(plan) || !"Split" %in% names(plan) ||
       is.null(current_data) || !nrow(current_data) ||

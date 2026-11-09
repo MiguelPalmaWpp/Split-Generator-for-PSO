@@ -1,5 +1,8 @@
 # Normalize and serialize the supported Splits Metadata contract.
+# The column-based format keeps Channel, Break, Rename, and SAP rows distinct;
+# import still accepts legacy Type/Name/Splits records.
 
+# Translate new RecordType rows into the legacy shape used by import parsing.
 normalize_splits_metadata_rows <- function(df) {
   if (!"RecordType" %in% names(df) || "Type" %in% names(df)) return(df)
   record_type <- trimws(as.character(df$RecordType))
@@ -63,6 +66,8 @@ normalize_splits_metadata_rows <- function(df) {
   }
   df
 }
+# Write one channel row plus optional transformation and SAP rows without
+# changing the public CSV contract used by previous model packages.
 export_channels_csv <- function(channels, global_config = NULL) {
   if (!length(channels)) return(data.frame())
   breaks <- unlist(lapply(channels, function(cfg) cfg$dimension_breaks %||% list()),
@@ -132,6 +137,7 @@ export_channels_csv <- function(channels, global_config = NULL) {
   dplyr::bind_rows(rows)
 }
 
+# Expose the canonical column-based metadata file downloaded by the app.
 export_splits_metadata_csv <- function(channels, global_config = NULL) {
   export_channels_csv(channels, global_config)
 }

@@ -1,3 +1,6 @@
+# One-time modularization aid. Given expression ranges from a module AST,
+# move them into new register_* controllers and rewrite the module in place.
+# Run only with a clean backup/worktree; this script writes source files.
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 2L) {
   stop("Usage: extract_module_sections.R module name:first-last ...")
@@ -9,6 +12,7 @@ module_ast <- parse(module_path, keep.source = TRUE)
 server_body <- module_ast[[2L]][[3L]][[3L]][[2L]][[3L]][[3L]]
 refs <- attr(server_body, "srcref")
 
+# Resolve expression ranges through source references, not raw line guesses.
 segments <- lapply(args[-1L], function(spec) {
   match <- regexec("^([a-z_]+):([0-9]+)-([0-9]+)$", spec)
   parts <- regmatches(spec, match)[[1L]]

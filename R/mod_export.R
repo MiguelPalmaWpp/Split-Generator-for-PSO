@@ -5,41 +5,7 @@
 # same processed results and configuration.
 # -----------------------------------------------------------------------
 
-mod_export_ui <- function(id) {
-  ns <- NS(id)
-  div(
-    uiOutput(ns("summary_strip")),
-    div(
-      class = "export-main-layout",
-      card(
-        class = "export-channel-panel",
-        card_header(div(class = "card-header-inner",
-                        icon("circle-check", class = "icon-blue-sm"),
-                        "Channel Status")),
-        uiOutput(ns("channel_status"))
-      ),
-      div(
-        class = "export-right-stack",
-        uiOutput(ns("scwa_workaround")),
-        card(
-          class = "export-package-panel",
-          card_header(div(
-            class = "card-header-between",
-            div(class = "card-header-inner",
-                icon("file-zipper", class = "icon-blue-sm"),
-                "Export Package"),
-            uiOutput(ns("readiness_badge"))
-          )),
-          uiOutput(ns("export_issues")),
-          div(class = "export-contents-pad", uiOutput(ns("export_contents"))),
-          uiOutput(ns("roi_coverage")),
-          hr(class = "hr-export"),
-          uiOutput(ns("download_section"))
-        )
-      )
-    )
-  )
-}
+mod_export_ui <- function(id) build_export_ui(id)
 
 mod_export_server <- function(id, results, data, config, channels,
                               clean_results = reactive(list()),
@@ -118,6 +84,8 @@ mod_export_server <- function(id, results, data, config, channels,
         channels(),
         config(),
         d$data_signature %||% data_signature(d$all_rags),
+        data_signature(d$analytical),
+        data_signature(d$schema_metadata),
         names(result_versions())
       )
     })
@@ -142,6 +110,9 @@ mod_export_server <- function(id, results, data, config, channels,
           final <- final_activity_splits(res, cfg, nm)
           pre_act <- pre_merge_activity_splits(clean, cfg, nm)
           if (!nrow(pre_act)) pre_act <- final
+          final_for_indices <- role_splits_from_manifest(res, "for_indices")
+          pre_for_indices <- role_splits_from_manifest(clean, "for_indices")
+          if (!nrow(pre_for_indices)) pre_for_indices <- final_for_indices
           final_cost <- final_spend_splits(res, cfg, nm)
           pre_cost <- pre_merge_spend_splits(clean, cfg, nm)
           list(
@@ -151,6 +122,8 @@ mod_export_server <- function(id, results, data, config, channels,
             cfg = cfg,
             final = final,
             pre_act = pre_act,
+            final_for_indices = final_for_indices,
+            pre_for_indices = pre_for_indices,
             final_cost = final_cost,
             pre_cost = pre_cost,
             merge_resolved = NULL,
@@ -384,6 +357,8 @@ mod_export_server <- function(id, results, data, config, channels,
 
     register_export_scwa(controller_context)
 
+    # Write staged outputs into a per-download directory, validate required
+    # files, then copy the verified ZIP to Shiny's download path.
     output$dl_zip <- downloadHandler(
       filename = function()
         paste0("deep_dives_splits_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".zip"),
@@ -414,7 +389,7 @@ mod_export_server <- function(id, results, data, config, channels,
           export_items[[index]] <<- operation_item(export_items[[index]]$name, status, detail)
           invisible(NULL)
         }
-        tmp_dir <- file.path(tempdir(), paste0("pso_", as.integer(Sys.time())))
+        tmp_dir <- tempfile("pso_export_")
         dir.create(tmp_dir, showWarnings = FALSE, recursive = TRUE)
         on.exit(unlink(tmp_dir, recursive = TRUE), add = TRUE)
         written <- character(0)
@@ -425,15 +400,17 @@ mod_export_server <- function(id, results, data, config, channels,
         clean_snap    <- snap$clean_results
         channels_snap <- snap$channels
         gcfg_snap     <- snap$config
+        has_active_merges <- any(vapply(channels_snap, function(cfg) {
+          length(extract_export_merges(cfg %||% list())) > 0L
+        }, logical(1)))
         heavy_snap    <- NULL
         get_heavy_snap <- function() {
           if (is.null(heavy_snap)) heavy_snap <<- export_heavy_payload()
           heavy_snap
         }
 
-        withProgress(message = "Building export files...", value = 0, {
+        {
 
-          incProgress(0.15, message = "Analytical Splits Extended...")
           set_export_item(1, "Processing")
           operation_status$update("Preparing Analytical Extended", 0.10,
                                   "Building CSV and RData", export_items)
@@ -458,12 +435,11 @@ mod_export_server <- function(id, results, data, config, channels,
               export_warnings <<- c(export_warnings, "Analytical Splits Extended had no data.")
             }
           }, error = \(e) {
-            set_export_item(1, "Failed", e$message)
-            export_warnings <<- c(export_warnings, paste("Analytical:", e$message))
-            showNotification(paste("Analytical error:", e$message), type = "warning", duration = 6)
+            detail <- pso_public_error(e, "export.analytical", "Analytical Extended could not be created")
+            set_export_item(1, "Failed", detail)
+            export_warnings <<- c(export_warnings, detail)
           })
 
-          incProgress(0.15, message = "Side Model Mapping...")
           set_export_item(2, "Processing")
           operation_status$update("Building Side Model Mapping", 0.28,
                                   "Mapping modeled splits", export_items)
@@ -481,17 +457,13 @@ mod_export_server <- function(id, results, data, config, channels,
             } else {
               set_export_item(2, "Skipped", "No Activity splits available")
               export_warnings <<- c(export_warnings, "Side Model Mapping had no Activity splits.")
-              showNotification(paste0("No Activity splits available for ",
-                                      export_file_names$side_mapping, "."),
-                               type = "warning", duration = 6)
             }
           }, error = \(e) {
-            set_export_item(2, "Failed", e$message)
-            export_warnings <<- c(export_warnings, paste("Side Model Mapping:", e$message))
-            showNotification(paste("Side Mapping error:", e$message), type = "warning", duration = 6)
+            detail <- pso_public_error(e, "export.side_mapping", "Side Model Mapping could not be created")
+            set_export_item(2, "Failed", detail)
+            export_warnings <<- c(export_warnings, detail)
           })
 
-          incProgress(0.20, message = "Seed for Indices...")
           set_export_item(3, "Processing")
           operation_status$update("Building Seed For Indices", 0.45,
                                   "Preparing index inputs", export_items)
@@ -508,12 +480,11 @@ mod_export_server <- function(id, results, data, config, channels,
               export_warnings <<- c(export_warnings, "Seed For Indices had no data.")
             }
           }, error = \(e) {
-            set_export_item(3, "Failed", e$message)
-            export_warnings <<- c(export_warnings, paste("Seed For Indices:", e$message))
-            showNotification(paste("Seed for Indices error:", e$message), type = "warning", duration = 6)
+            detail <- pso_public_error(e, "export.seed_indices", "Seed For Indices could not be created")
+            set_export_item(3, "Failed", detail)
+            export_warnings <<- c(export_warnings, detail)
           })
 
-          incProgress(0.20, message = "Split Composition...")
           set_export_item(4, "Processing")
           operation_status$update("Building Split Composition", 0.62,
                                   "Documenting split composition", export_items)
@@ -526,15 +497,15 @@ mod_export_server <- function(id, results, data, config, channels,
               readr::write_csv(df, f, na = ""); written <- c(written, f)
               set_export_item(4, "Created", paste0(format(nrow(df), big.mark = ","), " rows"))
             } else {
-              set_export_item(4, "Skipped", "No composition data available")
+              set_export_item(4, "Skipped", if (has_active_merges)
+                "No composition data available for active merges" else "No SAP merges")
             }
           }, error = \(e) {
-            set_export_item(4, "Failed", e$message)
-            export_warnings <<- c(export_warnings, paste("Split Composition:", e$message))
-            showNotification(paste("Split composition error:", e$message), type = "warning", duration = 6)
+            detail <- pso_public_error(e, "export.split_composition", "Split Composition could not be created")
+            set_export_item(4, "Failed", detail)
+            export_warnings <<- c(export_warnings, detail)
           })
 
-          incProgress(0.15, message = "Splits Metadata...")
           set_export_item(5, "Processing")
           operation_status$update("Writing Splits Metadata", 0.80,
                                   "Saving current channel configuration", export_items)
@@ -549,34 +520,57 @@ mod_export_server <- function(id, results, data, config, channels,
               export_warnings <<- c(export_warnings, "Splits Metadata had no data.")
             }
           }, error = \(e) {
-            set_export_item(5, "Failed", e$message)
-            export_warnings <<- c(export_warnings, paste("Splits Metadata:", e$message))
-            showNotification(paste("Splits Metadata error:", e$message), type = "warning", duration = 6)
+            detail <- pso_public_error(e, "export.metadata", "Splits Metadata could not be created")
+            set_export_item(5, "Failed", detail)
+            export_warnings <<- c(export_warnings, detail)
           })
 
-          incProgress(0.05, message = "Creating ZIP archive...")
           set_export_item(6, "Processing")
           operation_status$update("Creating ZIP", 0.94,
                                   paste0(length(written), " file(s) ready"), export_items)
-        })
+        }
 
-        if (!length(written)) {
-          showNotification("No data available to export.", type = "warning")
-          set_export_item(6, "Failed", "No output files were created")
-          operation_status$fail("No data was available to export.",
-                                paste(export_warnings, collapse = "\n"), export_items)
-          writeLines("no data", file); return()
+        required_names <- export_file_names
+        optional_names <- list()
+        if (!has_active_merges) {
+          optional_names <- required_names["split_composition"]
+          required_names <- required_names[names(required_names) != "split_composition"]
+        }
+        package_check <- validate_export_package(written, required_names, tmp_dir,
+                                                 optional_names)
+        failed_outputs <- vapply(Filter(function(item) {
+          identical(item$status, "Failed")
+        }, export_items), function(item) item$name, character(1))
+        if (!isTRUE(package_check$ok) || length(failed_outputs)) {
+          set_export_item(6, "Failed", "Export outputs are incomplete")
+          operation_status$fail(
+            "Export package is incomplete. No ZIP was downloaded.",
+            paste(c(package_check$missing, package_check$unavailable,
+                    package_check$empty, package_check$duplicate,
+                    package_check$unexpected, failed_outputs), collapse = ", "), export_items
+          )
+          stop(shiny::safeError("Export package is incomplete. No ZIP was downloaded."))
         }
         zip_ok <- tryCatch({
-          zip::zipr(zipfile = file, files = basename(written), root = tmp_dir)
+          archive <- file.path(tmp_dir, "export.zip")
+          zip::zipr(zipfile = archive, files = basename(written), root = tmp_dir)
+          archive_files <- zip::zip_list(archive)$filename
+          if (!setequal(archive_files, basename(written)) ||
+              length(archive_files) != length(written)) {
+            stop("ZIP contents do not match the required export files.")
+          }
+          if (!isTRUE(file.copy(archive, file, overwrite = TRUE))) {
+            stop("ZIP archive could not be written to the download path.")
+          }
           TRUE
         }, error = function(e) {
-            set_export_item(6, "Failed", conditionMessage(e))
-            showNotification(paste("ZIP creation failed:", conditionMessage(e)),
-                             type = "error", duration = 10)
-            operation_status$fail("ZIP package could not be created.", conditionMessage(e), export_items)
+            detail <- pso_public_error(e, "export.zip", "ZIP package could not be created")
+            set_export_item(6, "Failed", detail)
+            operation_status$fail("ZIP package could not be created.",
+                                  conditionMessage(e), export_items)
             FALSE
         })
+        if (!isTRUE(zip_ok)) stop(shiny::safeError("ZIP package could not be created."))
         if (isTRUE(zip_ok)) {
           set_export_item(6, "Created", paste0(length(written), " file(s) packaged"))
           operation_status$complete(

@@ -1,3 +1,5 @@
+# Check Splits Metadata export/import round trips and legacy compatibility.
+# The fixture covers dimension breaks, aliases, saved merges, and update labels.
 library(shiny)
 library(dplyr)
 library(stringr)

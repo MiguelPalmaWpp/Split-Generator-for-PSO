@@ -1,3 +1,5 @@
+# Validate Model Update's historical ZIP contract and extracted inputs.
+# Cover valid, missing, incomplete, and corrupt package cases.
 library(dplyr)
 library(stringr)
 `%||%` <- function(a, b) if (is.null(a) || length(a) == 0) b else a

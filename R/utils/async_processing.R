@@ -51,6 +51,7 @@ submit_pso_mirai <- function(payload) {
   })
 }
 
+# Check both package support and successful pool bootstrap before scheduling.
 pso_async_available <- function() {
   isTRUE(getOption("pso.async.enabled", TRUE)) &&
     isTRUE(getOption("pso.async.available", FALSE)) &&
@@ -148,12 +149,14 @@ initialize_pso_async <- function(app_root = getwd()) {
   isTRUE(ok)
 }
 
+# Reuse the existing process-wide daemon pool instead of starting one per user.
 ensure_pso_async <- function(app_root = getwd()) {
   if (pso_async_available()) return(TRUE)
   if (!isTRUE(getOption("pso.async.enabled", TRUE))) return(FALSE)
   initialize_pso_async(app_root)
 }
 
+# Release the shared pool when the app process exits.
 shutdown_pso_async <- function() {
   if (requireNamespace("mirai", quietly = TRUE)) {
     try(mirai::daemons(0, .compute = pso_async_compute), silent = TRUE)

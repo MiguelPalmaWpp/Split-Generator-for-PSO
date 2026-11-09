@@ -1,3 +1,5 @@
+# Register split-name normalization and role-specific RAG extraction helpers.
+# These helpers keep preview and ZIP naming aligned across modeled metrics.
 register_export_split_helpers <- function(ctx) {
   stopifnot(is.list(ctx), is.environment(ctx$scope))
   evalq({
@@ -20,6 +22,7 @@ register_export_split_helpers <- function(ctx) {
       unique(c(x, strip_export_time(x), squish(x), squish(strip_export_time(x))))
     }
 
+    # Compare saved and current names by stable components, not display text.
     split_export_signature <- function(x, cfg = list()) {
       base <- strip_export_time(x)
       suffix <- tolower(trimws(stringr::str_remove(as.character(x), stringr::fixed(base))))

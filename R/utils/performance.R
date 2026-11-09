@@ -1,6 +1,7 @@
 # Session-scoped cache, signatures, profiling, and indexed RAE helpers.
 # Store derived data only; reactive objects, render functions, and widgets are
 # not valid cache values.
+# Bound cached derived values by size, age, and least-recently-used eviction.
 new_performance_cache <- function(max_size = getOption("pso.cache.max_size", 256 * 1024^2),
                                   max_age = getOption("pso.cache.max_age", 30 * 60)) {
   cachem::cache_mem(
@@ -14,6 +15,7 @@ ensure_performance_cache <- function(cache = NULL) {
   if (is.null(cache)) new_performance_cache() else cache
 }
 
+# Hash the complete key inputs so config/result changes cannot reuse old data.
 pso_cache_key <- function(namespace, ...) {
   ns <- tolower(gsub("[^a-z0-9_-]+", "-", namespace))
   paste0(ns, "-", digest::digest(list(...), algo = "xxhash64", serialize = TRUE))
@@ -43,19 +45,10 @@ pso_profile <- function(label, expr,
   value
 }
 
+# Hash the complete uploaded object, including rows outside a head/tail sample.
 data_signature <- function(data) {
   if (is.null(data)) return("null")
-  digest::digest(
-    list(
-      rows = NROW(data),
-      cols = names(data),
-      classes = vapply(data, function(x) paste(class(x), collapse = "/"), character(1)),
-      head = utils::head(data, 3L),
-      tail = utils::tail(data, 3L)
-    ),
-    algo = "xxhash64",
-    serialize = TRUE
-  )
+  digest::digest(data, algo = "xxhash64", serialize = TRUE)
 }
 
 # Add reusable lookup indexes while leaving the canonical source untouched.
@@ -81,6 +74,8 @@ build_indexed_rae <- function(data) {
   )
 }
 
+# Select channel source rows from the reusable VariableName index. The source
+# data remains unchanged so other channels can reuse the same upload.
 subset_indexed_rae <- function(indexed_data, variable_names,
                                match_mode = c("exact", "prefix")) {
   match_mode <- match.arg(match_mode)

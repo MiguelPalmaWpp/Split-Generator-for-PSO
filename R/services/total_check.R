@@ -1,4 +1,6 @@
 # Total Check reconciles the Analytical model total, effective RAE and processed splits.
+# Comparisons use exact Period and cross-sectional keys, plus usable longitudinal
+# keys; only modeled-role splits contribute to SplitTotal.
 
 total_check_values_match <- function(left, right, absolute_tolerance = 0.01,
                                      relative_tolerance = 1e-10) {
@@ -8,13 +10,20 @@ total_check_values_match <- function(left, right, absolute_tolerance = 0.01,
   abs(left - right) <= pmax(absolute_tolerance, relative_tolerance * scale)
 }
 
+# Deduplicate repeated identical Analytical values per key; sum conflicting
+# values and report how many keys require duplicate review.
 collapse_total_check_source <- function(df, key_cols, value_col, output_col,
                                         tolerance = 0.01) {
+  key_cols <- intersect(key_cols, names(df))
   if (is.null(df) || !nrow(df) || !value_col %in% names(df)) {
-    return(list(data = tibble::tibble(), duplicate_keys = 0L,
+    # Preserve typed keys when an exact-domain filter leaves no matching rows.
+    # The later full join must still report the missing Analytical keys.
+    empty <- if (is.null(df)) tibble::tibble() else
+      tibble::as_tibble(df[0, key_cols, drop = FALSE])
+    empty[[output_col]] <- numeric(0)
+    return(list(data = empty, duplicate_keys = 0L,
                 conflicting_keys = 0L))
   }
-  key_cols <- intersect(key_cols, names(df))
   if (!length(key_cols)) {
     return(list(data = tibble::tibble(), duplicate_keys = 0L,
                 conflicting_keys = 0L))
@@ -51,6 +60,8 @@ collapse_total_check_source <- function(df, key_cols, value_col, output_col,
   )
 }
 
+# Keep only RAE keys present in Analytical without fuzzy geography/date joins.
+# Return excluded keys separately so the audit can explain discarded rows.
 filter_to_analytical_key_domain <- function(data, analytical_keys, key_cols) {
   if (is.null(data) || !is.data.frame(data) || !nrow(data) ||
       is.null(analytical_keys) || !is.data.frame(analytical_keys) ||
@@ -103,7 +114,8 @@ filter_to_analytical_key_domain <- function(data, analytical_keys, key_cols) {
 }
 
 # Compare exact Analytical keys with filtered RAE and the final modeled splits.
-# Analytical defines both the period range and the valid cross-section keys.
+# Prefer cfg$model_variable; a single exact configured candidate is accepted
+# when that column is absent. Analytical defines dates and valid key values.
 build_canonical_total_check <- function(analytical, all_rags, result, cfg,
                                         cross_cols,
                                         schema_metadata = NULL,
@@ -246,6 +258,19 @@ build_canonical_total_check <- function(analytical, all_rags, result, cfg,
     role = "modeled"
   )
   rae_warnings <- effective_rae$warnings %||% character(0)
+  if (nzchar(effective_rae$failure_stage %||% "")) {
+    return(empty_result(
+      "error",
+      effective_rae$reason %||% "Effective RAE could not be validated.",
+      diagnostics = list(
+        rae_failure_stage = effective_rae$failure_stage,
+        rae_failure_reason = effective_rae$reason %||% ""
+      ),
+      stage_counts = effective_rae$stage_counts,
+      applied_filters = effective_rae$applied_filters,
+      warnings = rae_warnings
+    ))
+  }
   if (model_result$conflicting_keys > 0L) {
     rae_warnings <- c(
       rae_warnings,

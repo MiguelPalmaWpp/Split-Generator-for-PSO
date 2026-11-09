@@ -1,3 +1,6 @@
+# Render export readiness, channel issues, file previews, and ROI coverage.
+# Warnings advise review; missing required files or any output failure blocks
+# the ZIP download in the module's final package validation.
 register_export_review <- function(ctx) {
   stopifnot(is.list(ctx), is.environment(ctx$scope))
   evalq({
@@ -59,6 +62,8 @@ register_export_review <- function(ctx) {
       list(count = length(unique(missing)), names = unique(missing))
     })
 
+    # Aggregate channel QA into one stable readiness message without changing
+    # processed results or suppressing review details.
     export_issue_summary <- reactive({
       snap <- export_snapshot()
       summ <- channel_summary()
@@ -353,7 +358,7 @@ register_export_review <- function(ctx) {
                       "Activity, spend and ROI totals with split order per split",
                       dims$activity),
           mk_file_row("code-branch",    "teal",   export_file_names$split_composition,
-                      "Split lineage: components, activity and spend per period",
+                      "When SAP merges exist: components, activity and spend per period",
                       dims$composition),
           div(class = "export-file-group-title",
               icon("gear", class = "icon-blue-sm"), "Metadata"),

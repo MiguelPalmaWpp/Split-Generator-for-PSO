@@ -1,3 +1,5 @@
+# Reconcile modeled Analytical, filtered RAE, and processed splits by exact key.
+# Phoenix and Phoenix Prescott stay distinct; zeros and out-of-range dates matter.
 source("global.R")
 on.exit(shutdown_pso_async(), add = TRUE)
 

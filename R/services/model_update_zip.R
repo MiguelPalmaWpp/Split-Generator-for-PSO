@@ -1,4 +1,6 @@
 # Read and validate the app-generated result package for Model Update.
+# Required historical files come from the ZIP, not separate uploads. Invalid
+# archives fail before their contents can alter current Build-mode state.
 read_model_update_zip <- function(path) {
   if (is.null(path) || !file.exists(path)) stop("Select a results ZIP first.")
   entries <- utils::unzip(path, list = TRUE)$Name
@@ -56,6 +58,7 @@ read_model_update_zip <- function(path) {
 }
 
 # Infer which MainVars column represents the prior model from exact name overlap.
+# Infer a past ID only when mapping evidence points to one unambiguous value.
 infer_previous_update_id <- function(side_mapping, mainvars_mapping) {
   if (is.null(side_mapping) || is.null(mainvars_mapping) ||
       !"MainModelVariableName" %in% names(side_mapping)) return("")
@@ -76,6 +79,7 @@ infer_previous_update_id <- function(side_mapping, mainvars_mapping) {
 }
 
 # Convert imported SAP metadata into channel-level saved-merge records.
+# Recover saved SAP rules per channel for compatible current-model reuse.
 model_update_sap_by_channel <- function(metadata) {
   if (is.null(metadata) || !nrow(metadata)) return(list())
   rows <- metadata[metadata$Type == "Merge", , drop = FALSE]
@@ -141,6 +145,8 @@ model_update_focus_name <- function(x, previous_label, current_label) {
   gsub(paste0("_", previous_label), paste0("_", current_label), out, fixed = TRUE)
 }
 
+# Relabel inherited SAP component and aggregate names for the current update.
+# Channel remapping and unresolved references are handled separately.
 relabel_model_update_sap <- function(sap, previous_label, current_label) {
   lapply(sap, function(merges) lapply(merges, function(merge) {
     merge$merged <- as.list(model_update_focus_name(

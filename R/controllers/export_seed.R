@@ -1,6 +1,10 @@
+# Build Seed For Indices from processed split totals and optional ROI matches.
+# Keep its columns stable even when a channel has no matching ROI value.
 register_export_seed <- function(ctx) {
   stopifnot(is.list(ctx), is.environment(ctx$scope))
   evalq({
+    # Combine modeled activity/spend rows with channel-level ROI metadata for
+    # the file written by Export, using a prepared snapshot when available.
     build_activity_rois <- function(d, res_list, channels_list, gcfg,
                                     snapshot = NULL) {
       format_seed_for_indices <- function(df, roi_cols = character(0)) {
@@ -455,8 +459,9 @@ register_export_seed <- function(ctx) {
               type = "warning", duration = 15)
           }
         }, error = function(e)
-          showNotification(paste("ROI join error:", e$message),
-                           type = "warning", duration = 15))
+          showNotification(pso_public_error(
+            e, "export.roi_join", "ROI values could not be joined. Review the ROI file."
+          ), type = "warning", duration = 15))
       }
       format_seed_for_indices(act_df, seed_roi_cols)
     }

@@ -1,4 +1,6 @@
 # Estimate output dimensions from the prepared export snapshot.
+# Counts are preview hints; actual ZIP contents are validated independently
+# after writing, including optional Split Composition behavior.
 build_export_file_dimensions <- function(export_data, details, analytical,
                                          side_mapping_nonfocus, channels, roi_data) {
   export_data <- export_data %||% list()
@@ -11,7 +13,15 @@ build_export_file_dimensions <- function(export_data, details, analytical,
     if (!is.list(item)) return(0L)
     pre <- as.character((item$pre_act %||% tibble::tibble())$VariableSplit %||% character(0))
     final <- as.character((item$final %||% tibble::tibble())$VariableSplit %||% character(0))
-    all_names <- unique(c(pre, final))
+    pre_for_indices <- as.character(
+      (item$pre_for_indices %||% tibble::tibble())$VariableSplit %||%
+        character(0)
+    )
+    final_for_indices <- as.character(
+      (item$final_for_indices %||% tibble::tibble())$VariableSplit %||%
+        character(0)
+    )
+    all_names <- unique(c(pre, final, pre_for_indices, final_for_indices))
     as.integer(sum(!is.na(all_names) & nzchar(all_names)))
   }, integer(1)))
   composition_rows <- sum(vapply(export_data, function(item) {

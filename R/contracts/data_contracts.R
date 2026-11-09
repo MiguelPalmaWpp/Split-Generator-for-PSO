@@ -1,5 +1,8 @@
-# Lightweight list contracts shared across the app layers.
+# Lightweight list contracts shared across the app layers. Validators return
+# NULL for a valid minimum shape or a readable error for a missing field.
 
+# Check the Setup bundle required by processing; optional upload metadata is
+# deliberately outside this minimum contract.
 validate_data_bundle <- function(data) {
   required <- c("all_rags", "analytical", "dates_df")
   missing <- setdiff(required, names(data %||% list()))
@@ -9,6 +12,7 @@ validate_data_bundle <- function(data) {
   NULL
 }
 
+# Keep the exact Analytical model column explicit in every channel config.
 validate_channel_config <- function(cfg) {
   if (is.null(cfg) || !is.list(cfg)) return("Channel config must be a list.")
   if (!nzchar(as.character(cfg$model_variable %||% ""))) {
@@ -17,6 +21,7 @@ validate_channel_config <- function(cfg) {
   NULL
 }
 
+# Verify the processed RAG exists before downstream diagnostics or export.
 validate_processed_result <- function(result) {
   if (is.null(result) || !is.list(result)) {
     return("Processed result must be a list.")
@@ -27,6 +32,7 @@ validate_processed_result <- function(result) {
   NULL
 }
 
+# Confirm the index exposes channel candidates and its audit/connection maps.
 validate_media_index_result <- function(index) {
   required <- c("channels", "connection_map", "role_map", "summary", "vof_contract")
   missing <- setdiff(required, names(index %||% list()))
@@ -39,6 +45,8 @@ validate_media_index_result <- function(index) {
   NULL
 }
 
+# Package only serializable channel inputs and stale-result signatures. The
+# worker receives this value, never a Shiny session or reactive expression.
 new_process_payload <- function(channel, all_rags, analytical, dates_df, cfg,
                                 cross_cols, start_report_date,
                                 end_report_date, update_label,

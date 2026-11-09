@@ -1,4 +1,6 @@
 # Resolve saved SAP references and derive canonical export totals.
+# Keep component-to-aggregate lineage separate from RAE metric totals so
+# stale saved names can be surfaced without silently changing split values.
 export_split_text <- function(x) trimws(as.character(x))
 
 export_split_key_variants <- function(x) {
@@ -97,6 +99,8 @@ resolve_export_split_name <- function(name, candidates, cfg = list()) {
   if (length(hits) == 1L) hits[[1]] else NA_character_
 }
 
+# Match configured SAP references against actual base/final split names and
+# return unresolved references as issues rather than applying them by guess.
 resolve_export_merge_map <- function(cfg, final_splits, component_splits) {
   merges <- extract_export_merges(cfg)
   final_names <- final_splits$VariableSplit %||% character(0)
@@ -143,6 +147,7 @@ empty_export_metric_totals <- function() {
   )
 }
 
+# Assemble consistent component/final totals for composition and seed outputs.
 build_canonical_export_totals <- function(rae_totals, merge_resolved,
                                           model_metric = "activity") {
   empty_component <- tibble::tibble(

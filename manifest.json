@@ -3137,106 +3137,196 @@
   },
   "files": {
     "app.R": {
-      "checksum": "68f146d17cffb64ff24fc874c8acd873"
+      "checksum": "2266f918055a851356da1efbf321c735"
     },
     "Description": {
       "checksum": "1377a1b264ca03fb1d2ebf16ae3a272c"
     },
     "global.R": {
-      "checksum": "b06c4c9d5ec1ac912c1a1970bf284807"
+      "checksum": "b306dafd533c567519f567e6899ce89f"
     },
     "LICENSE": {
       "checksum": "44283b8f5c9c16e846b09207fd1f411c"
     },
     "R/ARCHITECTURE.md": {
-      "checksum": "0751e8c0417c7bdb48c60136749baf14"
+      "checksum": "cf4ed11fca6d8c318688a5b2609cc690"
     },
     "R/contracts/data_contracts.R": {
-      "checksum": "ae97ad0621d317420945e38c09527bf8"
+      "checksum": "01709feeeab0acd8e37e0d4fb552eba3"
+    },
+    "R/contracts/README.md": {
+      "checksum": "9704a26f32a47b78f6befa31ecebe4ee"
+    },
+    "R/controllers/channels_aliases.R": {
+      "checksum": "38c585fb36f6ef4a13868406af8d05ae"
+    },
+    "R/controllers/channels_audit.R": {
+      "checksum": "7cab15df3e9efa179161aaa99a1d4d1c"
+    },
+    "R/controllers/channels_breaks.R": {
+      "checksum": "083ec22477b273cce75003e5b50485e0"
+    },
+    "R/controllers/channels_cards.R": {
+      "checksum": "ecb06e5042e4d509447532aed899b7db"
+    },
+    "R/controllers/channels_editor.R": {
+      "checksum": "6ff8657260bed63f8bdd04b634da383e"
+    },
+    "R/controllers/channels_manager.R": {
+      "checksum": "9b6b4581f40d458db54e487f4f6ca7fa"
+    },
+    "R/controllers/channels_metadata_import.R": {
+      "checksum": "e2236151988107b9a8a09f4ddbead104"
     },
     "R/controllers/export_rae_metrics.R": {
-      "checksum": "fb097d391fbfb257186800c728dda0f9"
+      "checksum": "e33ffd7e049e5c4437ed1bfe9d93d9a5"
     },
     "R/controllers/export_review.R": {
-      "checksum": "e0d4e1c8a911aac1a00b85cd8e2c327a"
+      "checksum": "4b624f9d55ecd00a8abfb9dcd26b3de7"
     },
     "R/controllers/export_scwa.R": {
-      "checksum": "3be430bc991129cff540c703a154da1b"
+      "checksum": "a29f0a0d38b50c434049a2bd084142cf"
     },
     "R/controllers/export_seed.R": {
-      "checksum": "79372b8590c2ba26f03283afea811e4a"
+      "checksum": "c31988c9393077e2ca0e919ef91473a9"
     },
     "R/controllers/export_split_helpers.R": {
-      "checksum": "3fc6448e58240b1383b9af7cf5f10777"
+      "checksum": "7d0cbda4cffdb1241bcb3d1537e06975"
     },
     "R/controllers/export_split_payload.R": {
-      "checksum": "4120f9b215b5bf8225e7f298268178c3"
+      "checksum": "469bac2a692e63ddc50faf13e7d8ddf6"
+    },
+    "R/controllers/process_async_prep.R": {
+      "checksum": "cb0ecacb165b38efe5d7027fa8f5093b"
+    },
+    "R/controllers/process_async_scheduler.R": {
+      "checksum": "581cc1d178f7191436b493acd5ca8c9b"
+    },
+    "R/controllers/process_diagnostics.R": {
+      "checksum": "919a4e3453b10a771bb9edb14f6206c3"
+    },
+    "R/controllers/process_role_data.R": {
+      "checksum": "25bd4b381c7bd4150164830bc15361f1"
+    },
+    "R/controllers/process_run_batch.R": {
+      "checksum": "63fe9a26ee9c9a16e754d5888ac87f5e"
+    },
+    "R/controllers/process_run_selected.R": {
+      "checksum": "ac116df28d38ea6d8fc58c2df7757736"
+    },
+    "R/controllers/process_sap.R": {
+      "checksum": "2db5d75f8aa5dfd032c5c23bc4d5a5f1"
+    },
+    "R/controllers/README.md": {
+      "checksum": "80711265ef47cb4e9f239911b0a7756f"
+    },
+    "R/controllers/setup_contracts.R": {
+      "checksum": "e668f71966769cea84bbf582d0cf6df8"
+    },
+    "R/controllers/setup_file_intake.R": {
+      "checksum": "62c7713c9f38ee9c11d11ad5d34c12fd"
+    },
+    "R/controllers/setup_media_index_ui.R": {
+      "checksum": "b1bda311cc5e8d58c971299b1412075c"
+    },
+    "R/controllers/setup_model_update.R": {
+      "checksum": "d9e96c96c25cd0b6c00df53ad7a26ef8"
+    },
+    "R/controllers/setup_upload_events.R": {
+      "checksum": "0600b32646ce87218fbd294cb0a5ee57"
+    },
+    "R/controllers/setup_validation_views.R": {
+      "checksum": "50d515cb31b25441ea920c1787bab526"
     },
     "R/mod_channels.R": {
-      "checksum": "ec308a93f3db678c9172580e359c163f"
+      "checksum": "7d7a7ceb93c21d19239452a2cfc9976b"
     },
     "R/mod_export.R": {
-      "checksum": "018d0a14dab5024b2102e0dd87d084e5"
+      "checksum": "05ff4aa4a443403926d117abd5e30171"
     },
     "R/mod_process.R": {
-      "checksum": "12ab1b6856f321a28e353de9d44d7b78"
+      "checksum": "83dd8fa17d7a9077582796cfa10b9f6f"
     },
     "R/mod_setup.R": {
-      "checksum": "a27cbfeec3735672d65341a146e210ce"
+      "checksum": "ec29839b7332a40e82f9e5fbdfa0e2fa"
     },
     "R/services/export_analytical.R": {
-      "checksum": "623bdadcc4c2be5c37302be9a34a62e9"
+      "checksum": "14d3c52f9b9c5a3db16941abc57ba5a1"
     },
     "R/services/export_file_dimensions.R": {
-      "checksum": "4020d63c01f5e8ca440ad81e114a1cda"
+      "checksum": "0edf9c5e05f4087cb9cfa53d6ea3a4f0"
+    },
+    "R/services/export_package.R": {
+      "checksum": "59cbe2e1033799f2a5b044946311e5b0"
     },
     "R/services/export_reconciliation.R": {
-      "checksum": "4f3a89a16f4e213da68c1890bd8ee6d6"
+      "checksum": "e2442e01beb1c0d6578fd569e86e3983"
     },
     "R/services/export_side_mapping.R": {
-      "checksum": "9f2f382e7b1831755029d23b96a5a25c"
+      "checksum": "8b28d30eb2100de3760b8aa3e6f529e5"
     },
     "R/services/export_split_composition.R": {
-      "checksum": "8a22bfdc09478b810d4b5174b1552a28"
+      "checksum": "4ba1788d2394b05262dc84c8364a8af2"
     },
     "R/services/media_variable_index.R": {
-      "checksum": "74346600b40e5ba78a5fb4fa7a39aba2"
+      "checksum": "419f234c2cf22f0fd124a7db44e19e03"
     },
     "R/services/model_update_zip.R": {
-      "checksum": "e121a082d45fefdf1e3f6f4741c14ca3"
+      "checksum": "5cd69c549df8f3ee2d40d9315688f7c0"
+    },
+    "R/services/README.md": {
+      "checksum": "2c7c412a97df326532589205ff422290"
     },
     "R/services/sap.R": {
-      "checksum": "18e69e552a9b1b37a730b0d2b239fbab"
+      "checksum": "7dda34ac8a1d556ecbbaf2ee2601ff14"
     },
     "R/services/splits_metadata.R": {
-      "checksum": "75eb988dcc2bd0451417d73f2221749c"
+      "checksum": "49a8cca612070b7c5fdee3037d58273c"
     },
     "R/services/total_check.R": {
-      "checksum": "55f8d1f33301eece9af95bdb484a88c9"
+      "checksum": "82d9243f76397ff724d4b6b34448f4c1"
     },
     "R/utils/async_processing.R": {
-      "checksum": "a08bcff2bd43ae98e2c2d37891a90c00"
+      "checksum": "bb30f3eaeab773d986728543e3291976"
     },
     "R/utils/functions.R": {
-      "checksum": "a4bb50305eecafdb93c1484eca1151f6"
+      "checksum": "c6b102ce1bf0df3a925a4ae548b9fa7f"
     },
     "R/utils/operation_status.R": {
-      "checksum": "a08c338815c99eba334af82e20f8453c"
+      "checksum": "c69baa2436842bdbfa79bc1a4625beb3"
     },
     "R/utils/performance.R": {
-      "checksum": "a5f838fc6259373bf3d40d8fd6824f27"
+      "checksum": "7f5430e3618ecc7e4c02c901a995e158"
     },
     "R/utils/processing.R": {
-      "checksum": "7768b4d79285ac1a2f3a9dabf0ff2f97"
+      "checksum": "3951292d6bb164c7f3bdc175566300b2"
+    },
+    "R/utils/README.md": {
+      "checksum": "8c7ddec117ea97a54bfe8903f2ceab29"
+    },
+    "R/views/channels_ui.R": {
+      "checksum": "6efc46585260cfab614931ac4b9c8d66"
+    },
+    "R/views/export_ui.R": {
+      "checksum": "f6b322611a2efde766bdf94e5a037b05"
+    },
+    "R/views/process_ui.R": {
+      "checksum": "9ee5e01670c7bbb14bc86acf71ffd044"
+    },
+    "R/views/README.md": {
+      "checksum": "711005f20fc28c3e78a95f0bd58c45a9"
+    },
+    "R/views/setup_ui.R": {
+      "checksum": "2340327afed9f4078fd3411d2465e626"
     },
     "renv.lock": {
       "checksum": "94206f83f35147ed5cd1816954b79ce6"
     },
     "server.R": {
-      "checksum": "d5914c6dbcf11c8bb9d5bee50ca4fc9f"
+      "checksum": "ddc3b6f735f419ec0a2583488d48c986"
     },
     "ui.R": {
-      "checksum": "ea26facafd7ea24cd5d9afb6a2b007fe"
+      "checksum": "9817b396b1db2f7cb8e3c9fffcc4c5fe"
     },
     "www/custom.js": {
       "checksum": "f12ed49b223f4c8a001b820a9b3d089a"

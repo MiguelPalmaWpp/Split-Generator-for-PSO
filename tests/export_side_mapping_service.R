@@ -1,3 +1,5 @@
+# Check Side Model Mapping against final splits and historical non-focus rows.
+# A manifest fallback supplies the mapping when a result has no explicit table.
 library(dplyr)
 
 `%||%` <- function(a, b) if (is.null(a) || length(a) == 0) b else a

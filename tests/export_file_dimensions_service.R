@@ -1,3 +1,5 @@
+# Check Export dimension estimates and that the module uses the extracted builder.
+# The source assertions protect the controller registration and service wiring.
 library(dplyr)
 library(stringr)
 
@@ -23,6 +25,8 @@ stopifnot(
 export_data <- list(ChannelA = list(
   final = tibble::tibble(VariableSplit = c("A", "Merged")),
   pre_act = tibble::tibble(VariableSplit = c("A", "B")),
+  pre_for_indices = tibble::tibble(VariableSplit = c("For_A", "For_B")),
+  final_for_indices = tibble::tibble(VariableSplit = c("For_A", "For_Merged")),
   cfg = list(saved_merges = list(list(
     active = TRUE, new_name = "Merged", merged = c("A", "B")
   )))
@@ -45,7 +49,7 @@ dims <- build_export_file_dimensions(
   channels = list(ChannelA = list(model_variable = "ModelA")), roi_data
 )
 stopifnot(
-  identical(dims$analytical, list(rows = 1L, cols = 9L)),
+  identical(dims$analytical, list(rows = 1L, cols = 12L)),
   identical(dims$side_map, list(rows = 3L, cols = 6L)),
   identical(dims$activity, list(rows = 2L, cols = 8L)),
   identical(dims$composition, list(rows = 2L, cols = 10L)),

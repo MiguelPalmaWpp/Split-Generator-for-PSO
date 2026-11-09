@@ -1,6 +1,6 @@
-# ---
-# server.R
-# ---
+# App-wide wiring. Each session gets independent Setup, Channels, Process,
+# Export, performance cache, and operation-status state. The modules retain
+# their public reactive contracts while global.R owns the worker pool.
 
 server <- function(input, output, session) {
   performance_cache <- new_performance_cache()
@@ -21,6 +21,8 @@ server <- function(input, output, session) {
     performance_cache = performance_cache
   )
 
+  # The toolbar imports metadata in two steps: parse/preview, then apply only
+  # after the analyst confirms the proposed channel changes.
   splits_metadata_pending <- reactiveVal(NULL)
   splits_metadata_status  <- reactiveVal("current")
 
@@ -110,7 +112,9 @@ server <- function(input, output, session) {
       ))
     }, error = function(e) {
       splits_metadata_pending(NULL)
-      showNotification(paste("Splits Metadata import error:", e$message),
+      showNotification(pso_public_error(
+        e, "metadata.import", "Splits Metadata could not be read. Check its format and columns."
+      ),
                        type = "error", duration = 8)
     })
   }, ignoreInit = TRUE)
@@ -131,7 +135,9 @@ server <- function(input, output, session) {
       showNotification("Splits Metadata imported. Review channels, then process when ready.",
                        type = "message", duration = 6)
     }, error = function(e) {
-      showNotification(paste("Splits Metadata apply error:", e$message),
+      showNotification(pso_public_error(
+        e, "metadata.apply", "Splits Metadata could not be applied. No changes were saved."
+      ),
                        type = "error", duration = 8)
     })
   }, ignoreInit = TRUE)

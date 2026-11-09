@@ -1,3 +1,5 @@
+# Check SAP columns, effective granularity, metric labels, and legacy imports.
+# VariableSplit remains the technical key even when displayed columns change.
 library(dplyr)
 library(stringr)
 

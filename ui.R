@@ -1,3 +1,5 @@
+# App shell: shared status overlay, metadata toolbar, and four tab entry
+# points. Tab-specific markup lives in R/views and keeps its module IDs.
 ui <- page_fluid(
   title = APP_TITLE,
   theme   = wpp_theme,

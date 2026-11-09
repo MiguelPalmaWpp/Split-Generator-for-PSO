@@ -1,4 +1,7 @@
+# Process-wide bootstrap: options, packages, explicit source order, shared
+# worker pool, and presentation constants. Session data is created in server.R.
 options(shiny.maxRequestSize = 200 * 1024^2)
+options(shiny.sanitize.errors = getOption("shiny.sanitize.errors", TRUE))
 options(
   pso.async.enabled = getOption("pso.async.enabled", TRUE),
   pso.mirai.workers = getOption("pso.mirai.workers", 2L),
@@ -25,7 +28,8 @@ library(here)
 # Shared null-coalescing helper used by utilities, services and modules.
 `%||%` <- function(a, b) if (is.null(a) || length(a) == 0) b else a
 
-# Source dependencies in a stable order: utilities, contracts, services, modules.
+# Source dependencies in a stable order: utilities, contracts, services, views,
+# controllers, and modules.
 source_files <- function(paths) {
   invisible(lapply(paths, function(path) source(here(path), local = .GlobalEnv)))
 }
@@ -46,7 +50,14 @@ source_files(c(
   "R/services/export_split_composition.R",
   "R/services/export_reconciliation.R",
   "R/services/export_file_dimensions.R",
+  "R/services/export_package.R",
   "R/utils/async_processing.R"
+))
+source_files(c(
+  "R/views/setup_ui.R",
+  "R/views/channels_ui.R",
+  "R/views/process_ui.R",
+  "R/views/export_ui.R"
 ))
 source_files(c(
   "R/controllers/export_split_helpers.R",
@@ -54,7 +65,27 @@ source_files(c(
   "R/controllers/export_split_payload.R",
   "R/controllers/export_review.R",
   "R/controllers/export_seed.R",
-  "R/controllers/export_scwa.R"
+  "R/controllers/export_scwa.R",
+  "R/controllers/setup_contracts.R",
+  "R/controllers/setup_file_intake.R",
+  "R/controllers/setup_upload_events.R",
+  "R/controllers/setup_model_update.R",
+  "R/controllers/setup_media_index_ui.R",
+  "R/controllers/setup_validation_views.R",
+  "R/controllers/channels_audit.R",
+  "R/controllers/channels_cards.R",
+  "R/controllers/channels_editor.R",
+  "R/controllers/channels_aliases.R",
+  "R/controllers/channels_breaks.R",
+  "R/controllers/channels_manager.R",
+  "R/controllers/channels_metadata_import.R",
+  "R/controllers/process_async_prep.R",
+  "R/controllers/process_async_scheduler.R",
+  "R/controllers/process_run_selected.R",
+  "R/controllers/process_run_batch.R",
+  "R/controllers/process_role_data.R",
+  "R/controllers/process_sap.R",
+  "R/controllers/process_diagnostics.R"
 ))
 source_files(c(
   "R/mod_setup.R",

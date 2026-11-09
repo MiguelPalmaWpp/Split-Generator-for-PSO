@@ -1,4 +1,7 @@
 # Build the Media Variable Index from explicit source data and metadata.
+# Input ModelDetails must include raw NONE rows: explicit Details status wins
+# over Analytical fallback, while eligible VOF rows define channel periods.
+# Returns channel candidates plus connection, role, summary, and VOF audits.
 
 build_media_index <- function(main_data, analytical, vof_df, model_details,
                               channels_rois = NULL, cross_cols = "Geography",
@@ -35,7 +38,7 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
     return(NULL)
   }
 
- # Step 1: IN/FIXED variables
+ # Step 1: retain only explicit IN/FIXED variables for modeled VOF rows.
   in_model_vars <- if (!is.null(model_details) &&
                        all(c("Type", "VariableName") %in% names(model_details))) {
     model_details %>%
@@ -52,7 +55,7 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
     vals[!is.na(vals) & nzchar(vals)]
   } else character(0)
 
- # Step 2: validate + filter VOF
+ # Step 2: validate VOF and exclude explicitly non-modeled rows before grouping.
   req_vof  <- c("AnalyticalVariableName", "MainModelVariableName",
                 "MinPeriod", "MaxPeriod")
   miss_vof <- setdiff(req_vof, names(vof_df))
@@ -1082,7 +1085,8 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
     }
   }
 
- # Step 7: time_break_labels
+ # Step 7: group active VOF siblings and label distinct date ranges only.
+ # Multiple geographies within one range do not create another TimeBreak.
   for (nm in names(channels)) {
     if (!identical(channels[[nm]]$source, "vof")) next
     channels[[nm]]$time_break_label <- ""
@@ -1168,7 +1172,8 @@ build_media_index <- function(main_data, analytical, vof_df, model_details,
     }
   }
 
- # Step 8: geo_labels
+ # Step 8: assign geography labels only where a TimeBreak does not already
+ # separate the same sibling channels.
   for (nm in names(channels)) {
     channels[[nm]]$geo_label <- channels[[nm]]$geo_label %||% ""
     channels[[nm]]$vof_geo_group <- channels[[nm]]$vof_geo_group %||% ""

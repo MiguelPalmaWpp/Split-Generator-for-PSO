@@ -1,3 +1,5 @@
+# Verify that the synchronous pipeline and mirai worker return equivalent results.
+# Also exercise selected and batch processing through the Shiny module server.
 source("global.R")
 on.exit(shutdown_pso_async(), add = TRUE)
 

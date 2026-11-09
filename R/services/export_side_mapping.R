@@ -1,4 +1,6 @@
 # Build Side Model Mapping using processed split metadata and the export snapshot.
+# Current modeled mappings and prior non-focus mappings share one output schema;
+# this builder does not mutate channel results or session state.
 build_side_mapping_export_data <- function(res_list, channels_list = list(),
                                            side_mapping_nonfocus = NULL,
                                            export_data = NULL) {

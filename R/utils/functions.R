@@ -2,6 +2,8 @@
 # R/utils/functions.R
 # Shared parsing, metadata, Media Index, and naming rules used by modules.
 # Keep these helpers independent of Shiny session state where possible.
+# Several compatibility helpers remain here; new domain rules should live in
+# focused services once their callers and tests can move together.
 # -----------------------------------------------------------------------
 
 # Ordinal tag
@@ -530,6 +532,8 @@ normalize_model_role_family <- function(x) {
   stringr::str_to_lower(stringr::str_squish(x))
 }
 
+# Only explicit IN/FIXED rows are modelled. Analytical fallback must not
+# reactivate a variable with another explicit ModelDetails type.
 model_details_type_is_modelled <- function(x) {
   type <- stringr::str_to_lower(trimws(as.character(x %||% "")))
   stringr::str_detect(type, "\\b(in|fixed)\\b") &
@@ -556,6 +560,8 @@ infer_metric_role <- function(metric = NULL, variable_names = NULL,
   NA_character_
 }
 
+# Choose Modeled and ForIndices metrics from VOF/Details before considering
+# RAE fallback for a missing companion variable.
 resolve_modeled_for_indices_roles <- function(vof_df, model_details,
                                               modeled_names = NULL,
                                               keyword_dict = MEDIA_KEYWORD_DICT) {
@@ -761,6 +767,8 @@ expand_varname_include_with_spend <- function(all_variable_names,
   unique(c(vi, spend_candidates[compatible]))
 }
 
+# Find compatible opposite-metric RAE candidates only when VOF/Details did
+# not provide a ForIndices pair; keep partial coverage explicit for the audit.
 resolve_rae_for_indices_fallback <- function(all_variable_names,
                                             modeled_variable_names,
                                             modeled_role = NULL,
@@ -1347,6 +1355,8 @@ get_useful_long_values <- function(analytical_varkeys, name_lookup, dim) {
   unique(trimws(rows[[dim]]))
 }
 
+# Restrict longitudinal dimension combinations to those encoded in the
+# channel's Analytical variable names, preserving exact source distinctions.
 filter_to_analytical_varkey_combinations <- function(d, cfg, schema_metadata) {
   if (is.null(d) || nrow(d) == 0 ||
       is.null(cfg) ||

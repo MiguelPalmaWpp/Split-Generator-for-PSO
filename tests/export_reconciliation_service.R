@@ -1,3 +1,5 @@
+# Verify Export resolves only active SAP merges for the modeled metric.
+# Stale references are reported while focus totals retain their canonical scope.
 library(dplyr)
 library(stringr)
 

@@ -1,3 +1,5 @@
+# Verify the Media Variable Index honors explicit ModelDetails IN/NONE status.
+# Analytical presence alone must not restore a VOF variable marked NONE.
 source("global.R")
 on.exit(shutdown_pso_async(), add = TRUE)
 

@@ -1,3 +1,6 @@
+# Calculate effective RAE activity/spend totals for export reconciliation.
+# Reuse the channel's audited filters and period rather than raw unfiltered
+# RAE rows; do not modify the uploaded source table.
 register_export_rae_metrics <- function(ctx) {
   stopifnot(is.list(ctx), is.environment(ctx$scope))
   evalq({

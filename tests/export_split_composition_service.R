@@ -1,3 +1,5 @@
+# Verify Split Composition reports final SAP lineage and modeled-role totals.
+# Historical before-period components must not appear in current composition.
 library(dplyr)
 library(stringr)
 

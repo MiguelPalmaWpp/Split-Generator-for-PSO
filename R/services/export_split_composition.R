@@ -1,4 +1,6 @@
 # Compare original component splits with final SAP aggregates.
+# Return NULL when no effective focus merge lineage exists; Export omits this
+# optional file unless active SAP merges require composition data.
 build_split_composition_data <- function(export_data, channels_list = list(),
                                           channel_labels = list(), roi_data = NULL,
                                           roi_key_cols = character(0)) {

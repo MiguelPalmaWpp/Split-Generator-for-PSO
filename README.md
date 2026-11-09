@@ -1,8 +1,8 @@
 <div align="center">
 
-# Split Generator for PSO
+# Splits Automation Generator App - SAGA
 
-**A Shiny workflow for building, validating, processing, and exporting PSO media split datasets.**
+**A Shiny workflow for building, validating, processing, and exporting Splits for Deep Dives.**
 
 Advanced Analytics Colombia / WPP Media
 
@@ -10,7 +10,7 @@ Advanced Analytics Colombia / WPP Media
 
 ![R](https://img.shields.io/badge/R-4.5.2-276DC3?style=flat-square)
 ![Shiny](https://img.shields.io/badge/Shiny-App-5B9BD5?style=flat-square)
-![PSO](https://img.shields.io/badge/Output-6%20standard%20files-1F8A70?style=flat-square)
+![Output](https://img.shields.io/badge/Output-5%20core%20files%20%2B%20optional%20SAP-1F8A70?style=flat-square)
 ![Status](https://img.shields.io/badge/Workflow-Setup%20%7C%20Channels%20%7C%20Process%20%7C%20Export-6B7280?style=flat-square)
 
 </div>
@@ -19,14 +19,20 @@ Advanced Analytics Colombia / WPP Media
 
 ## Overview
 
-Split Generator for PSO helps analysts transform RAE media data into model-ready split variables for PSO Marketing Mix Modeling. The app keeps the workflow auditable from upload to export: file validation, VOF/MFF channel detection, split order configuration, dimension breaks, saved merges, processing diagnostics, stale result detection, and final ZIP packaging.
+Splits Automation Generator App - SAGA helps analysts transform RAE media data into model-ready Splits for Deep Dives. The app keeps the workflow auditable from upload to export: file validation, VOF/MFF channel detection, split order configuration, dimension breaks, saved merges, processing diagnostics, stale result detection, and final ZIP packaging.
 
 It supports two operating modes:
 
 | Mode | Use it when | Main output behavior |
 | --- | --- | --- |
-| **Model Build** | Building a new PSO model split structure from scratch. | Creates focus and non-focus split columns from the selected reporting period. |
-| **Model Update** | Extending a previous model with a new focus period. | Carries past split history forward and appends the current RAE Datafile as the new focus period. |
+| **Model Build** | Building a new Splits for Deep Dives structure from scratch. | Creates focus and non-focus split columns from the selected reporting period. |
+| **Model Update** | Extending a previous model with a new focus period. This workflow is still in development. | Intended to carry past split history forward and append the current RAE Datafile as the new focus period. |
+
+For implementation details, see [application architecture](R/ARCHITECTURE.md),
+[contracts](R/contracts/README.md), [services](R/services/README.md),
+[controllers](R/controllers/README.md), [views](R/views/README.md),
+[utilities](R/utils/README.md), [regression tests](tests/README.md), and
+[maintenance scripts](scripts/README.md).
 
 ---
 
@@ -36,7 +42,7 @@ It supports two operating modes:
 flowchart LR
     A["1. Setup<br/>Upload files<br/>Validate scope<br/>Build media index"] --> B["2. Channels<br/>Import/manage<br/>Split order<br/>Breaks and config"]
     B --> C["3. Process<br/>Run channels<br/>Review activity/spend<br/>Merge and reprocess"]
-    C --> D["4. Export<br/>Review issues<br/>Download ZIP<br/>6 standard files"]
+    C --> D["4. Export<br/>Review issues<br/>Download ZIP<br/>5 core files + optional composition"]
 
     A -. "data + media index" .-> B
     B -. "channel config" .-> C
@@ -65,7 +71,7 @@ flowchart TB
         VOF["VOF Metadata<br/>.csv"]
         MD["ModelDetails<br/>.csv"]
         ROI["ROIs by Channel<br/>.csv / .xlsx"]
-        HIST["Model Update history<br/>Past splits, side mapping, MainVars"]
+        HIST["Model Update history<br/>Previous results ZIP + MainVars Mapping"]
     end
 
     subgraph Setup["Setup module"]
@@ -77,19 +83,19 @@ flowchart TB
     subgraph Channels["Channels module"]
         MANAGE["Import / Manage Channels"]
         CONFIG["Split order, breaks, merges"]
-        CSV["channel_config.csv"]
+        CSV["Splits Metadata.csv"]
     end
 
     subgraph Process["Process module"]
-        ENGINE["process_channel()"]
-        DIAG["Activity, Spend, Total Check"]
+        ENGINE["process_channel_pipeline(payload)"]
+        DIAG["Modeled, ForIndices, Total Check"]
         MERGES["Merge application"]
         QA["Process QA status"]
     end
 
     subgraph Export["Export module"]
         ISSUES["Export Issues"]
-        ZIP["PSO export ZIP"]
+        ZIP["Splits for Deep Dives ZIP"]
     end
 
     RAE --> VALID
@@ -121,7 +127,7 @@ flowchart TB
 | **RAE Datafile** | `.csv`, `.zip` | Activity and spend source rows. | Formerly called Main Data File. |
 | **Analytical Dataset** | `.RData` | Existing analytical model variables and periods. | Used for validation, total checks, and output extension. |
 | **VOF Metadata** | `.csv` | Preferred channel auto-configuration. | Provides model variable, analytical variable, dates, geography, effect, and channel metadata. |
-| **ModelDetails** | `.csv` | Business filter for model variables. | Rows with `NONE`, including `6. NONE (Low)`, are excluded from import/manage channel lists. |
+| **ModelDetails** | `.csv` | Authority for explicitly listed model variables. | Only `IN` and `FIXED` are active; explicit `NONE` and other non-modeled types cannot be restored by Analytical fallback. |
 | **ROIs by Channel** | `.csv`, `.xlsx` | ROI coverage and channel labels. | Optional for exploration, strongly recommended before final export. |
 
 ### Model Update Files
@@ -176,26 +182,30 @@ stateDiagram-v2
 
 ## VOF, MFF, And Channel Detection
 
-The app prefers VOF metadata. MFF / keyword fallback is used only when a variable is not already covered by VOF.
+The app prefers VOF metadata. MFF / keyword fallback is used only when a
+variable is not already covered by an active VOF channel.
 
 ```mermaid
 flowchart TD
-    A["Candidate model variable"] --> B{"Allowed by ModelDetails?<br/>Type does not contain NONE"}
-    B -- "No" --> X["Excluded from Import / Manage Channels"]
-    B -- "Yes" --> C{"Found in VOF Metadata?"}
-    C -- "Yes, by MainModelVariableName" --> V["Create VOF channel"]
-    C -- "Yes, by AnalyticalVariableName" --> V
-    C -- "No" --> D{"Keyword or MFF fallback available?"}
-    D -- "Yes" --> M["Create MFF / keyword fallback channel"]
-    D -- "No" --> N["Not suggested"]
-    V --> E["Prevent duplicate MFF fallback"]
-    M --> E
+    A["Candidate model variable"] --> B{"VOF row exists?"}
+    B -- "Yes" --> C{"Explicit row in raw ModelDetails?"}
+    C -- "Yes" --> T{"Type is IN or FIXED?"}
+    T -- "No" --> X["Exclude VOF row and channel"]
+    T -- "Yes" --> V["Eligible VOF channel"]
+    C -- "No" --> F{"Analytical fallback matches?"}
+    F -- "Yes" --> V
+    F -- "No" --> N["Not suggested"]
+    B -- "No" --> D{"MFF / keyword candidate?"}
+    D -- "Yes" --> M["Create fallback channel"]
+    D -- "No" --> N
+    V --> E["Do not duplicate as MFF"]
 ```
 
 ### Detection Rules
 
 - VOF rows are matched against ModelDetails using normalized model-variable names.
-- VOF rows can also match when `AnalyticalVariableName` exists in the Analytical Dataset.
+- Analytical may supply a fallback only when the VOF variable has no explicit
+  ModelDetails row. It cannot reactivate a variable marked non-modeled.
 - Fallback channels are not created for variables already claimed by VOF.
 - The channel manager remains filtered by ModelDetails and excludes rows containing `NONE`.
 - Date parsing detects the dominant slash-date format in the VOF vector before parsing ambiguous dates.
@@ -211,8 +221,8 @@ Channels is the configuration workspace. It decides which channels are active an
 
 | Control | Purpose |
 | --- | --- |
-| **Save Config** | Download the current channel configuration as CSV. |
-| **Load Config** | Preview a configuration import before applying it. |
+| **Splits Metadata download** | Download the current channel configuration from the app-wide toolbar. |
+| **Splits Metadata import** | Preview and apply a configuration file from the app-wide toolbar. |
 | **Import / Manage Channels** | Add/remove available channels while respecting ModelDetails scope. |
 | **Save All Split Orders** | Save all current split order settings. |
 | **Search channels** | Filter active channel cards. |
@@ -238,7 +248,7 @@ sequenceDiagram
     participant Parser as Config Parser
     participant State as rv$channels
 
-    Analyst->>UI: Select channel_config.csv
+    Analyst->>UI: Select Splits Metadata CSV
     UI->>Parser: Parse and validate
     Parser-->>UI: Preview counts and skipped rows
     Analyst->>UI: Apply Import
@@ -285,14 +295,14 @@ stateDiagram-v2
 | **Process All** | Runs channels that are pending or stale. |
 | **Reprocess Failed Only** | Retries only failed channels. |
 | **Reprocess Changed** | Runs channels marked `Needs reprocess`. |
-| **Download Config** | Exports the current channel config from the process view. |
+| **Splits Metadata download** | Exports current channel configuration from the app-wide toolbar. |
 
 ### Diagnostics
 
 | Diagnostic | Purpose |
 | --- | --- |
-| **Activity** | Shows generated activity splits and supports merge selection. |
-| **Spend** | Shows spend diagnostics. If spend is missing or unmatched, the UI shows an inline message instead of going blank. |
+| **Modeled** | Opens first and shows the modeled Activity or Spend/Cost metric, KPIs, and SAP actions. |
+| **ForIndices** | Shows the paired metric used for indices when available; it is read-only and follows the modeled period. |
 | **Total Check** | Compares processed output against Analytical expectations. |
 | **Splits Aggregation Plan (SAP)** | Documents active split aggregations and can be downloaded. |
 | **Warnings / Errors** | Captures channel-level failures so the user does not depend only on notifications. |
@@ -301,7 +311,7 @@ stateDiagram-v2
 
 ## Export
 
-Export produces the standard PSO ZIP package. Preflight QA has been removed from the UI; issues are presented only when there is something meaningful to review.
+Export produces the standard Splits for Deep Dives ZIP package. Preflight QA has been removed from the UI; issues are presented only when there is something meaningful to review.
 
 ```mermaid
 flowchart LR
@@ -330,34 +340,37 @@ flowchart LR
 | **Zero splits** | A processed channel produced no split columns. | Check filters, dates, and split order. |
 | **ROI** | ROI file is missing or coverage is incomplete. | Upload or correct ROIs by Channel. |
 
-The app does not hard-block ZIP creation for warnings, but it clearly marks when export is not recommended.
+Review warnings do not hard-block ZIP creation. A missing or failed required
+output does: the app will not download a partial package.
 
 ## Export Package
 
 ```mermaid
 flowchart TB
-    ZIP["pso_export_YYYYMMDD_HHMMSS.zip"] --> A["Model Dataset"]
+    ZIP["deep_dives_splits_YYYYMMDD_HHMMSS.zip"] --> A["Model Dataset"]
     ZIP --> B["Mapping & Seeds"]
     ZIP --> C["Configuration"]
 
-    A --> A1["analytical_splits_extended.csv"]
-    A --> A2["analytical_splits_extended.RData"]
-    B --> B1["side_model_mapping.csv"]
+    A --> A1["Analytical Splits Extended.csv"]
+    A --> A2["Analytical Splits Extended.RData"]
+    B --> B1["Side Model Mapping.csv"]
     B --> B2["Seed For Indices.csv"]
-    B --> B3["split_composition.csv"]
-    C --> C1["channel_config.csv"]
+    B -. "only with SAP merges" .-> B3["Split Composition.csv"]
+    C --> C1["Splits Metadata.csv"]
 ```
 
 | File | Description |
 | --- | --- |
-| `analytical_splits_extended.csv` | Analytical dataset plus appended split columns. |
-| `analytical_splits_extended.RData` | Same dataset as an RData object for the next update cycle. |
-| `side_model_mapping.csv` | Split-to-model mapping with PSO weight structure. |
+| `Analytical Splits Extended.csv` | Analytical dataset plus appended split columns. |
+| `Analytical Splits Extended.RData` | Same dataset as an RData object for the next update cycle. |
+| `Side Model Mapping.csv` | Split-to-model mapping with model weight information. |
 | `Seed For Indices.csv` | Activity, spend, ROI, channel, and split-order seed data. |
-| `split_composition.csv` | Split lineage and merge composition. |
-| `channel_config.csv` | Reusable channel configuration, including split order, breaks, merges, and dates. |
+| `Split Composition.csv` | Optional: component and aggregate lineage when active SAP merges exist. |
+| `Splits Metadata.csv` | Reusable channel configuration, including split order, breaks, merges, and dates. |
 
-No `qa_report.csv` is generated.
+The ZIP has five core files. Split Composition is omitted when there are no
+active SAP merges; if merges are active, its absence blocks the download. No
+`qa_report.csv` is generated.
 
 ---
 
@@ -369,20 +382,20 @@ flowchart LR
         B1["Base files"] --> B2["Choose reporting period"]
         B2 --> B3["Configure channels"]
         B3 --> B4["Process current model"]
-        B4 --> B5["Export six files"]
+        B4 --> B5["Export package"]
     end
 
     subgraph Update["Model Update"]
         U1["Base files + past outputs"] --> U2["All Period fixed"]
         U2 --> U3["Carry previous history"]
         U3 --> U4["Process current focus"]
-        U4 --> U5["Export updated six files"]
+        U4 --> U5["Export updated package"]
     end
 ```
 
 ### Model Build
 
-Use Model Build when creating a new PSO model split structure from scratch.
+Use Model Build when creating a new Splits for Deep Dives structure from scratch.
 
 1. Upload base files.
 2. Select Reporting Period: Last 52w, Last 13w, All Period, or Custom.
@@ -390,11 +403,13 @@ Use Model Build when creating a new PSO model split structure from scratch.
 4. Import/manage channels.
 5. Configure split order, breaks, and merges.
 6. Process channels.
-7. Export the six-file ZIP.
+7. Export the ZIP with five core files and optional Split Composition.
 
 ### Model Update
 
 Use Model Update when extending a previous model with a new focus period.
+The tab is marked **In development** because the workflow still needs
+validation against representative previous results and current model files.
 
 1. Switch Setup to Model Update.
 2. Upload base files.
@@ -402,14 +417,14 @@ Use Model Update when extending a previous model with a new focus period.
 4. Confirm the detected Previous Update ID, then enter Current Update ID and label.
 5. Review update processing status.
 6. Configure and process the current focus period.
-7. Export the updated six-file ZIP.
+7. Export the updated package after validating the generated results.
 
 ---
 
 ## Repository Structure
 
 ```text
-Split-Generator-for-PSO/
+./
 |-- global.R                  # Libraries, constants, theme, module sourcing
 |-- ui.R                      # Main app shell and navigation
 |-- server.R                  # Module wiring
@@ -421,9 +436,16 @@ Split-Generator-for-PSO/
 |   |-- mod_channels.R        # Channels tab: add/remove/config/breaks/import
 |   |-- mod_process.R         # Process tab: processing, diagnostics, merges
 |   |-- mod_export.R          # Export tab: package preview and ZIP writer
+|   |-- contracts/           # Shared list constructors and validators
+|   |-- services/            # Data transformations and export builders
+|   |-- controllers/         # Shiny observers and renderers by responsibility
+|   |-- views/               # Module UI builders
 |   |-- utils/
-|       |-- functions.R       # Media index, date parsing, config helpers
+|       |-- functions.R       # Shared data and configuration helpers
 |       |-- processing.R      # Core processing helpers and merge application
+|       |-- async_processing.R # Worker bootstrap and pure channel pipeline
+|-- tests/                   # Executable R regression scripts
+|-- .github/workflows/       # Automated R checks
 |-- www/
 |   |-- styles.css            # WPP visual styling
 |   |-- custom.js             # Browser helpers for Shiny inputs/DataTables
@@ -481,7 +503,7 @@ This repository includes a generated `manifest.json` for source-based deployment
 
 | Field | Value |
 | --- | --- |
-| Repository | `MiguelPalmaWpp/Split-Generator-for-PSO` |
+| Repository | This repository; its existing GitHub slug does not need to change for the app rename. |
 | Branch | The branch you want to publish, usually `main`. |
 | Primary file | `app.R` (the repository includes a Shiny entry-point wrapper). |
 | Auto publish on push | Enable for stable branches; disable while testing heavy changes. |
@@ -523,53 +545,39 @@ git diff --check
 Rscript -e "files <- c('global.R','ui.R','server.R', list.files('R', pattern='\\.R$', recursive=TRUE, full.names=TRUE)); for (f in files) { invisible(parse(f)); cat('OK', f, '\n') }"
 ```
 
-Regression areas to test after changes:
+The automated checks in `.github/workflows/r-checks.yml` restore `renv`, parse
+the app, and run every `tests/*.R` script. Run the same checks locally before
+publishing; browser-level upload-to-export coverage remains a separate task.
+Unexpected error details are logged on the server. The UI shows safe summaries
+by default. Local debugging options are documented in
+[`R/utils/operation_status.R`](R/utils/operation_status.R); keep production
+logs access-restricted.
 
 | Area | Manual checks |
 | --- | --- |
 | Setup | Batch upload, remove/reload cards, missing ROIs, validation table. |
 | Channels | VOF import, MFF fallback, config preview/apply, overwrite existing channels, remove/add state. |
 | Process | Spend tab, Total Check, failed channels, stale channels, reprocess changed. |
-| Export | Warnings, stale/failed/pending states, ZIP contains exactly six files. |
+| Export | Warnings, stale/failed/pending states, five core files, optional Split Composition. |
 
-Performance diagnostics can be enabled before starting the app:
-
-```r
-options(pso.profile = TRUE)
-shiny::runApp()
-```
+Performance diagnostics can be enabled before starting the app; see
+[`R/utils/performance.R`](R/utils/performance.R) for the current option names.
 
 Derived data is cached in memory per session for 30 minutes, with a default
-limit of 256 MB. Development runs can override these limits with
-`options(pso.cache.max_size = ..., pso.cache.max_age = ...)` before startup.
+limit of 256 MB. Development runs can override these limits before startup;
+see [`R/utils/performance.R`](R/utils/performance.R).
 
 Channel processing uses two global `mirai` workers per R application process.
-The worker count and queue budget can be configured before startup:
-
-```r
-options(
-  pso.async.enabled = TRUE,
-  pso.mirai.workers = 2L,
-  pso.mirai.queue_memory_mb = 512,
-  pso.mirai.channel_timeout_ms = 15 * 60 * 1000
-)
-```
+The worker count, queue budget, and timeout can be configured before startup;
+see [`global.R`](global.R) and
+[`R/utils/async_processing.R`](R/utils/async_processing.R).
 
 On Posit Connect, these workers are created for every running R process. Include
 them when sizing process limits and memory. If worker initialization fails, the
 app reports the condition and keeps the existing synchronous processing path.
 
-Verify the asynchronous runtime independently with:
-
-```r
-source("R/utils/async_processing.R")
-options(pso.async.enabled = TRUE)
-ensure_pso_async(getwd())
-mirai::status(.compute = "pso_process")
-shutdown_pso_async()
-```
-
-The expected status reports two connections. Always stop and restart the R
+Verify worker availability with `mirai::status()` in a running app process;
+the expected status reports two connections. Always stop and restart the R
 process after installing or updating worker dependencies; refreshing the browser
 does not restart `mirai` daemons.
 
@@ -585,7 +593,7 @@ does not restart `mirai` daemons.
 | Export reports stale channels | Channel config changed after processing. | Use `Reprocess Changed`. |
 | Export reports pending channels | Active channels have not been processed. | Use `Process All` or `Process Selected`. |
 | Export reports ROI issues | ROIs file missing or incomplete. | Upload or correct ROIs by Channel before final export. |
-| Background workers unavailable | The app process started before `mirai`, `nanonext` or `promises` was restored, or worker bootstrap failed. | Run `renv::restore()`, restart R completely and verify `mirai::status(.compute = "pso_process")`. |
+| Background workers unavailable | The app process started before `mirai`, `nanonext` or `promises` was restored, or worker bootstrap failed. | Run `renv::restore()`, restart R completely and check `mirai::status()` in the app process. |
 
 ---
 

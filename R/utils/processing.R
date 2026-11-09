@@ -3,6 +3,7 @@
 # Shared split construction, role manifests, and effective RAE filters.
 # -----------------------------------------------------------------------
 
+# Drop numeric split columns whose entire total is zero after filtering.
 keep_nonzero_cols <- function(df) {
   df   <- as.data.frame(df)
   keep <- vapply(df, function(col) {
@@ -55,6 +56,7 @@ apply_dimension_breaks <- function(d, dimension_breaks, channel_name = NULL) {
   d
 }
 
+# Rename configured dimensions before constructing technical split names.
 apply_dimension_aliases <- function(d, dimension_aliases) {
   if (!length(dimension_aliases)) return(d)
   for (als in dimension_aliases) {
@@ -68,6 +70,7 @@ apply_dimension_aliases <- function(d, dimension_aliases) {
   d
 }
 
+# Compose VariableSplit from effective dimensions, preserving Unknown parts.
 build_split_name_from_columns <- function(d, split_cols, fallback_col = "VariableName") {
   split_cols_present <- intersect(split_cols, names(d))
   if (!length(split_cols_present) && fallback_col %in% names(d))
@@ -255,6 +258,8 @@ build_side_mapping_from_manifest <- function(split_manifest, model_variable) {
     )
 }
 
+# Resolve exact source variables for modeled and ForIndices roles before RAE
+# filtering; role separation also drives the split manifest and Total Check.
 resolve_role_rae_variables <- function(all_variable_names, cfg) {
   all_vars <- unique(trimws(as.character(all_variable_names %||% character(0))))
   all_vars <- all_vars[!is.na(all_vars) & nzchar(all_vars)]
@@ -506,6 +511,8 @@ filter_effective_channel_rae <- function(all_rags, cfg,
   finish(d, date_data)
 }
 
+# Record each generated split's role, source, and effective granularity so SAP
+# and export never need to infer those fields from VariableSplit text.
 build_role_split_manifest <- function(d, cfg, update_label,
                                       start_date, end_date) {
   empty <- tibble::tibble(
@@ -730,9 +737,8 @@ splits_summary <- function(df, type = "activity") {
   result
 }
 
-# apply_single_merge
-# New function added to support interactive merging in mod_process.
-# Merges selected splits in the RAG and updates all diagnostic structures.
+# Aggregate selected VariableSplit columns and update diagnostics/manifest so
+# subsequent SAP steps and Export see the same final split lineage.
 apply_single_merge <- function(res, merge_entry, cfg, notify = TRUE) {
   new_name        <- merge_entry$new_name
   selected_splits <- unlist(merge_entry$merged)

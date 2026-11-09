@@ -1,4 +1,6 @@
 # Build Analytical Extended from source columns and prepared channel snapshots.
+# Include original pre-SAP components and final aggregates once each; do not
+# emit intermediate aggregation levels. CSV and RData use this same result.
 build_analytical_extended_data <- function(d, res_list, channels_list, gcfg,
                                            schema_metadata = NULL,
                                            export_data = NULL) {
@@ -53,6 +55,8 @@ build_analytical_extended_data <- function(d, res_list, channels_list, gcfg,
   result <- as.data.frame(d$analytical) %>%
     dplyr::select(dplyr::all_of(keep_an_cols))
 
+  # Join one channel's split values on effective cross-sections and Period;
+  # resolve name collisions without overwriting Analytical source columns.
   join_split_columns <- function(target, rag, split_cols, channel_name) {
     if (is.null(rag)) return(target)
     rag <- as.data.frame(rag)
@@ -80,16 +84,36 @@ build_analytical_extended_data <- function(d, res_list, channels_list, gcfg,
     channel_snapshot <- export_data[[channel_name]] %||% list()
     final_cols <- channel_snapshot$final$VariableSplit %||% character(0)
     pre_cols <- channel_snapshot$pre_act$VariableSplit %||% character(0)
+    final_for_indices <- channel_snapshot$final_for_indices$VariableSplit %||%
+      character(0)
+    pre_for_indices <- channel_snapshot$pre_for_indices$VariableSplit %||%
+      character(0)
     final_cols <- unique(as.character(final_cols))
     pre_cols <- unique(as.character(pre_cols))
+    final_for_indices <- unique(as.character(final_for_indices))
+    pre_for_indices <- unique(as.character(pre_for_indices))
     final_cols <- final_cols[!is.na(final_cols) & nzchar(final_cols)]
     pre_cols <- pre_cols[!is.na(pre_cols) & nzchar(pre_cols)]
+    final_for_indices <- final_for_indices[
+      !is.na(final_for_indices) & nzchar(final_for_indices)
+    ]
+    pre_for_indices <- pre_for_indices[
+      !is.na(pre_for_indices) & nzchar(pre_for_indices)
+    ]
     if (!length(pre_cols)) pre_cols <- final_cols
 
     clean_rag <- channel_snapshot$clean$rag %||% result_item$rag
     result <- join_split_columns(result, clean_rag, pre_cols, channel_name)
     result <- join_split_columns(
       result, result_item$rag, setdiff(final_cols, pre_cols), channel_name
+    )
+    if (!length(pre_for_indices)) pre_for_indices <- final_for_indices
+    result <- join_split_columns(
+      result, clean_rag, pre_for_indices, channel_name
+    )
+    result <- join_split_columns(
+      result, result_item$rag,
+      setdiff(final_for_indices, pre_for_indices), channel_name
     )
   }
 

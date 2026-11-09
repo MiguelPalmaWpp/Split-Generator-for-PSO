@@ -1,5 +1,15 @@
 # Shared per-session operation status controller for uploads, processing, and
 # export. It sends UI updates and tracks progress without owning app data.
+# Log unexpected details server-side; expose only a stable public message in
+# production, with raw details available through the local debug option.
+pso_public_error <- function(error, context, public_message) {
+  detail <- if (inherits(error, "condition")) conditionMessage(error) else as.character(error)
+  base::message("[pso.error] ", context, ": ", detail)
+  if (isTRUE(getOption("pso.debug.errors", FALSE))) detail else public_message
+}
+
+# One controller is created per Shiny session. The client receives state via
+# operationStatus custom messages; no worker or global store owns this modal.
 new_operation_status <- function(session) {
   or_default <- function(value, fallback) if (is.null(value)) fallback else value
   state <- new.env(parent = emptyenv())
@@ -79,11 +89,16 @@ new_operation_status <- function(session) {
     },
     fail = function(message, technical_detail = NULL, items = NULL) {
       if (!is.null(items)) state$items <- items
+      detail <- or_default(technical_detail, "")
+      if (nzchar(detail) && !isTRUE(getOption("pso.debug.errors", FALSE))) {
+        base::message("[pso.operation] ", or_default(state$id, "operation"), ": ", detail)
+        detail <- ""
+      }
       send(list(
         action = "finish", id = or_default(state$id, "operation"),
         status = "Failed", progress = 1,
         summary = or_default(message, "Operation failed"),
-        technicalDetail = or_default(technical_detail, ""),
+        technicalDetail = detail,
         items = state$items, counts = state$counts, elapsed = elapsed(), autoCloseMs = 0L
       ))
       state$busy <- FALSE
@@ -101,6 +116,7 @@ new_operation_status <- function(session) {
   )
 }
 
+# Standardize one file/channel row for the operation modal.
 operation_item <- function(name, status = "Pending", detail = "") {
   list(name = as.character(name), status = as.character(status), detail = as.character(detail))
 }

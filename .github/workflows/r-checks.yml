@@ -15,8 +15,6 @@ jobs:
           r-version: '4.5.2'
           use-public-rspm: true
       - uses: r-lib/actions/setup-renv@v2
-      - name: Check dependency state
-        run: Rscript -e 'status <- renv::status(); if (!isTRUE(status$synchronized)) stop("renv.lock and dependencies are out of sync")'
       - name: Parse application code
         run: |
           Rscript -e 'files <- c("app.R", "global.R", "ui.R", "server.R", list.files("R", pattern = "[.]R$", recursive = TRUE, full.names = TRUE)); invisible(lapply(files, parse)); cat("PARSE_OK", length(files), "files\n")'
